@@ -30,6 +30,8 @@ from api.services.lifecycle_monitor import (
     touch_task_heartbeat,
     TASK_TIMEOUTS,
     _auto_resolve_completed,
+    _auto_resolve_stale_info,
+    INFO_ALERT_RETENTION_DAYS,
     check_all_health,
 )
 
@@ -43,6 +45,11 @@ ALTER TABLE videos ADD COLUMN progress_phase TEXT;
 ALTER TABLE videos ADD COLUMN generation_finished_at TIMESTAMP;
 ALTER TABLE videos ADD COLUMN scheduled_upload_at TEXT;
 ALTER TABLE videos ADD COLUMN error_message TEXT DEFAULT '';
+ALTER TABLE videos ADD COLUMN manual_altered_content_done INTEGER DEFAULT 0;
+-- Columna que usa _auto_resolve_completed (longform_visibility_mismatch);
+-- sin ella el auto-resolve abortaba en los tests y no resolvía nada.
+-- (privacy_status ya viene en schema.sql.)
+ALTER TABLE videos ADD COLUMN yt_visibility TEXT;
 
 CREATE TABLE IF NOT EXISTS channels (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,7 +80,8 @@ CREATE TABLE IF NOT EXISTS shorts (
     scheduled_date  TEXT,
     created_at      TEXT DEFAULT (datetime('now')),
     error_message   TEXT,
-    file_path       TEXT
+    file_path       TEXT,
+    manual_altered_content_done INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS platform_videos (
@@ -372,6 +380,85 @@ def test_awaiting_upload_stuck_alert_auto_resolves_after_video_leaves_active_sta
             "WHERE alert_type = 'awaiting_upload_stuck' AND entity_id = 1"
         ).fetchone()
     assert resolved["resolved"] == 1
+
+
+# ═══════════════════════════════════════════════════════════════
+# Auto-resolución: marcado IA y retención de info
+# ═══════════════════════════════════════════════════════════════
+
+def test_altered_content_mark_failed_resolves_once_video_marked(tmp_path):
+    db = _build_db(tmp_path)
+    _insert_video(db, vid=7, status='published', finished='2026-01-01 00:00:00')
+    with db._connect() as conn:
+        conn.execute(
+            "INSERT INTO pipeline_alerts(entity_type, entity_id, channel_id, alert_type, severity, title) "
+            "VALUES ('video', 7, 1, 'altered_content_mark_failed', 'warning', 'marca IA')"
+        )
+        conn.commit()
+
+    # Sin marcar → sigue abierta
+    assert _auto_resolve_completed(db) == 0
+
+    with db._connect() as conn:
+        conn.execute("UPDATE videos SET manual_altered_content_done = 1 WHERE id = 7")
+        conn.commit()
+
+    assert _auto_resolve_completed(db) == 1
+    with db._connect() as conn:
+        row = conn.execute(
+            "SELECT resolved FROM pipeline_alerts WHERE alert_type='altered_content_mark_failed'"
+        ).fetchone()
+    assert row["resolved"] == 1
+
+
+def test_altered_content_mark_failed_resolves_when_video_deleted_on_yt(tmp_path):
+    db = _build_db(tmp_path)
+    _insert_video(db, vid=8, status='deleted_on_yt', finished='2026-01-01 00:00:00')
+    with db._connect() as conn:
+        conn.execute(
+            "INSERT INTO pipeline_alerts(entity_type, entity_id, channel_id, alert_type, severity, title) "
+            "VALUES ('video', 8, 1, 'altered_content_mark_failed', 'warning', 'marca IA')"
+        )
+        conn.commit()
+
+    assert _auto_resolve_completed(db) == 1
+
+
+def test_stale_info_alerts_are_retired_after_retention(tmp_path):
+    db = _build_db(tmp_path)
+    with db._connect() as conn:
+        # Info diagnóstica antigua → debe retirarse
+        conn.execute(
+            "INSERT INTO pipeline_alerts(entity_type, entity_id, alert_type, severity, title, created_at) "
+            "VALUES ('video', 1, 'recovery_checkpoint_96h', 'info', 'cp', datetime('now', '-30 days'))"
+        )
+        conn.execute(
+            "INSERT INTO pipeline_alerts(entity_type, entity_id, alert_type, severity, title, created_at) "
+            "VALUES ('video', 2, 'editorial_review_success', 'info', 'ok', datetime('now', '-30 days'))"
+        )
+        # Info reciente → se conserva
+        conn.execute(
+            "INSERT INTO pipeline_alerts(entity_type, entity_id, alert_type, severity, title, created_at) "
+            "VALUES ('system', 0, 'ia_mark_health_ok', 'info', 'ok', datetime('now', '-1 days'))"
+        )
+        # Warning antiguo → NUNCA se toca
+        conn.execute(
+            "INSERT INTO pipeline_alerts(entity_type, entity_id, alert_type, severity, title, created_at) "
+            "VALUES ('video', 3, 'phase_nonfatal', 'warning', 'w', datetime('now', '-30 days'))"
+        )
+        conn.commit()
+
+    assert INFO_ALERT_RETENTION_DAYS == 7
+    assert _auto_resolve_stale_info(db) == 2
+    with db._connect() as conn:
+        rows = {
+            r["alert_type"]: r["resolved"]
+            for r in conn.execute("SELECT alert_type, resolved FROM pipeline_alerts").fetchall()
+        }
+    assert rows["recovery_checkpoint_96h"] == 1
+    assert rows["editorial_review_success"] == 1
+    assert rows["ia_mark_health_ok"] == 0
+    assert rows["phase_nonfatal"] == 0
 
 
 def test_quota_recovery_timeout_covers_sleep_interval():

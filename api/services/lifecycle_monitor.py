@@ -79,6 +79,17 @@ SHORT_READY_STUCK_HOURS = 24
 CONTENT_SAFETY_REJECTIONS = 3       # fallos de script "sin contenido" /24h
 CRITICAL_REVIEW_ALERTS = {"review_visibility_mismatch", "review_exact_duplicate"}
 
+# ── Retención de alertas info diagnósticas ─────────────────────
+# Los checkpoints de recuperación, las revisiones editoriales OK y el heartbeat
+# de marcado IA son informativos y de alta frecuencia; sin retención se acumulan
+# sin fin en el panel. Se retiran solos pasados N días.
+INFO_ALERT_RETENTION_DAYS = 7
+INFO_ALERT_RETENTION_TYPES = (
+    "recovery_checkpoint_",
+    "editorial_review_success",
+    "ia_mark_health_ok",
+)
+
 # ── UTC timestamp helper ──────────────────────────────────────
 def _utcnow():
     """Return current UTC datetime as naive (consistent with SQLite CURRENT_TIMESTAMP)."""
@@ -339,6 +350,7 @@ def check_all_health(db) -> dict:
     # ── Check 6: Auto-resolve alerts for completed entities ──
     resolved += _auto_resolve_completed(db)
     resolved += _auto_resolve_recovery_checkpoints(db)
+    resolved += _auto_resolve_stale_info(db)
 
     # ── Check 7: Platform auth/token failures (Facebook, Rumble) ──
     created += _check_platform_auth_errors(db)
@@ -421,6 +433,39 @@ def _auto_resolve_recovery_checkpoints(db) -> int:
                 conn.commit()
     except Exception as exc:
         logger.warning("Recovery checkpoint auto-resolve failed: %s", exc)
+    return resolved
+
+
+def _auto_resolve_stale_info(db) -> int:
+    """Retira alertas info diagnósticas antiguas para que no se acumulen.
+
+    Solo afecta a tipos informativos de alta frecuencia (checkpoints de
+    recuperación, revisiones editoriales OK, heartbeat de marcado IA). Nunca
+    toca alertas critical/warning ni tipos de info accionables.
+    """
+    resolved = 0
+    try:
+        like_clause = " OR ".join(
+            "alert_type LIKE ?" for _ in INFO_ALERT_RETENTION_TYPES
+        )
+        params = [f"{t}%" for t in INFO_ALERT_RETENTION_TYPES]
+        params.append(f"-{INFO_ALERT_RETENTION_DAYS} days")
+        with db._connect() as conn:
+            cur = conn.execute(
+                f"""UPDATE pipeline_alerts
+                    SET resolved = 1, resolved_at = datetime('now'), acknowledged = 1,
+                        message = COALESCE(message, '') ||
+                          ' [Auto-resuelto: retención de alertas info]'
+                    WHERE resolved = 0 AND severity = 'info'
+                      AND ({like_clause})
+                      AND created_at < datetime('now', ?)""",
+                params,
+            )
+            resolved = cur.rowcount
+            if resolved:
+                conn.commit()
+    except Exception as exc:
+        logger.warning("Stale info auto-resolve failed: %s", exc)
     return resolved
 
 
@@ -1013,6 +1058,50 @@ def _auto_resolve_completed(db) -> int:
                     """UPDATE pipeline_alerts
                        SET resolved = 1, resolved_at = datetime('now'),
                            message = message || ' [Auto-resolved: video published]'
+                       WHERE id = ?""",
+                    (alert["id"],),
+                )
+                resolved += 1
+
+            # Resolve auto-mark IA failures once the video/short is finally
+            # marked (or the video no longer exists on YouTube, making the mark
+            # moot). Without this the warning lingers after the backfill fixes it.
+            alerts = conn.execute(
+                """SELECT pa.id
+                   FROM pipeline_alerts pa
+                   JOIN videos v ON v.id = pa.entity_id AND pa.entity_type = 'video'
+                   WHERE pa.resolved = 0
+                     AND pa.alert_type = 'altered_content_mark_failed'
+                     AND (COALESCE(v.manual_altered_content_done, 0) = 1
+                          OR v.status IN ('deleted_on_yt', 'discarded', 'removed')
+                          OR lower(COALESCE(v.yt_visibility, '')) IN ('removed', 'unavailable'))"""
+            ).fetchall()
+            for alert in alerts:
+                conn.execute(
+                    """UPDATE pipeline_alerts
+                       SET resolved = 1, resolved_at = datetime('now'), acknowledged = 1,
+                           message = COALESCE(message, '') ||
+                             ' [Auto-resuelto: marcado IA realizado o vídeo ya no en YouTube]'
+                       WHERE id = ?""",
+                    (alert["id"],),
+                )
+                resolved += 1
+
+            alerts = conn.execute(
+                """SELECT pa.id
+                   FROM pipeline_alerts pa
+                   JOIN shorts s ON s.id = pa.entity_id AND pa.entity_type = 'short'
+                   WHERE pa.resolved = 0
+                     AND pa.alert_type = 'altered_content_mark_failed'
+                     AND (COALESCE(s.manual_altered_content_done, 0) = 1
+                          OR s.status IN ('deleted_on_yt', 'discarded'))"""
+            ).fetchall()
+            for alert in alerts:
+                conn.execute(
+                    """UPDATE pipeline_alerts
+                       SET resolved = 1, resolved_at = datetime('now'), acknowledged = 1,
+                           message = COALESCE(message, '') ||
+                             ' [Auto-resuelto: marcado IA realizado o short ya no en YouTube]'
                        WHERE id = ?""",
                     (alert["id"],),
                 )
