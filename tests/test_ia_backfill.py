@@ -23,6 +23,15 @@ def test_in_window_boundaries():
     assert m.in_window(datetime(2026, 9, 18, 3, 0)) is False
 
 
+def test_channel_sequence_wraps_around():
+    assert m.channel_sequence("canal2") == ["canal2", "canal3", "canal4", "canal5"]
+    # Si quedó en canal5, debe volver a canal2 (antes quedaba starvado).
+    assert m.channel_sequence("canal5") == ["canal5", "canal2", "canal3", "canal4"]
+    assert m.channel_sequence("canal4") == ["canal4", "canal5", "canal2", "canal3"]
+    assert m.channel_sequence(None) == list(m.CHANNEL_ORDER)
+    assert m.channel_sequence("desconocido") == list(m.CHANNEL_ORDER)
+
+
 def _make_db(path: Path) -> None:
     conn = sqlite3.connect(str(path))
     conn.executescript("""
