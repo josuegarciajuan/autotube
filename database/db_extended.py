@@ -7222,6 +7222,38 @@ class ExtendedDatabase(Database):
             for r in shorts_eng_rows:
                 shorts_eng_data[r["days_ago"]] = r["engagement"] or 0
 
+            # ── Embudo de alcance (Reporting API, v60): impresiones + CTR ──
+            sparkline_impressions: list = []
+            sparkline_ctr: list = []
+            reach_where = "AND channel_id = ?" if channel_id else ""
+            reach_spark_rows = conn.execute(
+                f"""SELECT date,
+                           SUM(impressions) AS imp,
+                           SUM(impressions * impressions_ctr / 100.0) AS clicks
+                    FROM video_reach_daily
+                    WHERE date >= date('now', '-8 days') {reach_where}
+                    GROUP BY date ORDER BY date""",
+                ch_params,
+            ).fetchall()
+            reach_by_date = {
+                r["date"]: (int(r["imp"] or 0), float(r["clicks"] or 0))
+                for r in reach_spark_rows
+            }
+            _now_utc = datetime.now(_dt_timezone.utc)
+
+            reach_tot = conn.execute(
+                f"""SELECT COALESCE(SUM(impressions), 0) AS imp,
+                           COALESCE(SUM(impressions * impressions_ctr / 100.0), 0) AS clicks
+                    FROM video_reach_daily
+                    WHERE date >= date('now', '-30 days') {reach_where}""",
+                ch_params,
+            ).fetchone()
+            total_impressions = int(reach_tot["imp"] or 0)
+            reach_ctr = (
+                round(float(reach_tot["clicks"] or 0) / total_impressions * 100, 2)
+                if total_impressions else 0.0
+            )
+
             for days_ago in range(7, -1, -1):
                 sd = spark_data.get(days_ago, {})
                 sparkline_subscribers.append(sd.get("subs", 0))
@@ -7232,6 +7264,10 @@ class ExtendedDatabase(Database):
                 sparkline_watch_hours.append(
                     round(sd.get("watch_minutes", 0) / 60.0, 1)
                 )
+                _reach_day = (_now_utc - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+                _imp, _clk = reach_by_date.get(_reach_day, (0, 0))
+                sparkline_impressions.append(_imp)
+                sparkline_ctr.append(round(_clk / _imp * 100, 2) if _imp else 0)
 
             # ── Helper: build action history from timestamps ──
             def _build_action_history(row_dict: dict) -> list:
@@ -7438,10 +7474,22 @@ class ExtendedDatabase(Database):
                     "value": total_watch_hours,
                     "delta": _delta_pct(total_watch_hours, total_watch_hours_prev),
                 },
+                # Embudo de alcance (Reporting API reach): impresiones de
+                # miniatura 30d y su CTR. Alimentan los signos vitales del panel.
+                "impressions": {
+                    "value": total_impressions,
+                    "delta": None,
+                },
+                "ctr": {
+                    "value": reach_ctr,
+                    "delta": None,
+                },
                 "sparkline_subscribers": sparkline_subscribers,
                 "sparkline_views": sparkline_views,
                 "sparkline_engagement": sparkline_engagement,
                 "sparkline_watch_hours": sparkline_watch_hours,
+                "sparkline_impressions": sparkline_impressions,
+                "sparkline_ctr": sparkline_ctr,
             },
             "channels": channels_data,
             "pipeline": [dict(r) for r in pipeline],
@@ -7603,6 +7651,27 @@ class ExtendedDatabase(Database):
         ).fetchall()
         agg_map = {r["channel_id"]: dict(r) for r in agg_rows}
 
+        # ── v60: embudo de alcance real (Reporting API reach) ──
+        # Es la fuente fiable de impresiones orgánicas + CTR (la Analytics API no
+        # las expone). Si hay datos de embudo, mandan sobre el snapshot.
+        reach_map: dict[int, dict] = {}
+        try:
+            reach_rows = conn.execute(
+                f"""SELECT channel_id,
+                           COALESCE(SUM(impressions), 0) AS total_imp,
+                           COALESCE(SUM(impressions * impressions_ctr / 100.0), 0) AS clicks,
+                           ROUND(AVG(CASE WHEN retention_pct > 0 THEN retention_pct END), 2) AS avg_ret,
+                           MAX(fetched_at) AS last_fetch
+                    FROM video_reach_daily
+                    WHERE channel_id IN ({placeholders})
+                      AND date >= date('now', '-30 days')
+                    GROUP BY channel_id""",
+                channel_ids,
+            ).fetchall()
+            reach_map = {r["channel_id"]: dict(r) for r in reach_rows}
+        except sqlite3.OperationalError:
+            reach_map = {}
+
         # ── Coverage: latest collection run per channel ──
         cov_rows = conn.execute(
             f"""SELECT s1.channel_id, s1.status, s1.created_at
@@ -7623,21 +7692,37 @@ class ExtendedDatabase(Database):
             ch_id = ch["id"]
             agg = agg_map.get(ch_id, {})
             cov = cov_map.get(ch_id, {})
+            reach = reach_map.get(ch_id, {})
             has_data = bool(agg.get("cnt"))
+            reach_imp = int(reach.get("total_imp") or 0)
+
+            if reach_imp > 0:
+                # Embudo real: impresiones + CTR + retención del Reporting API.
+                avg_ctr_30d = round(float(reach.get("clicks") or 0) / reach_imp * 100, 2)
+                avg_ret_30d = reach.get("avg_ret") or 0
+                total_imp_30d = reach_imp
+                has_data = True
+            else:
+                avg_ctr_30d = agg.get("avg_ctr") if has_data else 0
+                avg_ret_30d = agg.get("avg_ret") if has_data else 0
+                total_imp_30d = int(agg.get("total_imp") or 0) if has_data else 0
+
             result[ch_id] = {
                 "channel_id": ch_id,
                 "channel_name": ch.get("name", ""),
                 "channel_slug": ch.get("slug", ""),
-                "avg_ctr_30d": agg.get("avg_ctr") if has_data else 0,
-                "avg_retention_30d": agg.get("avg_ret") if has_data else 0,
+                "avg_ctr_30d": avg_ctr_30d,
+                "avg_retention_30d": avg_ret_30d,
                 "avg_view_duration_30d": agg.get("avg_avd") if has_data else 0,
-                "total_impressions_30d": int(agg.get("total_imp") or 0) if has_data else 0,
+                "total_impressions_30d": total_imp_30d,
                 "impression_video_count": int(agg.get("imp_cnt") or 0) if has_data else 0,
                 "ctr_video_count": int(agg.get("imp_cnt") or 0) if has_data else 0,
                 "retention_video_count": int(agg.get("cnt") or 0) if has_data else 0,
                 "analytics_status": cov.get("status", "no_data"),
                 "last_collection_at": str(cov.get("created_at", "")) if cov else "",
                 "has_analytics_data": has_data,
+                # Origen del embudo (auditoría): reporting_api vs snapshot
+                "reach_source": "reporting_api" if reach_imp > 0 else "snapshot",
             }
         return result
 

@@ -1641,6 +1641,30 @@ class YouTubeStatsFetcher:
             except Exception as exc:
                 logger.error("Daily watchtime storage failed for %s: %s", self.slug, exc)
 
+        # ── Embudo de alcance (Reporting API reach, cuota propia) ──
+        # La Analytics API no expone impresiones orgánicas + CTR; el Reporting
+        # API sí. Best-effort: nunca debe romper la recolección de stats.
+        if deep and channel:
+            try:
+                from config.config_bridge import get_channel_config
+                _cfg = get_channel_config(self.slug)
+                if getattr(_cfg, "REACH_REPORTS_ENABLED", True):
+                    from pipeline.youtube_reach import ReachReportClient
+                    _reach = ReachReportClient(self.slug)
+                    if _reach.authenticate():
+                        result["reach"] = _reach.sync(
+                            db,
+                            max_reports_per_job=int(
+                                getattr(_cfg, "REACH_REPORTS_MAX_PER_JOB", 10)
+                            ),
+                        )
+                    else:
+                        logger.info("Reach reports no disponibles para %s", self.slug)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Reach reports (Reporting API) falló para %s: %s", self.slug, exc
+                )
+
         scrape_total = result.get("scrape_fallback_videos", 0) + result.get(
             "scrape_fallback_shorts", 0
         )
