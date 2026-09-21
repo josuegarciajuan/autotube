@@ -107,6 +107,32 @@ def test_failure_is_visible_and_retries(tmp_path, monkeypatch):
     assert attempts == 2
 
 
+def test_recovered_review_resolves_previous_failure_alert(tmp_path, monkeypatch):
+    db = make_db(tmp_path)
+    reviews.schedule_video_reviews(db, 10)
+    # Intento 1: falla → alerta crítica abierta
+    monkeypatch.setattr(reviews, "fetch_external_video_state",
+                        lambda video: (_ for _ in ()).throw(RuntimeError("network")))
+    first = reviews.process_due_reviews(db, now=datetime.now(timezone.utc) + timedelta(days=3))
+    assert first["failed"] == 1
+    with db._connect() as conn:
+        assert conn.execute(
+            "SELECT resolved FROM pipeline_alerts WHERE alert_type='editorial_review_failed'"
+        ).fetchone()[0] == 0
+
+    # Intento 2 (reintento programado): éxito → la crítica debe cerrarse sola
+    monkeypatch.setattr(reviews, "fetch_external_video_state", lambda video: {
+        "visibility": "public", "title": video["titulo_final"], "available": True
+    })
+    second = reviews.process_due_reviews(db, now=datetime.now(timezone.utc) + timedelta(days=3, hours=2))
+    assert second["succeeded"] == 1
+    with db._connect() as conn:
+        row = conn.execute(
+            "SELECT resolved FROM pipeline_alerts WHERE alert_type='editorial_review_failed' ORDER BY id DESC"
+        ).fetchone()
+    assert row[0] == 1
+
+
 def test_performance_classification_distinguishes_insufficient_impressions_ctr_and_retention():
     cfg = SimpleNamespace(EDITORIAL_RECOVERY_REVIEW={
         "min_impressions": 100, "min_ctr_percent": 4, "min_retention_percent": 35

@@ -220,6 +220,55 @@ def _alert(db, row, success, result=None, error=None):
                message=json.dumps(payload, ensure_ascii=False, default=str), metadata=payload)
 
 
+def _resolve_recovered_failure(db, row) -> int:
+    """Cierra la alerta crítica de review fallida cuando ya no queda pendiente.
+
+    Un review que falló por un error transitorio (p. ej. bot-check de yt-dlp)
+    programa un reintento; si el reintento tiene éxito, la alerta crítica previa
+    quedaría abierta para siempre. Solo se resuelve si NINGUNA fila del mismo
+    vídeo (o del canal en la auditoría diaria) sigue en estado 'failed'.
+    """
+    try:
+        with db._connect() as conn:
+            if row["video_id"] is not None:
+                pending = conn.execute(
+                    "SELECT 1 FROM editorial_reviews WHERE video_id=? AND status='failed' LIMIT 1",
+                    (row["video_id"],),
+                ).fetchone()
+                if pending:
+                    return 0
+                cur = conn.execute(
+                    """UPDATE pipeline_alerts
+                       SET resolved=1, resolved_at=datetime('now'), acknowledged=1,
+                           message=COALESCE(message, '') ||
+                           ' [Auto-resuelto: revisión recuperada]'
+                       WHERE entity_type='video' AND entity_id=?
+                         AND alert_type='editorial_review_failed' AND resolved=0""",
+                    (row["video_id"],),
+                )
+            else:
+                pending = conn.execute(
+                    "SELECT 1 FROM editorial_reviews WHERE channel_id=? AND status='failed' LIMIT 1",
+                    (row["channel_id"],),
+                ).fetchone()
+                if pending:
+                    return 0
+                cur = conn.execute(
+                    """UPDATE pipeline_alerts
+                       SET resolved=1, resolved_at=datetime('now'), acknowledged=1,
+                           message=COALESCE(message, '') ||
+                           ' [Auto-resuelto: auditoría recuperada]'
+                       WHERE entity_type='channel' AND entity_id=?
+                         AND alert_type='editorial_review_failed' AND resolved=0""",
+                    (row["channel_id"],),
+                )
+            conn.commit()
+            return cur.rowcount
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("resolve recovered review failure failed: %s", exc)
+        return 0
+
+
 def process_due_reviews(db, now=None) -> dict:
     ensure_review_schema(db)
     now = now or datetime.now(timezone.utc)
@@ -242,6 +291,7 @@ def process_due_reviews(db, now=None) -> dict:
                              (json.dumps(value, ensure_ascii=False, default=str), now.isoformat(), row["id"]))
                 conn.commit()
             _alert(db, row, True, value)
+            _resolve_recovered_failure(db, row)
             result["succeeded"] += 1
         except Exception as exc:
             retry_at = now + timedelta(minutes=60)
