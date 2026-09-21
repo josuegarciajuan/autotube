@@ -73,6 +73,18 @@ def in_window(now: datetime, start_hour: int = 9, end_hour: int = 23) -> bool:
     return start_hour <= now.hour < end_hour
 
 
+def channel_sequence(current: str | None) -> list[str]:
+    """Orden de canales empezando por ``current``, con wrap-around.
+
+    Sin wrap-around, si el estado quedaba en canal5 (o canal4) la sesión nunca
+    volvía a canal2/canal3 y esos canales quedaban starvados indefinidamente.
+    """
+    if current not in CHANNEL_ORDER:
+        return list(CHANNEL_ORDER)
+    start = CHANNEL_ORDER.index(current)
+    return CHANNEL_ORDER[start:] + CHANNEL_ORDER[:start]
+
+
 # ── DB ──────────────────────────────────────────────────────────────
 
 def get_pending(canal: str | None = None) -> list[dict]:
@@ -461,12 +473,14 @@ def main() -> int:
         logger.info("Fuera de ventana diurna — no se inicia sesión.")
         return 0
 
-    order = [args.canal] if args.canal else CHANNEL_ORDER
-    current = db.get_system_state(STATE_CURRENT) or order[0]
-    start_idx = order.index(current) if current in order else 0
+    if args.canal:
+        channels = [args.canal]
+    else:
+        current = db.get_system_state(STATE_CURRENT)
+        channels = channel_sequence(current)
     total_done = int(db.get_system_state(STATE_DONE_TOTAL) or 0)
 
-    for canal in order[start_idx:]:
+    for canal in channels:
         set_state(db, STATE_CURRENT, canal)
         total_done, finished = process_channel(db, canal, args, total_done)
         if finished:
@@ -479,6 +493,17 @@ def main() -> int:
         else:
             # Parada por noche/límite/fallos → se retoma aquí mañana
             return 0
+
+    # Run acotado a un canal: no tocar el estado global ni declarar fin.
+    if args.canal:
+        return 0
+
+    # Solo declarar COMPLETADO si de verdad no queda ningún pendiente global.
+    remaining = len(get_pending())
+    if remaining > 0:
+        set_state(db, STATE_CURRENT, channels[-1])
+        logger.info("Ciclo de canales terminado; quedan %d pendientes globales", remaining)
+        return 0
 
     # Todos los canales terminados
     set_state(db, STATE_CURRENT, "")
