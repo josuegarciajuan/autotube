@@ -1865,16 +1865,21 @@ def run_job(
                     except RuntimeError:
                         _loop = _asyncio.new_event_loop()
                         _asyncio.set_event_loop(_loop)
+                    # `metadata` puede ser None si phase_metadata() falló (fallo
+                    # no-fatal). Antes se hacía metadata.get() sin guarda y el
+                    # AttributeError se reportaba como fallo de 'cross_platform'
+                    # (alertas phase_nonfatal espurias).
+                    cross_meta = metadata if isinstance(metadata, dict) else {}
                     cross_results = _loop.run_until_complete(
                         cross_mgr.publish_to_all(
                             video_id=video_id,
                             yt_video_id=yt_video_id,
                             video_data=video_data,
                             metadata={
-                                "title": metadata.get("title") if metadata else titulo,
-                                "description": metadata.get("description", ""),
-                                "tags": metadata.get("tags", []),
-                                "thumbnail_path": metadata.get("thumbnail_path"),
+                                "title": cross_meta.get("title") or titulo,
+                                "description": cross_meta.get("description", ""),
+                                "tags": cross_meta.get("tags", []),
+                                "thumbnail_path": cross_meta.get("thumbnail_path"),
                             },
                         )
                     )
