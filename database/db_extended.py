@@ -7226,33 +7226,39 @@ class ExtendedDatabase(Database):
             sparkline_impressions: list = []
             sparkline_ctr: list = []
             reach_where = "AND channel_id = ?" if channel_id else ""
-            reach_spark_rows = conn.execute(
-                f"""SELECT date,
-                           SUM(impressions) AS imp,
-                           SUM(impressions * impressions_ctr / 100.0) AS clicks
-                    FROM video_reach_daily
-                    WHERE date >= date('now', '-8 days') {reach_where}
-                    GROUP BY date ORDER BY date""",
-                ch_params,
-            ).fetchall()
-            reach_by_date = {
-                r["date"]: (int(r["imp"] or 0), float(r["clicks"] or 0))
-                for r in reach_spark_rows
-            }
+            reach_by_date: dict = {}
+            total_impressions = 0
+            reach_ctr = 0.0
+            try:
+                reach_spark_rows = conn.execute(
+                    f"""SELECT date,
+                               SUM(impressions) AS imp,
+                               SUM(impressions * impressions_ctr / 100.0) AS clicks
+                        FROM video_reach_daily
+                        WHERE date >= date('now', '-8 days') {reach_where}
+                        GROUP BY date ORDER BY date""",
+                    ch_params,
+                ).fetchall()
+                reach_by_date = {
+                    r["date"]: (int(r["imp"] or 0), float(r["clicks"] or 0))
+                    for r in reach_spark_rows
+                }
+                reach_tot = conn.execute(
+                    f"""SELECT COALESCE(SUM(impressions), 0) AS imp,
+                               COALESCE(SUM(impressions * impressions_ctr / 100.0), 0) AS clicks
+                        FROM video_reach_daily
+                        WHERE date >= date('now', '-30 days') {reach_where}""",
+                    ch_params,
+                ).fetchone()
+                total_impressions = int(reach_tot["imp"] or 0)
+                reach_ctr = (
+                    round(float(reach_tot["clicks"] or 0) / total_impressions * 100, 2)
+                    if total_impressions else 0.0
+                )
+            except sqlite3.OperationalError:
+                # Migración v60 pendiente: el dashboard degrada a ceros sin romper.
+                pass
             _now_utc = datetime.now(_dt_timezone.utc)
-
-            reach_tot = conn.execute(
-                f"""SELECT COALESCE(SUM(impressions), 0) AS imp,
-                           COALESCE(SUM(impressions * impressions_ctr / 100.0), 0) AS clicks
-                    FROM video_reach_daily
-                    WHERE date >= date('now', '-30 days') {reach_where}""",
-                ch_params,
-            ).fetchone()
-            total_impressions = int(reach_tot["imp"] or 0)
-            reach_ctr = (
-                round(float(reach_tot["clicks"] or 0) / total_impressions * 100, 2)
-                if total_impressions else 0.0
-            )
 
             for days_ago in range(7, -1, -1):
                 sd = spark_data.get(days_ago, {})
