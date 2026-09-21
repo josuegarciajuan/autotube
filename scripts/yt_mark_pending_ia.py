@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import random
 import sqlite3
 import sys
@@ -35,7 +36,11 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-DB_PATH = PROJECT_ROOT / "autotube.db"
+DB_PATH = Path(os.environ.get("DATABASE_PATH") or (PROJECT_ROOT / "autotube.db"))
+
+# Motivos de fallo que indican un problema técnico de sesión/navegador (no del
+# ítem): si se repiten, abortamos la sesión del día en vez de blacklistear ítems.
+TECHNICAL_REASONS = {"exception", "navigation_failed"}
 
 CHANNEL_ORDER = ["canal2", "canal3", "canal4", "canal5"]
 STATE_CURRENT = "ia_backfill_current_channel"
@@ -43,6 +48,7 @@ STATE_DONE_TOTAL = "ia_backfill_done_total"
 STATE_PENDING = "ia_backfill_pending"
 STATE_LAST_RUN = "ia_backfill_last_run"
 STATE_FINISHED_AT = "ia_backfill_finished_at"
+STATE_LAST_PROGRESS = "ia_backfill_last_progress"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -70,7 +76,12 @@ def in_window(now: datetime, start_hour: int = 9, end_hour: int = 23) -> bool:
 # ── DB ──────────────────────────────────────────────────────────────
 
 def get_pending(canal: str | None = None) -> list[dict]:
-    """Items sin marcar, más recientes primero (videos + shorts)."""
+    """Items sin marcar, más recientes primero (videos + shorts).
+
+    Excluye ítems ya descartados (``manual_altered_content_skip=1``) y los que
+    YouTube ya eliminó/no tiene disponibles: reintentarlos bloqueaba la cola y
+    abortaba la sesión diaria sin avanzar.
+    """
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     items: list[dict] = []
@@ -81,6 +92,9 @@ def get_pending(canal: str | None = None) -> list[dict]:
         FROM videos v JOIN channels c ON c.id = v.channel_id
         WHERE v.yt_video_id IS NOT NULL AND v.yt_video_id != ''
           AND COALESCE(v.manual_altered_content_done, 0) = 0
+          AND COALESCE(v.manual_altered_content_skip, 0) = 0
+          AND COALESCE(v.status, '') NOT IN ('deleted_on_yt', 'removed')
+          AND COALESCE(v.yt_visibility, '') NOT IN ('removed', 'unavailable')
     """
     sq = """
         SELECT s.youtube_id AS yt_id, c.slug AS canal, 'short' AS kind, s.id AS db_id,
@@ -88,6 +102,8 @@ def get_pending(canal: str | None = None) -> list[dict]:
         FROM shorts s JOIN channels c ON c.id = s.channel_id
         WHERE s.youtube_id IS NOT NULL AND s.youtube_id != ''
           AND COALESCE(s.manual_altered_content_done, 0) = 0
+          AND COALESCE(s.manual_altered_content_skip, 0) = 0
+          AND COALESCE(s.yt_visibility, '') NOT IN ('removed', 'unavailable')
     """
     params: list = []
     if canal:
@@ -100,6 +116,41 @@ def get_pending(canal: str | None = None) -> list[dict]:
     conn.close()
     items.sort(key=lambda r: (r.get("ts") or ""), reverse=True)
     return items
+
+
+def mark_unavailable_items() -> int:
+    """Descarta ítems que YouTube ya eliminó/no tiene disponibles.
+
+    Se ejecuta al inicio de la sesión para que no vuelvan a bloquear la cola.
+    Devuelve el número de ítems marcados como skip.
+    """
+    conn = sqlite3.connect(str(DB_PATH))
+    now = _now_local().isoformat(timespec="seconds")
+    total = 0
+    for table, id_col, extra in (
+        ("videos", "yt_video_id",
+         "status IN ('deleted_on_yt','removed') OR "
+         "yt_visibility IN ('removed','unavailable','age_restricted')"),
+        ("shorts", "youtube_id",
+         "yt_visibility IN ('removed','unavailable','age_restricted')"),
+    ):
+        try:
+            cur = conn.execute(
+                f"UPDATE {table} SET manual_altered_content_skip = 1, "
+                f"manual_altered_content_skip_reason = 'unavailable_yt', "
+                f"manual_altered_content_skip_at = ? "
+                f"WHERE {id_col} IS NOT NULL AND {id_col} != '' "
+                f"AND COALESCE(manual_altered_content_done,0) = 0 "
+                f"AND COALESCE(manual_altered_content_skip,0) = 0 AND ({extra})",
+                (now,),
+            )
+            total += cur.rowcount or 0
+        except sqlite3.OperationalError as exc:
+            logger.warning("mark_unavailable_items(%s) failed: %s", table, exc)
+    conn.commit()
+    conn.close()
+    return total
+
 
 
 def mark_in_db(kind: str, db_id: int, yt_id: str) -> None:
@@ -128,6 +179,39 @@ def still_pending(kind: str, db_id: int) -> bool:
     return bool(row) and row[0] == 0
 
 
+def bump_attempt(kind: str, db_id: int) -> int:
+    """Incrementa el contador de intentos fallidos y devuelve el nuevo valor."""
+    table = "videos" if kind == "video" else "shorts"
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.execute(
+        f"UPDATE {table} SET manual_altered_content_attempts = "
+        f"COALESCE(manual_altered_content_attempts, 0) + 1 WHERE id = ?",
+        (db_id,),
+    )
+    row = conn.execute(
+        f"SELECT COALESCE(manual_altered_content_attempts, 0) FROM {table} WHERE id = ?",
+        (db_id,),
+    ).fetchone()
+    conn.commit()
+    conn.close()
+    return int(row[0]) if row else 0
+
+
+def mark_skip(kind: str, db_id: int, reason: str) -> None:
+    """Descarta un ítem como no marcable, con motivo auditable."""
+    table = "videos" if kind == "video" else "shorts"
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.execute(
+        f"UPDATE {table} SET manual_altered_content_skip = 1, "
+        f"manual_altered_content_skip_reason = ?, manual_altered_content_skip_at = ? "
+        f"WHERE id = ?",
+        (reason, _now_local().isoformat(timespec="seconds"), db_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+
 # ── Estado / alertas ────────────────────────────────────────────────
 
 def _db():
@@ -153,6 +237,20 @@ def _channel_id(db, slug: str) -> int | None:
 def alert(db, alert_type: str, severity: str, title: str, message: str,
           metadata: dict | None = None, channel_id: int | None = None) -> None:
     try:
+        # ``create_alert`` deduplica por (entity_type, entity_id, alert_type):
+        # una alerta info previa sin resolver "traga" las siguientes. Resolvemos
+        # las previas del mismo tipo antes de emitir una nueva.
+        try:
+            with db._connect() as conn:
+                conn.execute(
+                    "UPDATE pipeline_alerts SET resolved = 1, "
+                    "resolved_at = datetime('now'), acknowledged = 1 "
+                    "WHERE alert_type = ? AND resolved = 0",
+                    (alert_type,),
+                )
+                conn.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("resolve previous %s failed: %s", alert_type, exc)
         from api.services.lifecycle_monitor import emit_alert
         emit_alert(db, entity_type="channel" if channel_id else "system",
                    entity_id=channel_id or 0, channel_id=channel_id,
@@ -202,8 +300,14 @@ def resolve_backfill_aborted(db, canal: str, channel_id: int | None = None) -> i
 # ── Sesión ──────────────────────────────────────────────────────────
 
 def process_channel(db, canal: str, args, total_done: int) -> tuple[int, bool]:
-    """Marca los pendientes de un canal. Returns (done, finished_channel)."""
-    from pipeline.youtube_browser import get_browser, get_account_for_channel, close_all_browsers
+    """Marca los pendientes de un canal. Returns (done, finished_channel).
+
+    Un fallo de ítem ya NO aborta la campaña: se cuenta el intento y, tras
+    ``max_attempts``, se descarta con motivo (skip) para no bloquear la cola.
+    Solo se aborta la sesión si hay fallos *técnicos* consecutivos (sesión
+    rota / login perdido), que no deben blacklistear ítems.
+    """
+    from pipeline.youtube_browser import get_browser, get_account_for_channel
 
     pending = get_pending(canal)
     if not pending:
@@ -218,7 +322,8 @@ def process_channel(db, canal: str, args, total_done: int) -> tuple[int, bool]:
     logger.info("[%s] %d pendientes (cuenta %s)", canal, len(pending), account)
     browser = get_browser(account)
     failures = 0
-    consec = 0
+    skipped = 0
+    consec_technical = 0
     batch_size = random.randint(3, 6)
     batch_count = 0
 
@@ -236,30 +341,47 @@ def process_channel(db, canal: str, args, total_done: int) -> tuple[int, bool]:
                     item["kind"], item["yt_id"])
         try:
             ok = browser.mark_altered_content(item["yt_id"])
+            reason = getattr(browser, "last_mark_reason", "") or "unknown"
         except Exception as exc:  # noqa: BLE001
             logger.warning("[%s] mark error: %s", canal, exc)
-            ok = False
+            ok, reason = False, "exception"
 
         if ok:
             mark_in_db(item["kind"], item["db_id"], item["yt_id"])
             total_done += 1
-            consec = 0
+            consec_technical = 0
             set_state(db, STATE_DONE_TOTAL, str(total_done))
+            set_state(db, STATE_LAST_PROGRESS, _now_local().isoformat(timespec="seconds"))
             # La sesión vuelve a funcionar: cerrar el abort previo de este canal.
             resolve_backfill_aborted(db, canal)
         else:
             failures += 1
-            consec += 1
-            logger.warning("[%s] FALLO %s (consec=%d)", canal, item["yt_id"], consec)
-            if consec >= args.max_consecutive_failures:
-                logger.error("[%s] %d fallos seguidos — se aborta el día", canal, consec)
-                alert(db, "ia_backfill_aborted", "critical",
-                      f"Backfill IA abortado ({canal})",
-                      f"{consec} fallos consecutivos. Revisar sesiones de navegador "
-                      f"(python3 scripts/yt_browser_login.py).",
-                      {"canal": canal, "failures": failures},
-                      channel_id=_channel_id(db, canal))
-                return total_done, False
+            logger.warning("[%s] FALLO %s (%s)", canal, item["yt_id"], reason)
+            if reason in TECHNICAL_REASONS:
+                consec_technical += 1
+                if consec_technical >= args.max_consecutive_technical_failures:
+                    logger.error(
+                        "[%s] %d fallos técnicos seguidos (%s) — se aborta el día",
+                        canal, consec_technical, reason)
+                    alert(db, "ia_backfill_aborted", "critical",
+                          f"Backfill IA abortado ({canal})",
+                          f"{consec_technical} fallos técnicos consecutivos ({reason}). "
+                          f"Revisar sesiones de navegador "
+                          f"(python3 scripts/yt_browser_login.py).",
+                          {"canal": canal, "failures": failures, "reason": reason},
+                          channel_id=_channel_id(db, canal))
+                    return total_done, False
+            else:
+                consec_technical = 0
+                attempts = bump_attempt(item["kind"], item["db_id"])
+                if attempts >= args.max_attempts:
+                    mark_skip(item["kind"], item["db_id"], reason)
+                    skipped += 1
+                    logger.info("[%s] SKIP %s tras %d intentos (%s)",
+                                canal, item["yt_id"], attempts, reason)
+                else:
+                    logger.info("[%s] reintento %d/%d para %s",
+                                canal, attempts, args.max_attempts, item["yt_id"])
 
         # Pacing human-like
         batch_count += 1
@@ -272,6 +394,8 @@ def process_channel(db, canal: str, args, total_done: int) -> tuple[int, bool]:
         elif idx < len(pending):
             time.sleep(random.randint(args.delay_min, args.delay_max))
 
+    if skipped:
+        logger.info("[%s] Sesión: %d descartados (skip), %d fallos", canal, skipped, failures)
     set_state(db, STATE_LAST_RUN, _now_local().isoformat(timespec="seconds"))
     return total_done, True
 
@@ -290,13 +414,19 @@ def main() -> int:
     parser.add_argument("--delay-max", type=int, default=120)
     parser.add_argument("--long-pause-min", type=int, default=900)
     parser.add_argument("--long-pause-max", type=int, default=2400)
-    parser.add_argument("--max-consecutive-failures", type=int, default=5)
+    parser.add_argument("--max-consecutive-failures", type=int, default=5,
+                        help="(legacy) fallos técnicos consecutivos antes de abortar")
+    parser.add_argument("--max-consecutive-technical-failures", type=int, default=None,
+                        help="Fallos técnicos consecutivos antes de abortar la sesión")
+    parser.add_argument("--max-attempts", type=int, default=3,
+                        help="Intentos fallidos por ítem antes de descartarlo (skip)")
     args = parser.parse_args()
+    if args.max_consecutive_technical_failures is None:
+        args.max_consecutive_technical_failures = args.max_consecutive_failures
 
     db = _db()
     pending = get_pending(args.canal)
     total_pending = len(pending)
-    set_state(db, STATE_PENDING, str(total_pending))
 
     print(f"\n{'='*60}\nPendientes de marcado IA: {total_pending}")
     if args.dry_run:
@@ -309,6 +439,15 @@ def main() -> int:
         print(f"{'='*60}\n")
         return 0
     print(f"{'='*60}\n")
+
+    # Descartar ítems que YouTube ya eliminó/no tiene disponibles: no deben
+    # bloquear la cola ni abortar la sesión.
+    unavailable = mark_unavailable_items()
+    if unavailable:
+        logger.info("Descartados %d ítems no disponibles en YouTube (skip)", unavailable)
+        pending = get_pending(args.canal)
+        total_pending = len(pending)
+    set_state(db, STATE_PENDING, str(total_pending))
 
     if total_pending == 0:
         set_state(db, STATE_FINISHED_AT, _now_local().isoformat(timespec="seconds"))
