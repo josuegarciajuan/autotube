@@ -345,14 +345,52 @@ def _auto_transition_normal_days() -> int:
         return 21
 
 
+def recovery_experiment_days_left(db=None) -> int | None:
+    """Días restantes del experimento de recuperación de alcance, o None si no
+    está activo (o ya venció).
+
+    Contrato: `specs/experimento-recuperacion-alcance.md` (T+45). Mientras el
+    experimento esté en curso NO conviene relajar la cadencia: el sistema debe
+    mantener el perfil prudente en lugar de escalar solo a `normal`.
+    """
+    from datetime import datetime as _dt, timedelta as _td
+
+    try:
+        if db is None:
+            db = _get_db()
+        raw = db.get_system_state("experiment_started_at")
+        if not raw:
+            return None
+        started = _dt.fromisoformat(str(raw)[:19])
+        end = started + _td(days=45)
+        now = _dt.utcnow()
+        if now >= end:
+            return None
+        return max(0, (end - now).days)
+    except Exception:
+        return None
+
+
 def auto_transition_enabled(db=None) -> bool:
-    """Kill-switch de la transición automática (settings > system_state)."""
+    """Kill-switch de la transición automática (system_state > experimento > settings).
+
+    Prioridad:
+      1. `system_state["auto_pacing_transition"]` explícito (manda siempre).
+      2. Si el experimento de recuperación está activo → NO transicionar (evita
+         escalar a `normal` durante la recuperación).
+      3. `settings.AUTO_PACING_TRANSITION` (default True).
+    """
     try:
         if db is None:
             db = _get_db()
         raw = db.get_system_state("auto_pacing_transition")
         if raw is not None and raw != "":
             return str(raw).strip().lower() in ("1", "true", "yes", "on")
+    except Exception:
+        pass
+    try:
+        if recovery_experiment_days_left(db) is not None:
+            return False
     except Exception:
         pass
     try:

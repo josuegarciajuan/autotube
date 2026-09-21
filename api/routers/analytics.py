@@ -38,11 +38,40 @@ def get_experiment_metrics():
         for r in db.list_scheduled_reminders(status=None, limit=50)
         if r.get("alert_type") == "experiment_checkpoint"
     ]
+
+    # Métricas secundarias: cuántos temas rechazan los gates (indica que actúan).
+    def _counter(key: str) -> int:
+        try:
+            return int(db.get_system_state(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    rejected = {
+        "topic_dedup_rejected": _counter("topic_dedup_rejected"),
+        "script_novelty_blocked": _counter("script_novelty_blocked"),
+    }
+
+    # Embudo real por canal (Reporting API reach): impresiones → CTR → retención.
+    reach_funnel: dict = {}
+    try:
+        _channels = db.get_channels(active_only=True) or []
+    except Exception:  # noqa: BLE001 — DB parcial (tests) o migración pendiente
+        _channels = []
+    for ch in _channels:
+        if (ch.get("slug") or "") == "test":
+            continue
+        try:
+            reach_funnel[ch["slug"]] = db.get_channel_funnel(ch["id"], days=30)
+        except Exception:  # noqa: BLE001
+            continue
+
     return {
         "started_at": started,
         "baseline": baseline,
         "live": live,
         "checkpoints": checkpoints,
+        "rejected": rejected,
+        "reach_funnel": reach_funnel,
     }
 
 

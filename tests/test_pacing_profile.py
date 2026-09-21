@@ -131,3 +131,43 @@ def test_invalid_manual_override_uses_profile_and_reports_telemetry(tmp_path):
 
     assert pacing_profile.get_pacing_value("max_longform_publish_day", db=db) == 1
     assert pacing_profile.get_pacing_telemetry()["invalid_values"] >= 1
+
+
+def test_auto_transition_disabled_during_recovery_experiment():
+    """Mientras el experimento de recuperación está activo (T+45) NO se
+    auto-transiciona a `normal` (evita relajar la cadencia en plena recuperación)."""
+    from datetime import datetime, timedelta, timezone
+    import api.services.pacing_profile as pacing_profile
+
+    class _FakeDB:
+        def __init__(self, started):
+            self._started = started
+
+        def get_system_state(self, key):
+            if key == "experiment_started_at":
+                return self._started
+            return None
+
+    started = (datetime.now(timezone.utc) - timedelta(days=3)).strftime(
+        "%Y-%m-%dT%H:%M:%S"
+    )
+    assert pacing_profile.auto_transition_enabled(_FakeDB(started)) is False
+    # Sin experimento activo → default de settings (True)
+    assert pacing_profile.auto_transition_enabled(_FakeDB(None)) is True
+
+
+def test_recovery_experiment_days_left_none_after_t45():
+    from datetime import datetime, timedelta, timezone
+    import api.services.pacing_profile as pacing_profile
+
+    class _FakeDB:
+        def __init__(self, started):
+            self._started = started
+
+        def get_system_state(self, key):
+            if key == "experiment_started_at":
+                return self._started
+            return None
+
+    old = (datetime.now(timezone.utc) - timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%S")
+    assert pacing_profile.recovery_experiment_days_left(_FakeDB(old)) is None

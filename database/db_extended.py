@@ -10753,6 +10753,32 @@ class ExtendedDatabase(Database):
             )
             conn.commit()
 
+    def bump_system_counter(self, key: str, delta: int = 1) -> int:
+        """Incrementa un contador entero en system_state y devuelve el nuevo valor.
+
+        Se usa para métricas secundarias del experimento (p. ej. temas
+        rechazados por dedup/novedad) sin necesidad de tabla propia.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT value FROM system_state WHERE key = ?", (key,)
+            ).fetchone()
+            try:
+                current = int(row["value"]) if row and row["value"] not in (None, "") else 0
+            except (TypeError, ValueError):
+                current = 0
+            new_value = current + delta
+            conn.execute(
+                """INSERT INTO system_state (key, value, updated_at)
+                   VALUES (?, ?, datetime('now'))
+                   ON CONFLICT(key) DO UPDATE SET
+                     value = excluded.value,
+                     updated_at = excluded.updated_at""",
+                (key, str(new_value)),
+            )
+            conn.commit()
+        return new_value
+
     def is_channel_spam_blocked(self, channel_id: int) -> bool:
         """Return True if the channel's uploads are blocked by a YouTube spam strike.
 

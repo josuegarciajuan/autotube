@@ -3801,6 +3801,10 @@ def _dispatch_standalone_short(channel_id: int, channel_slug: str,
                         "[standalone] %s: tema ya consumido '%s' ≈ '%s' — descartado",
                         channel_slug, _lbl[:60], (_dl or "")[:60],
                     )
+                    try:
+                        _db_s.bump_system_counter("topic_dedup_rejected")
+                    except Exception:  # noqa: BLE001
+                        pass
                     continue
                 _kept_topics.append(_t)
             topics = _kept_topics
