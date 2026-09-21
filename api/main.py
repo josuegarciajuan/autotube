@@ -3357,6 +3357,32 @@ def _emit_stats_coverage_alert(db, channel: dict, status: str, reason: str = "")
         logger.warning("Could not emit stats coverage alert: %s", exc)
 
 
+def _emit_reach_api_alert(db, channel: dict, hint: str = ""):
+    """Alerta accionable cuando el YouTube Reporting API está deshabilitado.
+
+    El embudo de alcance (impresiones/CTR) depende del Reporting API del
+    proyecto GCP. Si está deshabilitado, los campos nuevos quedan a cero y NO
+    debe parecer un cero real: se emite una alerta deduplicada por canal con el
+    enlace de activación.
+    """
+    try:
+        from api.services.lifecycle_monitor import emit_alert
+        emit_alert(
+            db, entity_type="system", entity_id=channel["id"],
+            channel_id=channel["id"], alert_type="reach_reporting_api_disabled",
+            severity="warning",
+            title=f"Reporting API deshabilitada: {channel.get('name', channel.get('slug', '?'))}",
+            message=(
+                "Impresiones de miniatura y CTR (embudo de alcance) requieren el "
+                "YouTube Reporting API habilitado en el proyecto GCP del canal. "
+                + (hint or "Actívala y vuelve a recolectar stats.")
+            ),
+            metadata={"channel_slug": channel.get("slug"), "hint": hint},
+        )
+    except Exception as exc:
+        logger.warning("Could not emit reach API alert: %s", exc)
+
+
 def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api: bool = True):
     """Collect YouTube stats for all active channels.
 
@@ -3479,6 +3505,11 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
                     pass
                 if ch_status in ("requires_authorization", "failed"):
                     _emit_stats_coverage_alert(db, ch, ch_status, reason=result.get("error"))
+                _reach = result.get("reach") or {}
+                if isinstance(_reach, dict) and _reach.get("api_disabled"):
+                    _emit_reach_api_alert(
+                        db, ch, _reach.get("disabled_hint") or ""
+                    )
                 STATS_COLLECTION_STATE["channels"].append({
                     "slug": slug,
                     "ok": "error" not in result,
@@ -3499,6 +3530,8 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
                     "traffic_stored": result.get("traffic_stored", 0),
                     "retention_stored": result.get("retention_stored", 0),
                     "demographics_stored": result.get("demographics_stored", 0),
+                    # Embudo de alcance (Reporting API): estado explícito por canal.
+                    "reach": result.get("reach"),
                     "error": result.get("error"),
                 })
                 
@@ -3594,11 +3627,45 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
         else:
             global_result = "success"
 
+        # ── Embudo de alcance (Reporting API): estado agregado ──
+        # Distingue "API deshabilitada" de "informes aún no publicados (~48 h)" y
+        # de "recolectado", para que la UI y las alertas no lean ceros sin contexto.
+        reach_chans = [
+            c.get("reach")
+            for c in STATS_COLLECTION_STATE.get("channels", [])
+            if isinstance(c.get("reach"), dict)
+        ]
+        _any_reach_disabled = any(bool(r.get("api_disabled")) for r in reach_chans)
+        _any_reach_collected = any(r.get("status") == "collected" for r in reach_chans)
+        _any_reach_awaiting = any(r.get("status") == "awaiting_reports" for r in reach_chans)
+        if _any_reach_disabled:
+            _reach_status = "disabled"
+        elif _any_reach_collected:
+            _reach_status = "collected"
+        elif _any_reach_awaiting:
+            _reach_status = "awaiting_reports"
+        else:
+            _reach_status = "unavailable"
+        reach_summary = {
+            "status": _reach_status,
+            "api_disabled": _any_reach_disabled,
+            "channels": len(reach_chans),
+            "jobs": sum(int(r.get("jobs") or 0) for r in reach_chans),
+            "reports_available": sum(int(r.get("reports_available") or 0) for r in reach_chans),
+            "reports_pending": sum(int(r.get("reports_pending") or 0) for r in reach_chans),
+            "reports_downloaded": sum(int(r.get("reports_downloaded") or 0) for r in reach_chans),
+            "rows": sum(
+                int(r.get("reach_rows") or 0) + int(r.get("basic_rows") or 0)
+                for r in reach_chans
+            ),
+        }
+
         STATS_COLLECTION_STATE.update({
             "status": "success" if not any_failed else "error",
             "result": global_result,
             "finished_at": _time_module.time(),
             "scrape_mode": any_scrape_mode,
+            "reach": reach_summary,
         })
         _pin_stats_state("stats_collection_state")
         # Force dashboard cache invalidation so the frontend sees fresh data

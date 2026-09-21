@@ -112,7 +112,9 @@ NARRATIVE_ARCHETYPES = []
 # (bulk, cuota propia). Kill-switch: poner False desactiva la recolección del
 # embudo sin desplegar (ver scripts/collect_reach_reports.py).
 REACH_REPORTS_ENABLED = True
-REACH_REPORTS_MAX_PER_JOB = 10
+# Informes a procesar por job en cada pasada. 0 = backfill completo (tope duro
+# interno de 90) para bajar de una vez los 30 días históricos del job nuevo.
+REACH_REPORTS_MAX_PER_JOB = 0
 
 # ═══════════════════════════════════════════════════════════════════
 # TEST MODE
