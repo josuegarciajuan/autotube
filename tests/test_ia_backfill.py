@@ -13,6 +13,52 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from scripts import yt_mark_pending_ia as m  # noqa: E402
 
 
+class _AlertDB:
+    """DB mínima con pipeline_alerts para probar la auto-resolución."""
+
+    def __init__(self):
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        self.conn.executescript("""
+            CREATE TABLE pipeline_alerts (
+                id INTEGER PRIMARY KEY, entity_id INTEGER, channel_id INTEGER,
+                alert_type TEXT, message TEXT, resolved INTEGER DEFAULT 0,
+                resolved_at TEXT, acknowledged INTEGER DEFAULT 0);
+        """)
+        self.conn.commit()
+
+    def _connect(self):
+        import contextlib
+
+        @contextlib.contextmanager
+        def _cm():
+            yield self.conn
+        return _cm()
+
+
+def test_resolve_backfill_aborted_is_channel_scoped():
+    db = _AlertDB()
+    db.conn.execute(
+        "INSERT INTO pipeline_alerts(entity_id, channel_id, alert_type, message) "
+        "VALUES (3, 3, 'ia_backfill_aborted', 'fallos canal2')"
+    )
+    db.conn.execute(
+        "INSERT INTO pipeline_alerts(entity_id, channel_id, alert_type, message) "
+        "VALUES (4, 4, 'ia_backfill_aborted', 'fallos canal3')"
+    )
+    db.conn.commit()
+
+    assert m.resolve_backfill_aborted(db, "canal2", 3) == 1
+    rows = {
+        r["channel_id"]: r["resolved"]
+        for r in db.conn.execute(
+            "SELECT channel_id, resolved FROM pipeline_alerts"
+        ).fetchall()
+    }
+    assert rows[3] == 1
+    assert rows[4] == 0
+
+
 def test_in_window_boundaries():
     assert m.in_window(datetime(2026, 9, 18, 9, 0)) is True
     assert m.in_window(datetime(2026, 9, 18, 14, 30)) is True
