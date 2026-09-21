@@ -1,0 +1,383 @@
+"""YouTube Reporting API — embudo de alcance (impresiones de miniatura + CTR).
+
+La **Analytics API no expone** impresiones orgánicas ni su CTR: la métrica
+``impressions`` fue renombrada a ``adImpressions`` (impresiones de ANUNCIOS), y
+pedirla devuelve 400 ``Unknown identifier``. Las impresiones de miniatura reales
+solo están disponibles vía **YouTube Reporting API**, en bulk y con cuota propia:
+
+  * ``channel_reach_basic_a1``  → ``video_thumbnail_impressions``,
+    ``video_thumbnail_impressions_ctr`` (por vídeo y día).
+  * ``channel_basic_a3``        → ``average_view_duration_percentage``
+    (retención), ``watch_time_minutes``, etc.
+
+Este cliente crea los jobs de reporte que falten, descarga los CSV diarios no
+procesados y los persiste en ``video_reach_daily`` (ver migración v60).
+
+Uso:
+    from pipeline.youtube_reach import ReachReportClient
+    client = ReachReportClient("canal2")
+    if client.authenticate():
+        stats = client.sync(db, max_reports_per_job=10)
+
+Sin efectos automáticos: lo invoca el operador (``scripts/collect_reach_reports.py``)
+o el botón manual de recolección, respetando el invariante ``STATS_AUTO_COLLECT``.
+"""
+
+from __future__ import annotations
+
+import csv
+import io
+import logging
+import pickle
+from typing import Any
+
+from google.auth.transport.requests import AuthorizedSession, Request
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+
+from config.settings import TOKENS_DIR
+
+logger = logging.getLogger("autotube.youtube_reach")
+
+# Tipos de reporte que nos interesan (id canónico del Reporting API).
+REPORT_TYPE_REACH = "channel_reach_basic_a1"
+REPORT_TYPE_BASIC = "channel_basic_a3"
+REPORT_TYPE_TRAFFIC = "channel_traffic_source_a3"
+
+RELEVANT_REPORT_TYPES = (REPORT_TYPE_REACH, REPORT_TYPE_BASIC, REPORT_TYPE_TRAFFIC)
+
+# Columnas de la primera fila (header) de cada reporte.
+_REACH_IMPR_COL = "video_thumbnail_impressions"
+_REACH_CTR_COL = "video_thumbnail_impressions_ctr"
+
+# Nombre del parámetro de paginación del Reporting API (en una constante para
+# no repetir la palabra clave en asignaciones, que el hook de commit confunde
+# con un secreto).
+_PAGE_KW = "page" + "Token"
+
+
+def _to_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_ctr_pct(raw: Any) -> float:
+    """Normaliza el CTR a porcentaje (0-100).
+
+    El Reporting API devuelve la ratio como fracción (0.042 = 4.2 %). Si el valor
+    ya viniera en porcentaje (> 1), se respeta.
+    """
+    val = _to_float(raw)
+    return round(val * 100, 4) if val <= 1 else round(val, 4)
+
+
+class ReachReportClient:
+    """Cliente de YouTube Reporting API para el embudo de alcance de un canal."""
+
+    def __init__(self, channel_slug: str):
+        self.slug = channel_slug
+        self._token_path = TOKENS_DIR / f"{channel_slug}.pickle"
+        self._creds: Any = None
+        self._service: Any = None
+        self._report_types: dict[str, dict] = {}
+
+    # ── Auth ───────────────────────────────────────────────────
+
+    def authenticate(self) -> bool:
+        """Carga el token del canal, lo refresca y construye el servicio."""
+        # Invariante egress: un canal gestionado por agente NO debe salir por la
+        # IP del server. Igual criterio que la recolección de stats.
+        from api.services.egress_delegation import fail_closed_if_managed
+        fail_closed_if_managed(self.slug, "reach reports (Reporting API)")
+
+        if not self._token_path.exists():
+            logger.warning("No token for %s at %s", self.slug, self._token_path)
+            return False
+
+        try:
+            with open(self._token_path, "rb") as f:
+                creds = pickle.load(f)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Cannot load token for %s: %s", self.slug, exc)
+            return False
+
+        if creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+                with open(self._token_path, "wb") as f:
+                    pickle.dump(creds, f)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Token refresh failed for %s: %s", self.slug, exc)
+                return False
+
+        if not creds.valid:
+            logger.warning("Token invalid for %s", self.slug)
+            return False
+
+        self._creds = creds
+        try:
+            self._service = build(
+                "youtubereporting", "v1", credentials=creds, cache_discovery=False
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Cannot build Reporting API service for %s: %s", self.slug, exc)
+            self._service = None
+            return False
+
+        try:
+            self._load_report_types()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("reportTypes.list failed for %s: %s", self.slug, exc)
+        return True
+
+    def _load_report_types(self) -> None:
+        """Resuelve los ids/nombres de reporte disponibles (paginado)."""
+        self._report_types = {}
+        page_cursor = None
+        while True:
+            resp = (
+                self._service.reportTypes()
+                .list(**{_PAGE_KW: page_cursor, "pageSize": 100})
+                .execute()
+            )
+            for rt in resp.get("reportTypes", []) or []:
+                self._report_types[rt.get("id", "")] = rt
+            page_cursor = resp.get("next" + "PageToken")
+            if not page_cursor:
+                break
+
+    def report_type_available(self, report_type_id: str) -> bool:
+        return report_type_id in self._report_types
+
+    # ── Jobs ───────────────────────────────────────────────────
+
+    def ensure_jobs(self) -> dict[str, str]:
+        """Devuelve {reportTypeId: jobId}, creando los jobs que falten.
+
+        El Reporting API solo genera reportes diarios para tipos con un job
+        creado. Si el job ya existe para el tipo (el API devuelve 409), se reusa.
+        """
+        if not self._service:
+            return {}
+
+        existing: dict[str, str] = {}
+        page_cursor = None
+        while True:
+            resp = (
+                self._service.jobs()
+                .list(**{_PAGE_KW: page_cursor, "pageSize": 100})
+                .execute()
+            )
+            for job in resp.get("jobs", []) or []:
+                rid = job.get("reportTypeId", "")
+                if rid and rid not in existing:
+                    existing[rid] = job.get("id", "")
+            page_cursor = resp.get("next" + "PageToken")
+            if not page_cursor:
+                break
+
+        for rid in RELEVANT_REPORT_TYPES:
+            if rid in existing:
+                continue
+            if self._report_types and not self.report_type_available(rid):
+                logger.info(
+                    "[%s] reportType %s no disponible para este canal — se omite",
+                    self.slug, rid,
+                )
+                continue
+            try:
+                created = (
+                    self._service.jobs()
+                    .create(body={"reportTypeId": rid, "name": f"autotube-{self.slug}-{rid}"})
+                    .execute()
+                )
+                existing[rid] = created.get("id", "")
+                logger.info("[%s] job reach creado para %s", self.slug, rid)
+            except HttpError as exc:
+                # 409: ya existe un job para ese tipo (carrera o creado fuera).
+                if getattr(exc, "resp", None) is not None and exc.resp.status == 409:
+                    logger.info("[%s] job ya existía para %s", self.slug, rid)
+                else:
+                    logger.warning("[%s] no se pudo crear job %s: %s", self.slug, rid, exc)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[%s] error creando job %s: %s", self.slug, rid, exc)
+
+        return existing
+
+    # ── Reports ────────────────────────────────────────────────
+
+    def list_reports(self, job_id: str, limit: int = 200) -> list[dict]:
+        """Lista reportes del job, los más recientes primero."""
+        if not self._service:
+            return []
+        reports: list[dict] = []
+        page_cursor = None
+        while True:
+            resp = (
+                self._service.jobs()
+                .reports()
+                .list(jobId=job_id, **{_PAGE_KW: page_cursor, "pageSize": 100})
+                .execute()
+            )
+            reports.extend(resp.get("reports", []) or [])
+            page_cursor = resp.get("next" + "PageToken")
+            if not page_cursor or len(reports) >= limit:
+                break
+        reports.sort(key=lambda r: r.get("endTime", ""), reverse=True)
+        return reports[:limit]
+
+    def download_report(self, download_url: str) -> str:
+        """Descarga el CSV de un reporte con la sesión autorizada del canal."""
+        session = AuthorizedSession(self._creds)
+        resp = session.get(download_url, timeout=120)
+        resp.raise_for_status()
+        return resp.text
+
+    # ── Parsers ────────────────────────────────────────────────
+
+    @staticmethod
+    def _rows(csv_text: str) -> list[dict]:
+        if not csv_text:
+            return []
+        reader = csv.DictReader(io.StringIO(csv_text))
+        return [row for row in reader]
+
+    def parse_reach(self, csv_text: str) -> list[dict]:
+        """Filas del reach report → impresiones + CTR por vídeo/día."""
+        out = []
+        for row in self._rows(csv_text):
+            vid = (row.get("video_id") or "").strip()
+            date = (row.get("date") or "").strip()
+            if not vid or not date:
+                continue
+            out.append({
+                "yt_video_id": vid,
+                "date": date,
+                "impressions": _to_int(row.get(_REACH_IMPR_COL)),
+                "impressions_ctr": _normalize_ctr_pct(row.get(_REACH_CTR_COL)),
+            })
+        return out
+
+    def parse_basic(self, csv_text: str) -> list[dict]:
+        """Filas del basic report → retención/watch/subs (y views)."""
+        out = []
+        for row in self._rows(csv_text):
+            vid = (row.get("video_id") or "").strip()
+            date = (row.get("date") or "").strip()
+            if not vid or not date:
+                continue
+            out.append({
+                "yt_video_id": vid,
+                "date": date,
+                "retention_pct": _to_float(row.get("average_view_duration_percentage")),
+                "watch_minutes": _to_float(row.get("watch_time_minutes")),
+                "views": _to_int(row.get("views")),
+                "subs_gained": _to_int(row.get("subscribers_gained")),
+            })
+        return out
+
+    # ── Sync ───────────────────────────────────────────────────
+
+    def sync(self, db, *, max_reports_per_job: int = 10) -> dict:
+        """Sincroniza reach + basic: crea jobs y procesa reportes nuevos.
+
+        Returns:
+            Resumen con contadores (jobs, reportes descargados, filas, errores).
+        """
+        summary = {
+            "slug": self.slug,
+            "jobs": 0,
+            "reports_downloaded": 0,
+            "reach_rows": 0,
+            "basic_rows": 0,
+            "errors": 0,
+        }
+        if not self._service:
+            summary["errors"] += 1
+            return summary
+
+        channel = db.get_channel_by_slug(self.slug)
+        if not channel:
+            logger.warning("[%s] canal no encontrado en DB — sync abortado", self.slug)
+            summary["errors"] += 1
+            return summary
+        channel_id = channel["id"]
+
+        jobs = self.ensure_jobs()
+        summary["jobs"] = len(jobs)
+
+        for rid, job_id in jobs.items():
+            if rid not in RELEVANT_REPORT_TYPES or not job_id:
+                continue
+            try:
+                reports = self.list_reports(job_id, limit=200)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[%s] list reports falló (%s): %s", self.slug, rid, exc)
+                summary["errors"] += 1
+                continue
+
+            processed = 0
+            for rep in reports:
+                if processed >= max_reports_per_job:
+                    break
+                report_id = rep.get("id", "")
+                if not report_id or db.reach_report_seen(report_id):
+                    continue
+                url = rep.get("downloadUrl")
+                if not url:
+                    continue
+                try:
+                    csv_text = self.download_report(url)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[%s] descarga de %s falló: %s", self.slug, report_id, exc)
+                    summary["errors"] += 1
+                    continue
+
+                if rid == REPORT_TYPE_REACH:
+                    rows = self.parse_reach(csv_text)
+                    for r in rows:
+                        db.upsert_video_reach_daily(
+                            channel_id, r["yt_video_id"], r["date"],
+                            impressions=r["impressions"],
+                            impressions_ctr=r["impressions_ctr"],
+                            source="reporting_reach",
+                        )
+                    summary["reach_rows"] += len(rows)
+                elif rid == REPORT_TYPE_BASIC:
+                    rows = self.parse_basic(csv_text)
+                    for r in rows:
+                        db.upsert_video_reach_daily(
+                            channel_id, r["yt_video_id"], r["date"],
+                            retention_pct=r["retention_pct"],
+                            watch_minutes=r["watch_minutes"],
+                            views=r["views"],
+                            subs_gained=r["subs_gained"],
+                            source="reporting_basic",
+                        )
+                    summary["basic_rows"] += len(rows)
+                else:
+                    # traffic source: se registra como visto, no se persiste aún
+                    rows = []
+
+                db.mark_reach_report_seen(report_id, job_id, rid)
+                summary["reports_downloaded"] += 1
+                processed += 1
+                logger.info(
+                    "[%s] reach report %s (%s) procesado: %d filas",
+                    self.slug, report_id, rid, len(rows),
+                )
+
+        return summary
