@@ -265,14 +265,12 @@ class YouTubeStatsFetcher:
         end_date: str = None,
         days: int = 30,
     ) -> dict:
-        """Fetch impressions + CTR for a single video via YouTube Analytics API.
+        """Fetch average view duration + retention for a single video.
 
-        Uses the youtubeAnalytics v2 API with metrics impressions and
-        impressionsClickThroughRate, filtered to a single video.
-
-        This is separate from get_video_analytics() because CTR/impressions
-        are not available from the YouTube Data API v3 (videos().list())
-        and require the Analytics API.
+        v51 (sep 2026): `impressions`/`impressionsClickThroughRate` NO existen en
+        la Analytics API (400 "Unknown identifier"); las impresiones orgánicas +
+        CTR vienen del Reporting API (reach reports). Aquí solo se piden métricas
+        válidas para no invalidar la consulta.
 
         Args:
             yt_video_id: YouTube video ID (e.g. "dQw4w9WgXcQ")
@@ -284,9 +282,8 @@ class YouTubeStatsFetcher:
 
         Returns:
             Dict with keys:
-                impressions: int — total impressions in window
-                impressionsClickThroughRate: float — CTR as fraction (0.05 = 5%)
                 averageViewDuration: float — seconds
+                averageViewPercentage: float — retention %
             Empty dict if Analytics API is unavailable or returns no data.
         """
         if not self._analytics_service:
@@ -307,17 +304,16 @@ class YouTubeStatsFetcher:
                     ids="channel==MINE",
                     startDate=start_date,
                     endDate=end_date,
-                    metrics="impressions,impressionsClickThroughRate,averageViewDuration",
+                    metrics="averageViewDuration,averageViewPercentage",
                     filters=f"video=={yt_video_id}",
                 )
                 .execute()
             )
             rows = resp.get("rows", [])
-            if rows and len(rows[0]) >= 3:
+            if rows and len(rows[0]) >= 2:
                 return {
-                    "impressions": int(rows[0][0]) if rows[0][0] else 0,
-                    "impressionsClickThroughRate": float(rows[0][1]) if rows[0][1] else 0.0,
-                    "averageViewDuration": float(rows[0][2]) if rows[0][2] else 0.0,
+                    "averageViewDuration": float(rows[0][0]) if rows[0][0] else 0.0,
+                    "averageViewPercentage": float(rows[0][1]) if rows[0][1] else 0.0,
                 }
         except HttpError as exc:
             logger.debug("CTR analytics fetch failed for %s: %s", yt_video_id, exc)
@@ -331,8 +327,12 @@ class YouTubeStatsFetcher:
 
         Uses dimensions=video to fetch estimatedMinutesWatched,
         averageViewDuration, subscribersGained, averageViewPercentage, views,
-        impressions, impressionsClickThroughRate, likes and comments for all
-        videos at once.
+        likes and comments for all videos at once.
+
+        v51: se eliminaron `impressions`/`impressionsClickThroughRate` porque NO
+        son métricas válidas de la Analytics API (devolvían 400 y rompían la
+        consulta completa). Las impresiones orgánicas + CTR las aporta el
+        Reporting API (reach reports) — ver ``pipeline/youtube_reach.py``.
 
         ago 2026: `likes`/`comments` (métricas de la Analytics API, cuota
         separada) son la fuente fiable de likes/comments cuando la cuota del
@@ -346,8 +346,7 @@ class YouTubeStatsFetcher:
         Returns:
             Dict mapping yt_video_id → {estimatedMinutesWatched, averageViewDuration,
                                          subscribersGained, averageViewPercentage,
-                                         analyticsViews, impressions,
-                                         impressionsClickThroughRate, likes, comments}
+                                         analyticsViews, likes, comments}
             Empty dict if no analytics data available.
         """
         if not self._analytics_service:
@@ -372,7 +371,14 @@ class YouTubeStatsFetcher:
                         ids="channel==MINE",
                         startDate=start_date,
                         endDate=end_date,
-                        metrics="estimatedMinutesWatched,averageViewDuration,subscribersGained,averageViewPercentage,views,impressions,impressionsClickThroughRate,likes,comments",
+                        # v51 (sep 2026): `impressions`/`impressionsClickThroughRate`
+                        # NO existen en la Analytics API (se renombró a
+                        # `adImpressions`, que son impresiones de ANUNCIOS). Incluirlos
+                        # devolvía 400 "Unknown identifier" e invalidaba TODA la
+                        # consulta → dejaba a 0 retención, subs, likes y comments.
+                        # Las impresiones orgánicas + CTR vienen del Reporting API
+                        # (reach reports) en `pipeline/youtube_reach.py`.
+                        metrics="estimatedMinutesWatched,averageViewDuration,subscribersGained,averageViewPercentage,views,likes,comments",
                         dimensions="video",
                         filters=f"video=={','.join(batch)}",
                         maxResults=200,
@@ -382,7 +388,7 @@ class YouTubeStatsFetcher:
                 rows = resp.get("rows", [])
                 for row in rows:
                     # row: [video_id, estMinWatched, avgViewDur, subsGained, avgViewPct,
-                    #       views, impressions, impressionsClickThroughRate, likes, comments]
+                    #       views, likes, comments]
                     vid = row[0]
                     result[vid] = {
                         "estimatedMinutesWatched": str(row[1]) if len(row) > 1 and row[1] else "0",
@@ -390,17 +396,13 @@ class YouTubeStatsFetcher:
                         "subscribersGained": str(row[3]) if len(row) > 3 and row[3] else "0",
                         "averageViewPercentage": str(row[4]) if len(row) > 4 and row[4] else "0",
                         "analyticsViews": str(row[5]) if len(row) > 5 and row[5] else "0",
-                        "impressions": str(row[6]) if len(row) > 6 and row[6] else "0",
-                        # La API devuelve CTR como fracción (0.05 = 5%); se
-                        # convierte a porcentaje al persistir en DB.
-                        "impressionsClickThroughRate": str(row[7]) if len(row) > 7 and row[7] else "0",
                         # ago 2026: likes/comments vía Analytics API — la única
                         # fuente fiable cuando la cuota del Data API está agotada
                         # (yt-dlp ya no los expone en la watch page pública).
                         # Son valores del período (ventana de 365d); para estos
                         # canales (< 1 año) equivalen prácticamente a lifetime.
-                        "likes": str(row[8]) if len(row) > 8 and row[8] else "0",
-                        "comments": str(row[9]) if len(row) > 9 and row[9] else "0",
+                        "likes": str(row[6]) if len(row) > 6 and row[6] else "0",
+                        "comments": str(row[7]) if len(row) > 7 and row[7] else "0",
                         # v50: ventana analizada para que el snapshot sepa de
                         # qué periodo vienen las métricas (el dashboard agrega
                         # por ventana, no etiqueta 30d lo que es 365d).
@@ -827,64 +829,22 @@ class YouTubeStatsFetcher:
     def get_video_impressions_ctr(
         self, video_ids: list[str], days: int = 30
     ) -> dict[str, dict]:
-        """Get impressions and CTR for multiple videos (30d window).
+        """DEPRECATED (v51, sep 2026): la Analytics API no expone impresiones
+        orgánicas ni su CTR.
 
-        v50 (ago 2026): corregido el nombre de métrica — la Analytics API usa
-        `impressionsClickThroughRate` (plural), no `impressionClickThroughRate`.
-        El valor devuelto es FRACCIÓN (0.05 = 5%): se convierte a porcentaje aquí
-        para que lo que se persiste sea directamente comparable con el resto del
-        sistema.
+        El nombre ``impressions``/``impressionsClickThroughRate`` no existe (la
+        API devuelve 400 "Unknown identifier") y además contaminaba la consulta
+        completa. Las impresiones de miniatura y su CTR reales se obtienen del
+        **YouTube Reporting API** (reach reports ``channel_reach_basic_a1`` /
+        ``channel_reach_combined_a1``) mediante ``pipeline/youtube_reach.py``.
 
-        Returns:
-            Dict mapping yt_video_id → {impressions: int, ctr_percent: float,
-                                         analytics_window_days: int}
+        Se conserva el método (sin llamada a la API) por compatibilidad: devuelve
+        vacío para que los llamadores degraden con elegancia.
         """
-        if not self._analytics_service or not video_ids:
-            return {}
-
-        MAX_IDS_PER_CALL = 200
-        result = {}
-
-        for i in range(0, len(video_ids), MAX_IDS_PER_CALL):
-            batch = video_ids[i : i + MAX_IDS_PER_CALL]
-            try:
-                start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-                end_date = datetime.now().strftime("%Y-%m-%d")
-                resp = (
-                    self._analytics_service.reports()
-                    .query(
-                        ids="channel==MINE",
-                        startDate=start_date,
-                        endDate=end_date,
-                        metrics="impressions,impressionsClickThroughRate",
-                        dimensions="video",
-                        filters=f"video=={','.join(batch)}",
-                        maxResults=200,
-                    )
-                    .execute()
-                )
-                rows = resp.get("rows", [])
-                for row in rows:
-                    # row: [video_id, impressions, ctr_fraction]
-                    vid = row[0]
-                    ctr_frac = float(row[2]) if len(row) > 2 and row[2] else 0.0
-                    result[vid] = {
-                        "impressions": int(row[1]) if len(row) > 1 and row[1] else 0,
-                        # fracción (0.05) → porcentaje (5.0)
-                        "ctr_percent": round(ctr_frac * 100, 2) if ctr_frac <= 1 else round(ctr_frac, 2),
-                        "analytics_window_days": days,
-                    }
-                logger.debug(
-                    "Impressions/CTR: %d videos returned (batch %d/%d)",
-                    len(rows), i // MAX_IDS_PER_CALL + 1,
-                    (len(video_ids) + MAX_IDS_PER_CALL - 1) // MAX_IDS_PER_CALL,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Impressions/CTR API failed for batch (size=%d): %s", len(batch), exc
-                )
-
-        return result
+        logger.debug(
+            "get_video_impressions_ctr es no-op: usar pipeline.youtube_reach (Reporting API)"
+        )
+        return {}
 
     def get_video_traffic_sources(
         self, video_ids: list[str], days: int = 30
@@ -1631,48 +1591,11 @@ class YouTubeStatsFetcher:
         if deep and channel and video_yt_ids and self._analytics_service:
             logger.info("Deep analytics collection starting for %s (%d videos)", self.slug, len(video_yt_ids))
 
-            # Collect impressions + CTR
-            try:
-                impressions_data = self.get_video_impressions_ctr(video_yt_ids, days=30)
-                stored_imp = 0
-                stored_ctr = 0
-                for v in videos:
-                    yt_id = v.get("yt_video_id")
-                    if not yt_id:
-                        continue
-                    idata = impressions_data.get(yt_id, {})
-                    impressions = idata.get("impressions", 0)
-                    ctr = idata.get("ctr_percent", 0.0)
-                    if impressions > 0 or ctr > 0:
-                        db.insert_video_analytics_batch(
-                            v["id"], yt_id, "impressions",
-                            [{"dimension": None, "metric_value": impressions}],
-                        )
-                        stored_imp += 1
-                        if ctr > 0:
-                            db.insert_video_analytics_batch(
-                                v["id"], yt_id, "ctr",
-                                [{"dimension": None, "metric_value": ctr}],
-                            )
-                            stored_ctr += 1
-                        # v50: afinar el snapshot (video_stats_history) con la
-                        # ventana 30d — la fuente que lee el dashboard para
-                        # impresiones/CTR reales de packaging.
-                        try:
-                            db.update_video_packaging_snapshot(
-                                v["id"], yt_id, impressions, ctr,
-                                window_days=idata.get("analytics_window_days", 30),
-                            )
-                        except Exception as _pexc:
-                            logger.debug(
-                                "packaging snapshot update failed for %s: %s", yt_id, _pexc
-                            )
-                result["impressions_stored"] = stored_imp
-                result["ctr_stored"] = stored_ctr
-                logger.info("Deep analytics: %d impressions, %d CTR stored for %s",
-                           stored_imp, stored_ctr, self.slug)
-            except Exception as exc:
-                logger.error("Deep analytics (CTR/impressions) failed for %s: %s", self.slug, exc)
+            # Impresiones orgánicas + CTR: NO vienen de la Analytics API (no
+            # existe la métrica). Las aporta el Reporting API (reach reports) en
+            # `pipeline/youtube_reach.py`, que se recolecta aparte (bulk, cuota
+            # propia) y escribe `video_reach_daily` + el snapshot de packaging.
+            # Ver `scripts/collect_reach_reports.py`.
 
             # Collect traffic sources
             try:

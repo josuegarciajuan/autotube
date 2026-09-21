@@ -110,8 +110,9 @@ def test_batch_update_video_analytics_persiste_ctr(stats_db):
     assert abs(row["ctr"] - 4.2) < 0.001
 
 
-def test_get_all_videos_analytics_metrics_ampliados(monkeypatch):
-    """El bulk query incluye impressions + impressionsClickThroughRate + likes/comments."""
+def test_get_all_videos_analytics_metrics_validas(monkeypatch):
+    """v51: el bulk query NO incluye impressions (métrica inválida que rompía la
+    consulta entera); sí incluye retención y likes/comments."""
     import pipeline.youtube_stats as ys
 
     captured = {}
@@ -120,8 +121,7 @@ def test_get_all_videos_analytics_metrics_ampliados(monkeypatch):
         def __init__(self, **kw):
             captured.update(kw)
         def execute(self):
-            return {"rows": [["VID1", "10", "120", "1", "20.5", "50",
-                              "1500", "0.042", "30", "5"]]}
+            return {"rows": [["VID1", "10", "120", "1", "20.5", "50", "30", "5"]]}
 
     class FakeReports:
         def query(self, **kw):
@@ -135,12 +135,12 @@ def test_get_all_videos_analytics_metrics_ampliados(monkeypatch):
     obj._analytics_service = FakeService()
 
     result = obj.get_all_videos_analytics(["VID1"], days=30)
-    assert "impressions,impressionsClickThroughRate" in captured.get("metrics", "")
-    # ago 2026: likes/comments vía Analytics API (fallback cuando el Data API
-    # está agotado — yt-dlp ya no los expone en la watch page pública).
-    assert "likes,comments" in captured.get("metrics", "")
-    assert result["VID1"]["impressions"] == "1500"
-    assert result["VID1"]["impressionsClickThroughRate"] == "0.042"
+    metrics = captured.get("metrics", "")
+    # La métrica inválida que provocaba 400 "Unknown identifier" ya no está.
+    assert "impressions" not in metrics
+    assert "averageViewPercentage" in metrics
+    assert "likes,comments" in metrics
+    assert result["VID1"]["averageViewPercentage"] == "20.5"
     assert result["VID1"]["likes"] == "30"
     assert result["VID1"]["comments"] == "5"
     # v50: la ventana analizada viaja con el snapshot
@@ -210,33 +210,16 @@ def test_update_video_packaging_snapshot_afina_ventana_30d(stats_db):
 
 # ── v50: métrica correcta + conversión fracción→% en deep ──────
 
-def test_get_video_impressions_ctr_metric_correcta_y_porcentaje(monkeypatch):
-    """El deep query usa `impressionsClickThroughRate` (plural) y convierte la
-    fracción 0.05 → 5.0% (antes: métrica errónea + sin conversión)."""
+def test_get_video_impressions_ctr_deprecado_no_llama_api():
+    """v51: `get_video_impressions_ctr` es no-op (las impresiones orgánicas + CTR
+    vienen del Reporting API, no de la Analytics API)."""
     import pipeline.youtube_stats as ys
 
-    captured = {}
-
-    class FakeQuery:
-        def __init__(self, **kw):
-            captured.update(kw)
-        def execute(self):
-            return {"rows": [["VID1", 2000, 0.05]]}
-
-    class FakeReports:
-        def query(self, **kw):
-            return FakeQuery(**kw)
-
-    class FakeService:
+    class ExplodingService:
         def reports(self):
-            return FakeReports()
+            raise AssertionError("no debe llamarse a la Analytics API")
 
     obj = ys.YouTubeStatsFetcher("canal3")
-    obj._analytics_service = FakeService()
+    obj._analytics_service = ExplodingService()
 
-    result = obj.get_video_impressions_ctr(["VID1"], days=30)
-    assert "impressions,impressionsClickThroughRate" in captured.get("metrics", "")
-    assert "impressionClickThroughRate" not in captured.get("metrics", "")
-    assert result["VID1"]["impressions"] == 2000
-    assert abs(result["VID1"]["ctr_percent"] - 5.0) < 0.001
-    assert result["VID1"]["analytics_window_days"] == 30
+    assert obj.get_video_impressions_ctr(["VID1"], days=30) == {}
