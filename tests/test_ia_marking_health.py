@@ -26,6 +26,11 @@ class FakeDB:
                 youtube_id TEXT, actual_published_at TEXT, published_at TEXT,
                 manual_altered_content_done INTEGER DEFAULT 0);
             CREATE TABLE system_state (key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE pipeline_alerts (id INTEGER PRIMARY KEY, entity_type TEXT,
+                entity_id INTEGER, channel_id INTEGER, alert_type TEXT,
+                severity TEXT, title TEXT, message TEXT, metadata_json TEXT,
+                acknowledged INTEGER DEFAULT 0, resolved INTEGER DEFAULT 0,
+                resolved_at TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         """)
         self.conn.execute("INSERT INTO channels (id, slug) VALUES (3,'canal2')")
         # recientes: 2 sin marcar, 1 marcado; 1 antiguo sin marcar (fuera de gracia)
@@ -77,6 +82,11 @@ def test_check_emits_info_heartbeat_when_clean(monkeypatch):
     # Marca todo lo reciente
     db.conn.execute("UPDATE videos SET manual_altered_content_done=1")
     db.conn.execute("UPDATE shorts SET manual_altered_content_done=1")
+    # Alerta crítica previa que ya no aplica
+    db.conn.execute(
+        "INSERT INTO pipeline_alerts(id, entity_type, entity_id, alert_type, severity, title, resolved) "
+        "VALUES (1, 'system', 0, 'altered_mark_missing', 'critical', 'sin marcar', 0)"
+    )
     db.conn.commit()
     captured = {}
     import api.services.lifecycle_monitor as lm
@@ -85,3 +95,8 @@ def test_check_emits_info_heartbeat_when_clean(monkeypatch):
     h.check_ia_marking_health(db, grace_hours=72)
     assert captured.get("alert_type") == "ia_mark_health_ok"
     assert captured.get("severity") == "info"
+    # La crítica anterior debe quedar cerrada
+    row = db.conn.execute(
+        "SELECT resolved FROM pipeline_alerts WHERE alert_type='altered_mark_missing'"
+    ).fetchone()
+    assert row["resolved"] == 1

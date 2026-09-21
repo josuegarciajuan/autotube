@@ -162,6 +162,43 @@ def alert(db, alert_type: str, severity: str, title: str, message: str,
         logger.warning("alert %s failed: %s", alert_type, exc)
 
 
+def resolve_backfill_aborted(db, canal: str, channel_id: int | None = None) -> int:
+    """Cierra la alerta crítica de backfill abortado de este canal.
+
+    Se llama cuando el canal termina su tanda sin fallos consecutivos: la
+    condición que originó la alerta ya no existe y no debe quedar abierta.
+    """
+    if channel_id is None:
+        channel_id = _channel_id(db, canal)
+    try:
+        with db._connect() as conn:
+            if channel_id:
+                cur = conn.execute(
+                    """UPDATE pipeline_alerts
+                       SET resolved = 1, resolved_at = datetime('now'), acknowledged = 1,
+                           message = COALESCE(message, '') ||
+                             ' [Auto-resuelto: backfill del canal retomado]'
+                       WHERE alert_type = 'ia_backfill_aborted' AND resolved = 0
+                         AND (channel_id = ? OR entity_id = ?)""",
+                    (channel_id, channel_id),
+                )
+            else:
+                cur = conn.execute(
+                    """UPDATE pipeline_alerts
+                       SET resolved = 1, resolved_at = datetime('now'), acknowledged = 1,
+                           message = COALESCE(message, '') ||
+                             ' [Auto-resuelto: backfill del canal retomado]'
+                       WHERE alert_type = 'ia_backfill_aborted' AND resolved = 0
+                         AND metadata_json LIKE ?""",
+                    (f'%"canal": "{canal}"%',),
+                )
+            conn.commit()
+            return cur.rowcount
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("resolve_backfill_aborted(%s) failed: %s", canal, exc)
+        return 0
+
+
 # ── Sesión ──────────────────────────────────────────────────────────
 
 def process_channel(db, canal: str, args, total_done: int) -> tuple[int, bool]:
@@ -208,6 +245,8 @@ def process_channel(db, canal: str, args, total_done: int) -> tuple[int, bool]:
             total_done += 1
             consec = 0
             set_state(db, STATE_DONE_TOTAL, str(total_done))
+            # La sesión vuelve a funcionar: cerrar el abort previo de este canal.
+            resolve_backfill_aborted(db, canal)
         else:
             failures += 1
             consec += 1
@@ -292,6 +331,7 @@ def main() -> int:
         set_state(db, STATE_CURRENT, canal)
         total_done, finished = process_channel(db, canal, args, total_done)
         if finished:
+            resolve_backfill_aborted(db, canal, _channel_id(db, canal))
             alert(db, "ia_backfill_channel_done", "critical",
                   f"✅ Marcado IA completado en {canal}",
                   f"Canal {canal} ya no tiene pendientes de marcado IA.",
@@ -305,6 +345,18 @@ def main() -> int:
     set_state(db, STATE_CURRENT, "")
     set_state(db, STATE_PENDING, "0")
     set_state(db, STATE_FINISHED_AT, _now_local().isoformat(timespec="seconds"))
+    try:
+        with db._connect() as conn:
+            conn.execute(
+                """UPDATE pipeline_alerts
+                   SET resolved = 1, resolved_at = datetime('now'), acknowledged = 1,
+                       message = COALESCE(message, '') ||
+                         ' [Auto-resuelto: backfill IA completado]'
+                   WHERE alert_type = 'ia_backfill_aborted' AND resolved = 0"""
+            )
+            conn.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("resolve all backfill aborted failed: %s", exc)
     alert(db, "ia_backfill_complete", "critical",
           "✅ Backfill marcado IA COMPLETADO",
           f"Todos los canales al día. Total marcado en esta campaña: {total_done}.",
