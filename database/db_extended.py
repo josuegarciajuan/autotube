@@ -7482,13 +7482,21 @@ class ExtendedDatabase(Database):
                 },
                 # Embudo de alcance (Reporting API reach): impresiones de
                 # miniatura 30d y su CTR. Alimentan los signos vitales del panel.
+                # `available=false` = aún sin informes del Reporting API (~48 h
+                # tras crear el job): el 0 NO es un dato real.
                 "impressions": {
                     "value": total_impressions,
                     "delta": None,
+                    "available": total_impressions > 0,
                 },
                 "ctr": {
                     "value": reach_ctr,
                     "delta": None,
+                    "available": total_impressions > 0,
+                },
+                "reach": {
+                    "available": total_impressions > 0,
+                    "source": "reporting_api" if total_impressions > 0 else "pending",
                 },
                 "sparkline_subscribers": sparkline_subscribers,
                 "sparkline_views": sparkline_views,
@@ -7667,6 +7675,7 @@ class ExtendedDatabase(Database):
                            COALESCE(SUM(impressions), 0) AS total_imp,
                            COALESCE(SUM(impressions * impressions_ctr / 100.0), 0) AS clicks,
                            ROUND(AVG(CASE WHEN retention_pct > 0 THEN retention_pct END), 2) AS avg_ret,
+                           COUNT(DISTINCT CASE WHEN impressions > 0 THEN yt_video_id END) AS imp_videos,
                            MAX(fetched_at) AS last_fetch
                     FROM video_reach_daily
                     WHERE channel_id IN ({placeholders})
@@ -7707,11 +7716,13 @@ class ExtendedDatabase(Database):
                 avg_ctr_30d = round(float(reach.get("clicks") or 0) / reach_imp * 100, 2)
                 avg_ret_30d = reach.get("avg_ret") or 0
                 total_imp_30d = reach_imp
+                imp_video_count = int(reach.get("imp_videos") or 0)
                 has_data = True
             else:
                 avg_ctr_30d = agg.get("avg_ctr") if has_data else 0
                 avg_ret_30d = agg.get("avg_ret") if has_data else 0
                 total_imp_30d = int(agg.get("total_imp") or 0) if has_data else 0
+                imp_video_count = int(agg.get("imp_cnt") or 0) if has_data else 0
 
             result[ch_id] = {
                 "channel_id": ch_id,
@@ -7721,12 +7732,16 @@ class ExtendedDatabase(Database):
                 "avg_retention_30d": avg_ret_30d,
                 "avg_view_duration_30d": agg.get("avg_avd") if has_data else 0,
                 "total_impressions_30d": total_imp_30d,
-                "impression_video_count": int(agg.get("imp_cnt") or 0) if has_data else 0,
-                "ctr_video_count": int(agg.get("imp_cnt") or 0) if has_data else 0,
+                "impression_video_count": imp_video_count,
+                "ctr_video_count": imp_video_count,
                 "retention_video_count": int(agg.get("cnt") or 0) if has_data else 0,
                 "analytics_status": cov.get("status", "no_data"),
                 "last_collection_at": str(cov.get("created_at", "")) if cov else "",
                 "has_analytics_data": has_data,
+                # Embudo de alcance: false hasta que el Reporting API publique
+                # informes (~48 h tras crear el job). Evita leer 0 como dato real.
+                "has_reach_data": reach_imp > 0,
+                "reach_status": "reporting_api" if reach_imp > 0 else "pending",
                 # Origen del embudo (auditoría): reporting_api vs snapshot
                 "reach_source": "reporting_api" if reach_imp > 0 else "snapshot",
             }

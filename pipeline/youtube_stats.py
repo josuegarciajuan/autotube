@@ -1654,13 +1654,42 @@ class YouTubeStatsFetcher:
                     if _reach.authenticate():
                         result["reach"] = _reach.sync(
                             db,
+                            # 0 = backfill completo (tope duro interno): baja de
+                            # una vez los 30 días históricos del job nuevo.
                             max_reports_per_job=int(
-                                getattr(_cfg, "REACH_REPORTS_MAX_PER_JOB", 10)
+                                getattr(_cfg, "REACH_REPORTS_MAX_PER_JOB", 0) or 0
                             ),
                         )
                     else:
+                        # Sin token/servicio: estado explícito para que el panel
+                        # no lo confunda con "ya recolectado".
+                        result["reach"] = {
+                            "slug": self.slug,
+                            "status": "no_auth",
+                            "api_disabled": False,
+                            "jobs": 0,
+                            "reports_available": 0,
+                            "reports_pending": 0,
+                            "reports_downloaded": 0,
+                            "reach_rows": 0,
+                            "basic_rows": 0,
+                            "errors": 0,
+                        }
                         logger.info("Reach reports no disponibles para %s", self.slug)
             except Exception as exc:  # noqa: BLE001
+                result["reach"] = {
+                    "slug": self.slug,
+                    "status": "error",
+                    "api_disabled": False,
+                    "jobs": 0,
+                    "reports_available": 0,
+                    "reports_pending": 0,
+                    "reports_downloaded": 0,
+                    "reach_rows": 0,
+                    "basic_rows": 0,
+                    "errors": 1,
+                    "error": str(exc)[:300],
+                }
                 logger.warning(
                     "Reach reports (Reporting API) falló para %s: %s", self.slug, exc
                 )

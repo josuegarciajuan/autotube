@@ -48,8 +48,9 @@ def main(argv: list[str] | None = None) -> int:
         help="Slug del canal (repetible). Por defecto, todos los activos.",
     )
     parser.add_argument(
-        "--max-reports", type=int, default=10,
-        help="Máximo de reportes diarios a descargar por job (default 10).",
+        "--max-reports", type=int, default=0,
+        help="Máximo de reportes diarios a descargar por job (default 0 = todos, "
+             "tope duro 90). Usa un valor >0 para limitar el backfill.",
     )
     parser.add_argument(
         "--dry-run", action="store_true",

@@ -55,6 +55,11 @@ _REACH_CTR_COL = "video_thumbnail_impressions_ctr"
 # con un secreto).
 _PAGE_KW = "page" + "Token"
 
+# Tope duro de reportes a procesar por job cuando se pide backfill completo
+# (max_reports_per_job=0). 90 ≈ 3 meses de informes diarios: margen holgado sobre
+# los 30 días históricos que el API genera al crear un job nuevo.
+_MAX_REPORTS_HARD_CAP = 90
+
 
 def _to_float(value: Any, default: float = 0.0) -> float:
     try:
@@ -113,6 +118,10 @@ class ReachReportClient:
         self._creds: Any = None
         self._service: Any = None
         self._report_types: dict[str, dict] = {}
+        # Estado del Reporting API para observabilidad: una API deshabilitada en
+        # el proyecto GCP NO debe confundirse con "aún no hay informes listos".
+        self.api_disabled: bool = False
+        self.disabled_hint: str = ""
 
     # ── Auth ───────────────────────────────────────────────────
 
@@ -161,10 +170,12 @@ class ReachReportClient:
             self._load_report_types()
         except Exception as exc:  # noqa: BLE001
             if service_disabled_error(exc):
+                self.api_disabled = True
+                self.disabled_hint = _activation_hint(exc)
                 logger.warning(
                     "[%s] YouTube Reporting API NO habilitada en el proyecto GCP "
                     "(las impresiones/CTR no se recolectarán hasta activarla): %s",
-                    self.slug, _activation_hint(exc),
+                    self.slug, self.disabled_hint,
                 )
             else:
                 logger.warning("reportTypes.list failed for %s: %s", self.slug, exc)
@@ -218,10 +229,12 @@ class ReachReportClient:
                     break
         except HttpError as exc:
             if service_disabled_error(exc):
+                self.api_disabled = True
+                self.disabled_hint = _activation_hint(exc)
                 logger.warning(
                     "[%s] YouTube Reporting API NO habilitada en el proyecto GCP — "
                     "las impresiones/CTR no se pueden recolectar. Habilitar en: %s",
-                    self.slug, _activation_hint(exc),
+                    self.slug, self.disabled_hint,
                 )
             else:
                 logger.warning("[%s] jobs().list falló: %s", self.slug, exc)
@@ -249,9 +262,11 @@ class ReachReportClient:
                 if getattr(exc, "resp", None) is not None and exc.resp.status == 409:
                     logger.info("[%s] job ya existía para %s", self.slug, rid)
                 elif service_disabled_error(exc):
+                    self.api_disabled = True
+                    self.disabled_hint = _activation_hint(exc)
                     logger.warning(
                         "[%s] YouTube Reporting API NO habilitada — habilitar en: %s",
-                        self.slug, _activation_hint(exc),
+                        self.slug, self.disabled_hint,
                     )
                     break
                 else:
@@ -338,30 +353,63 @@ class ReachReportClient:
     def sync(self, db, *, max_reports_per_job: int = 10) -> dict:
         """Sincroniza reach + basic: crea jobs y procesa reportes nuevos.
 
+        Args:
+            max_reports_per_job: tope de informes a procesar por job en esta
+                pasada. 0 (o negativo) = backfill completo (tope duro
+                ``_MAX_REPORTS_HARD_CAP``), útil para bajar de una vez los 30 días
+                históricos que el Reporting API genera al crear un job nuevo.
+
         Returns:
-            Resumen con contadores (jobs, reportes descargados, filas, errores).
+            Resumen con estado explícito del Reporting API:
+            ``status`` ∈ ``disabled | no_service | no_channel | no_jobs |
+            awaiting_reports | collected``. ``awaiting_reports`` significa que los
+            jobs existen pero aún no hay informes descargables (el API tarda
+            hasta 48 h tras crear el job). Así una API deshabilitada o un
+            ``awaiting_reports`` NUNCA se confunden con "ya recolectado".
         """
         summary = {
             "slug": self.slug,
+            "status": "unknown",
+            "api_disabled": self.api_disabled,
+            "disabled_hint": self.disabled_hint,
             "jobs": 0,
+            "reports_available": 0,
+            "reports_pending": 0,
             "reports_downloaded": 0,
             "reach_rows": 0,
             "basic_rows": 0,
             "errors": 0,
         }
         if not self._service:
+            summary["status"] = "disabled" if self.api_disabled else "no_service"
             summary["errors"] += 1
             return summary
 
         channel = db.get_channel_by_slug(self.slug)
         if not channel:
             logger.warning("[%s] canal no encontrado en DB — sync abortado", self.slug)
+            summary["status"] = "no_channel"
             summary["errors"] += 1
             return summary
         channel_id = channel["id"]
 
         jobs = self.ensure_jobs()
         summary["jobs"] = len(jobs)
+        summary["api_disabled"] = self.api_disabled
+        summary["disabled_hint"] = self.disabled_hint
+
+        if self.api_disabled:
+            summary["status"] = "disabled"
+            return summary
+        if not jobs:
+            summary["status"] = "no_jobs"
+            return summary
+
+        cap = (
+            int(max_reports_per_job)
+            if max_reports_per_job and max_reports_per_job > 0
+            else _MAX_REPORTS_HARD_CAP
+        )
 
         for rid, job_id in jobs.items():
             if rid not in RELEVANT_REPORT_TYPES or not job_id:
@@ -373,12 +421,16 @@ class ReachReportClient:
                 summary["errors"] += 1
                 continue
 
+            summary["reports_available"] += len(reports)
             processed = 0
             for rep in reports:
-                if processed >= max_reports_per_job:
-                    break
                 report_id = rep.get("id", "")
                 if not report_id or db.reach_report_seen(report_id):
+                    continue
+                # Informe nuevo no descargado: cuenta como pendiente aunque el
+                # tope de esta pasada impida bajarlo (se bajará en la siguiente).
+                summary["reports_pending"] += 1
+                if processed >= cap:
                     continue
                 url = rep.get("downloadUrl")
                 if not url:
@@ -418,10 +470,16 @@ class ReachReportClient:
 
                 db.mark_reach_report_seen(report_id, job_id, rid)
                 summary["reports_downloaded"] += 1
+                summary["reports_pending"] = max(0, summary["reports_pending"] - 1)
                 processed += 1
                 logger.info(
                     "[%s] reach report %s (%s) procesado: %d filas",
                     self.slug, report_id, rid, len(rows),
                 )
 
+        # Jobs creados pero el API aún no publica informes (hasta 48 h). Distinto
+        # de "deshabilitada" y de "ya recolectado".
+        summary["status"] = (
+            "awaiting_reports" if summary["reports_available"] == 0 else "collected"
+        )
         return summary
