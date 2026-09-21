@@ -184,8 +184,9 @@ def check_ia_marking_health(db, grace_hours: int = DEFAULT_GRACE_HOURS) -> dict:
             ),
             metadata=status,
         )
-        # La condición que originó la alerta crítica ya no se cumple: ciérrala,
-        # en vez de dejarla abierta para siempre tras desaparecer de la ventana.
+        # La condición que originó las alertas críticas ya no se cumple: ciérralas,
+        # en vez de dejarlas abiertas para siempre tras desaparecer de la ventana
+        # (o tras corregirse un falso positivo de "estancado").
         try:
             with db._connect() as conn:
                 conn.execute(
@@ -195,7 +196,14 @@ def check_ia_marking_health(db, grace_hours: int = DEFAULT_GRACE_HOURS) -> dict:
                            ' [Auto-resuelto: publicaciones recientes marcadas]'
                        WHERE alert_type='altered_mark_missing' AND resolved=0"""
                 )
+                conn.execute(
+                    """UPDATE pipeline_alerts
+                       SET resolved=1, resolved_at=datetime('now'), acknowledged=1,
+                           message=COALESCE(message, '') ||
+                           ' [Auto-resuelto: backfill IA con progreso reciente]'
+                       WHERE alert_type='ia_backfill_stalled' AND resolved=0"""
+                )
                 conn.commit()
         except Exception as exc:  # noqa: BLE001
-            logger.debug("resolve altered_mark_missing failed: %s", exc)
+            logger.debug("resolve ia marking alerts failed: %s", exc)
     return status

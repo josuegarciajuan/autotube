@@ -105,21 +105,29 @@ def test_check_emits_info_heartbeat_when_clean(monkeypatch):
     # Progreso reciente del backfill para no disparar la alerta de estancamiento
     db.conn.execute("INSERT INTO system_state (key,value) VALUES ('ia_backfill_last_progress',?)",
                     (datetime.now().isoformat(timespec="seconds"),))
-    # Alerta crítica previa que ya no aplica
+    # Alertas críticas previas que ya no aplican (incl. falso positivo de estancado)
     db.conn.execute(
         "INSERT INTO pipeline_alerts(id, entity_type, entity_id, alert_type, severity, title, resolved) "
         "VALUES (1, 'system', 0, 'altered_mark_missing', 'critical', 'sin marcar', 0)"
+    )
+    db.conn.execute(
+        "INSERT INTO pipeline_alerts(id, entity_type, entity_id, alert_type, severity, title, resolved) "
+        "VALUES (2, 'system', 0, 'ia_backfill_stalled', 'critical', 'estancado', 0)"
     )
     db.conn.commit()
     calls = _capture(monkeypatch)
     h.check_ia_marking_health(db, grace_hours=72)
     types = [c.get("alert_type") for c in calls]
     assert "ia_mark_health_ok" in types
-    # La crítica anterior debe quedar cerrada
-    row = db.conn.execute(
-        "SELECT resolved FROM pipeline_alerts WHERE alert_type='altered_mark_missing'"
-    ).fetchone()
-    assert row["resolved"] == 1
+    # Las críticas anteriores deben quedar cerradas
+    rows = {
+        r["alert_type"]: r["resolved"]
+        for r in db.conn.execute(
+            "SELECT alert_type, resolved FROM pipeline_alerts"
+        ).fetchall()
+    }
+    assert rows["altered_mark_missing"] == 1
+    assert rows["ia_backfill_stalled"] == 1
 
 
 def test_check_emits_stalled_when_no_progress(monkeypatch):
