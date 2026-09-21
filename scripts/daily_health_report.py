@@ -175,6 +175,24 @@ def main() -> int:
             else:
                 _line(f"  ✓ ok (sin alerta): {title}")
 
+        def _resolve(alert_type, note="condición recuperada"):
+            """Cierra la alerta que este informe genera cuando ya no aplica."""
+            try:
+                with db._connect() as conn:
+                    cur = conn.execute(
+                        """UPDATE pipeline_alerts
+                           SET resolved = 1, resolved_at = datetime('now'),
+                               acknowledged = 1,
+                               message = COALESCE(message, '') || ?
+                           WHERE alert_type = ? AND resolved = 0""",
+                        (f" [Auto-resuelto: {note}]", alert_type),
+                    )
+                    conn.commit()
+                    if cur.rowcount:
+                        _line(f"  ✓ {cur.rowcount} alerta(s) '{alert_type}' resueltas")
+            except Exception as e:
+                _line(f"  ERROR resolviendo {alert_type}: {e}")
+
         # Quota warning por proyecto
         if quota_warn_projects:
             _alert("quota_warning", "critical",
@@ -204,6 +222,8 @@ def main() -> int:
                    f"{backlog} vídeos esperando subir")
         else:
             _line("  ✓ subidas/backlog OK")
+            _resolve("upload_stalled", "subidas reanudadas")
+            _resolve("upload_backlog", "backlog normalizado")
 
         # Fallos de upload
         if failed_uploads >= 5:
@@ -212,6 +232,7 @@ def main() -> int:
                    f"{failed_uploads} upload_only fallidos en 24h")
         else:
             _line("  ✓ fallos de subida OK")
+            _resolve("upload_failures", "sin fallos de subida en 24h")
 
         # Shorts eliminados
         if shorts_deleted >= 10:
@@ -220,6 +241,7 @@ def main() -> int:
                    f"{shorts_deleted} shorts 'no aparece en YouTube' en 24h")
         else:
             _line("  ✓ shorts eliminados OK")
+            _resolve("shorts_deleted", "sin eliminaciones en 24h")
 
     except Exception as e:
         _line(f"  ERROR creando alertas: {e}")
