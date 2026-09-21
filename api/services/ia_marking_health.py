@@ -117,7 +117,10 @@ def backfill_stalled_check(last_progress: str | None,
     try:
         from datetime import datetime, timedelta
         ts = datetime.fromisoformat(str(last_progress))
-        return datetime.now() - ts > timedelta(days=stale_days)
+        # ``ia_backfill_last_progress`` se guarda con tz (Europe/Madrid);
+        # comparar aware vs naive lanzaba TypeError y marcaba estancado siempre.
+        now = datetime.now(ts.tzinfo) if ts.tzinfo else datetime.now()
+        return now - ts > timedelta(days=stale_days)
     except Exception:
         return True
 
