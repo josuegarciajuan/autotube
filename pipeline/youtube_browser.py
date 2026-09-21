@@ -235,6 +235,9 @@ class YouTubeBrowser:
         self._context = None
         self._owning_thread_id: int | None = None  # thread that created _context
         self._lock = threading.Lock()
+        # Motivo del último fallo de mark_altered_content (para clasificar
+        # ítems no marcables en el backfill: radio deshabilitado, borrado, etc.)
+        self.last_mark_reason: str = ""
         if not self.user_data_dir.exists():
             raise FileNotFoundError(
                 f"Browser profile not found: {self.user_data_dir}\n"
@@ -786,14 +789,16 @@ class YouTubeBrowser:
         # sesiones sobre el mismo perfil de Chromium.
         from pipeline.browser_lock import browser_account_lock
         account = getattr(self, "account", None) or "default"
+        self.last_mark_reason = ""
         with self._lock, browser_account_lock(account):
             try:
                 self._ensure_browser()
                 page = self._context.new_page()
-                ok = self._do_mark(page, youtube_video_id)
+                ok, reason = self._do_mark(page, youtube_video_id)
             except Exception as e:
                 logger.error("mark_altered_content failed for %s: %s", youtube_video_id, e)
-                ok = False
+                ok, reason = False, "exception"
+            self.last_mark_reason = reason
         if not ok:
             self._alert_mark_failed(youtube_video_id)
         return ok
@@ -850,7 +855,13 @@ class YouTubeBrowser:
         except Exception as exc:
             logger.warning("mark-altered alert failed: %s", exc)
 
-    def _do_mark(self, page, video_id: str) -> bool:
+    def _do_mark(self, page, video_id: str) -> tuple[bool, str]:
+        """Marca 'contenido alterado/IA'. Devuelve ``(ok, reason)``.
+
+        ``reason`` clasifica el fallo para que el backfill distinga ítems
+        permanentemente no marcables (vídeo borrado → sin editor / sin radio)
+        de fallos técnicos transitorios (navegación, sesión).
+        """
         try:
             human_delay(1.0, 3.0, "initial")
             edit_url = f"https://studio.youtube.com/video/{video_id}/edit"
@@ -859,7 +870,7 @@ class YouTubeBrowser:
             if "/video/" not in page.url or "/edit" not in page.url:
                 logger.error("Navigation failed: %s", page.url[:120])
                 page.close()
-                return False
+                return False, "navigation_failed"
 
             try:
                 page.wait_for_selector("[id='title-textarea']", timeout=10000, state="visible")
@@ -883,25 +894,42 @@ class YouTubeBrowser:
             self._scroll_page_to_bottom(page)
             human_delay(1.0, 2.0, "post-expand scroll")
 
-            yes_radio = page.wait_for_selector(SEL_RADIO_YES, timeout=8000, state="visible")
+            try:
+                yes_radio = page.wait_for_selector(SEL_RADIO_YES, timeout=8000, state="visible")
+            except PlaywrightTimeout:
+                logger.error("Radio not found for %s (¿vídeo eliminado o editor distinto?)", video_id)
+                page.close()
+                return False, "radio_not_found"
             human_delay(0.5, 1.5, "find radio")
             already_checked = yes_radio.get_attribute("aria-checked")
             if already_checked == "true":
                 logger.info("Video %s already marked (aria-checked=true)", video_id)
                 page.close()
-                return True
+                return True, "already"
 
-            yes_radio.click()
+            try:
+                yes_radio.click()
+            except PlaywrightTimeout:
+                logger.error("Radio not clickable/disabled for %s", video_id)
+                try: page.close()
+                except Exception: pass
+                return False, "radio_disabled"
             human_delay(0.5, 1.5, "click radio")
             checked = yes_radio.get_attribute("aria-checked")
             if checked != "true":
-                yes_radio.click()
+                try:
+                    yes_radio.click()
+                except PlaywrightTimeout:
+                    logger.error("Radio disabled on retry for %s", video_id)
+                    try: page.close()
+                    except Exception: pass
+                    return False, "radio_disabled"
                 human_delay(1.0, 2.0, "retry radio")
                 checked = yes_radio.get_attribute("aria-checked")
                 if checked != "true":
                     logger.error("Radio not checked after retry (%s)", checked)
                     page.close()
-                    return False
+                    return False, "radio_not_checked"
             logger.info("Radio confirmed (aria-checked=true)")
 
             human_delay(1.0, 2.0, "pre-guardar")
@@ -914,7 +942,7 @@ class YouTubeBrowser:
             if not guardar_el:
                 logger.error("Guardar never enabled")
                 page.close()
-                return False
+                return False, "save_disabled"
 
             human_delay(0.8, 2.0, "click guardar")
             guardar_el.click()
@@ -927,17 +955,17 @@ class YouTubeBrowser:
                 logger.info("No save toast for %s (clicked anyway)", video_id)
 
             page.close()
-            return True
+            return True, "ok"
         except PlaywrightTimeout as e:
             logger.error("Timeout for %s: %s", video_id, e)
             try: page.close()
             except Exception: pass
-            return False
+            return False, "timeout"
         except Exception as e:
             logger.error("Error for %s: %s", video_id, e)
             try: page.close()
             except Exception: pass
-            return False
+            return False, "exception"
 
 
     def add_end_screens(self, youtube_video_id: str) -> bool:

@@ -1,10 +1,11 @@
-"""Tests de A4: salud del marcado IA (reconciliación + heartbeat)."""
+"""Tests de A4: salud del marcado IA (reconciliación + heartbeat + estancamiento)."""
 
 from __future__ import annotations
 
 import contextlib
 import sqlite3
 import sys
+from datetime import datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -21,10 +22,14 @@ class FakeDB:
             CREATE TABLE channels (id INTEGER PRIMARY KEY, slug TEXT);
             CREATE TABLE videos (id INTEGER PRIMARY KEY, channel_id INTEGER,
                 yt_video_id TEXT, uploaded_at TEXT, published_at TEXT,
-                manual_altered_content_done INTEGER DEFAULT 0);
+                status TEXT DEFAULT '', yt_visibility TEXT DEFAULT '',
+                manual_altered_content_done INTEGER DEFAULT 0,
+                manual_altered_content_skip INTEGER DEFAULT 0);
             CREATE TABLE shorts (id INTEGER PRIMARY KEY, channel_id INTEGER,
                 youtube_id TEXT, actual_published_at TEXT, published_at TEXT,
-                manual_altered_content_done INTEGER DEFAULT 0);
+                yt_visibility TEXT DEFAULT '',
+                manual_altered_content_done INTEGER DEFAULT 0,
+                manual_altered_content_skip INTEGER DEFAULT 0);
             CREATE TABLE system_state (key TEXT PRIMARY KEY, value TEXT);
             CREATE TABLE pipeline_alerts (id INTEGER PRIMARY KEY, entity_type TEXT,
                 entity_id INTEGER, channel_id INTEGER, alert_type TEXT,
@@ -42,7 +47,6 @@ class FakeDB:
                           "manual_altered_content_done) VALUES (10,3,'S_NEW',datetime('now','-1 hours'),0)")
         self.conn.execute("INSERT INTO shorts (id,channel_id,youtube_id,actual_published_at,"
                           "manual_altered_content_done) VALUES (11,3,'S_OK',datetime('now','-1 hours'),1)")
-        self.conn.execute("INSERT INTO system_state (key,value) VALUES ('ia_backfill_pending','300')")
         self.conn.commit()
 
     @contextlib.contextmanager
@@ -54,27 +58,43 @@ class FakeDB:
         return row["value"] if row else None
 
 
+def _capture(monkeypatch):
+    """Captura todas las alertas emitidas (puede haber más de una)."""
+    calls: list[dict] = []
+    import api.services.lifecycle_monitor as lm
+    monkeypatch.setattr(lm, "emit_alert", lambda *a, **k: calls.append(k) or 1)
+    return calls
+
+
 def test_collect_status_counts():
     db = FakeDB()
     status = h.collect_ia_marking_status(db, grace_hours=72)
-    # El item 'V_OLD' (2026-09-01) queda fuera de la ventana de 72h.
     assert status["recent_total"] >= 3
     assert "V_NEW_A" in status["unmarked_ids"]
     assert "S_NEW" in status["unmarked_ids"]
     assert "S_OK" not in status["unmarked_ids"]
-    assert status["backfill_pending"] == 300
+    # pendientes en vivo: V_NEW_A + V_OLD + S_NEW
+    assert status["backfill_pending"] == 3
+
+
+def test_skipped_items_excluded():
+    db = FakeDB()
+    db.conn.execute("UPDATE videos SET manual_altered_content_skip=1 WHERE yt_video_id='V_NEW_A'")
+    db.conn.execute("UPDATE shorts SET manual_altered_content_skip=1 WHERE youtube_id='S_NEW'")
+    db.conn.commit()
+    status = h.collect_ia_marking_status(db, grace_hours=72)
+    assert "V_NEW_A" not in status["unmarked_ids"]
+    assert "S_NEW" not in status["unmarked_ids"]
+    # solo queda V_OLD como pendiente (S_OK marcado, V_NEW_A/S_NEW skipeados)
+    assert status["backfill_pending"] == 1
 
 
 def test_check_emits_critical_when_unmarked(monkeypatch):
     db = FakeDB()
-    captured = {}
-
-    import api.services.lifecycle_monitor as lm
-    monkeypatch.setattr(lm, "emit_alert",
-                        lambda *a, **k: captured.update(k) or 1)
+    calls = _capture(monkeypatch)
     h.check_ia_marking_health(db, grace_hours=72)
-    assert captured.get("alert_type") == "altered_mark_missing"
-    assert captured.get("severity") == "critical"
+    types = [c.get("alert_type") for c in calls]
+    assert "altered_mark_missing" in types
 
 
 def test_check_emits_info_heartbeat_when_clean(monkeypatch):
@@ -82,21 +102,36 @@ def test_check_emits_info_heartbeat_when_clean(monkeypatch):
     # Marca todo lo reciente
     db.conn.execute("UPDATE videos SET manual_altered_content_done=1")
     db.conn.execute("UPDATE shorts SET manual_altered_content_done=1")
+    # Progreso reciente del backfill para no disparar la alerta de estancamiento
+    db.conn.execute("INSERT INTO system_state (key,value) VALUES ('ia_backfill_last_progress',?)",
+                    (datetime.now().isoformat(timespec="seconds"),))
     # Alerta crítica previa que ya no aplica
     db.conn.execute(
         "INSERT INTO pipeline_alerts(id, entity_type, entity_id, alert_type, severity, title, resolved) "
         "VALUES (1, 'system', 0, 'altered_mark_missing', 'critical', 'sin marcar', 0)"
     )
     db.conn.commit()
-    captured = {}
-    import api.services.lifecycle_monitor as lm
-    monkeypatch.setattr(lm, "emit_alert",
-                        lambda *a, **k: captured.update(k) or 1)
+    calls = _capture(monkeypatch)
     h.check_ia_marking_health(db, grace_hours=72)
-    assert captured.get("alert_type") == "ia_mark_health_ok"
-    assert captured.get("severity") == "info"
+    types = [c.get("alert_type") for c in calls]
+    assert "ia_mark_health_ok" in types
     # La crítica anterior debe quedar cerrada
     row = db.conn.execute(
         "SELECT resolved FROM pipeline_alerts WHERE alert_type='altered_mark_missing'"
     ).fetchone()
     assert row["resolved"] == 1
+
+
+def test_check_emits_stalled_when_no_progress(monkeypatch):
+    db = FakeDB()
+    # Hay pendientes (V_OLD) y ningún progreso registrado → estancado.
+    calls = _capture(monkeypatch)
+    h.check_ia_marking_health(db, grace_hours=72)
+    types = [c.get("alert_type") for c in calls]
+    assert "ia_backfill_stalled" in types
+
+
+def test_backfill_stalled_check():
+    assert h.backfill_stalled_check(None) is True
+    assert h.backfill_stalled_check("2020-01-01T00:00:00") is True
+    assert h.backfill_stalled_check(datetime.now().isoformat(timespec="seconds")) is False

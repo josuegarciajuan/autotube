@@ -1403,6 +1403,9 @@ def migrate_v2(db_path: str = None):
     # ── v58: consumed_topics — shared anti-repetition registry ──
     _migrate_v58(conn, logger)
 
+    # ── v59: altered-content skip columns (backfill IA robusto) ──
+    _migrate_v59(conn, logger)
+
     conn.commit()
     conn.close()
     
@@ -3532,6 +3535,38 @@ def _migrate_v58(conn, logger):
         logger.info("Migration v58: consumed_topics registry ensured")
 
 
+def _migrate_v59(conn, logger):
+    """Idempotent v59: marcado IA — columnas de skip/intentos.
+
+    El backfill se atascaba reintentando indefinidamente ítems que YouTube ya
+    había eliminado (``deleted_on_yt``/``unavailable``) y abortaba la sesión
+    diaria sin avanzar. Estas columnas permiten descartar ítems no aplicables
+    con un motivo auditable, sin falsear ``manual_altered_content_done``.
+    """
+    new_columns = [
+        ("manual_altered_content_skip", "INTEGER DEFAULT 0"),
+        ("manual_altered_content_skip_reason", "TEXT"),
+        ("manual_altered_content_attempts", "INTEGER DEFAULT 0"),
+        ("manual_altered_content_skip_at", "TEXT"),
+    ]
+    added = 0
+    for table in ("videos", "shorts"):
+        try:
+            existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        except sqlite3.OperationalError:
+            logger.debug("Migration v59: %s table does not exist yet — skipping", table)
+            continue
+        for column, definition in new_columns:
+            if column not in existing:
+                try:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+                    added += 1
+                except sqlite3.OperationalError as e:
+                    logger.debug("v59 %s.%s: %s", table, column, e)
+    conn.commit()
+    logger.info("Migration v59: altered-content skip columns ensured (%d added)", added)
+
+
 def _migrate_v10(conn, logger):
     """Idempotent v10 migration: optimal_publish_slots for data-driven peak hour calculation.
 
@@ -3933,6 +3968,8 @@ class ExtendedDatabase(Database):
                     "peak_source", "auto_playlist_id", "auto_playlist_name",
                     "target_playlist_id", "target_playlist_slug",
                     "manual_altered_content_done", "manual_end_screens_done",
+                    "manual_altered_content_skip", "manual_altered_content_skip_reason",
+                    "manual_altered_content_attempts", "manual_altered_content_skip_at",
                     "generation_started_at", "generation_finished_at",
                     "scheduled_upload_at",
                     # ── Published verification (v23) ──
