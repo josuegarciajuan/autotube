@@ -80,6 +80,36 @@ def _channel_coverage_by_day(pending: list[dict], tz) -> dict:
     return coverage
 
 
+def _published_today_count(db, channel_id: int, tz) -> int:
+    """Nº de vídeos ya publicados HOY (fecha local del canal). 0 cuota.
+
+    La cola pendiente deja de contar un vídeo en cuanto se publica; sin esto,
+    un canal cuyo vídeo diario se publica de madrugada (p. ej. 03:00 UTC) aparecía
+    con "hueco de hoy" en cada auditoría posterior → alerta de déficit diaria
+    espuria (bug canal4, sep 2026).
+    """
+    try:
+        from api.time_utils import parse_utc
+        with db._connect() as conn:
+            rows = conn.execute(
+                """SELECT published_at FROM videos
+                   WHERE channel_id = ? AND status = 'published'
+                     AND published_at IS NOT NULL
+                     AND published_at >= datetime('now', '-2 days')""",
+                (channel_id,),
+            ).fetchall()
+        today = datetime.now(timezone.utc).astimezone(tz).date()
+        count = 0
+        for row in rows:
+            published = parse_utc(row["published_at"])
+            if published is not None and published.astimezone(tz).date() == today:
+                count += 1
+        return count
+    except Exception as exc:
+        logger.debug("[coverage] published-today scan skipped: %s", exc)
+        return 0
+
+
 def _maybe_alert_dry(db, slug: str, channel_id: int | None = None) -> bool:
     """Alerta (deduplicada 1/día) si el canal no tiene nada pendiente de publicar."""
     try:
@@ -393,13 +423,19 @@ def ensure_daily_publish_coverage(db=None, horizon_days: int = 2,
             coverage = _channel_coverage_by_day(pending, tz)
 
             today_local = now_utc.astimezone(tz).date()
+            # HOY ya cubierto por un vídeo publicado hoy cuenta como cobertura:
+            # la cola pendiente lo excluye tras publicarse.
+            published_today = _published_today_count(db, ch_id, tz)
             days = []
             for i in range(horizon_days):
                 d = today_local + timedelta(days=i)
                 if (i == 0 and peak_hour is not None
                         and now_utc.astimezone(tz).hour >= peak_hour):
                     continue  # pico de hoy ya pasado → no rellenable
-                days.append((d, coverage.get(d, 0)))
+                count = coverage.get(d, 0)
+                if i == 0:
+                    count += published_today
+                days.append((d, count))
 
             deficit_days = [str(d) for d, c in days if c < n]
             reason = "cobertura OK"
