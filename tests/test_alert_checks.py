@@ -19,6 +19,7 @@ from database.db import init_db
 from database.db_extended import ExtendedDatabase
 from api.services.lifecycle_monitor import (
     _check_tasks_alive,
+    _check_video_phase_stuck,
     _check_awaiting_upload_stuck,
     _check_upload_retry_loop,
     _check_stats_collection_failed,
@@ -46,6 +47,7 @@ ALTER TABLE videos ADD COLUMN generation_finished_at TIMESTAMP;
 ALTER TABLE videos ADD COLUMN scheduled_upload_at TEXT;
 ALTER TABLE videos ADD COLUMN error_message TEXT DEFAULT '';
 ALTER TABLE videos ADD COLUMN manual_altered_content_done INTEGER DEFAULT 0;
+ALTER TABLE videos ADD COLUMN progress INTEGER DEFAULT 0;
 -- Columna que usa _auto_resolve_completed (longform_visibility_mismatch);
 -- sin ella el auto-resolve abortaba en los tests y no resolvía nada.
 -- (privacy_status ya viene en schema.sql.)
@@ -68,7 +70,9 @@ CREATE TABLE IF NOT EXISTS generation_jobs (
     error_msg   TEXT,
     started_at  TIMESTAMP,
     finished_at TIMESTAMP,
-    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_heartbeat_at TIMESTAMP,
+    pipeline_phase TEXT
 );
 
 CREATE TABLE IF NOT EXISTS shorts (
@@ -121,6 +125,18 @@ CREATE TABLE IF NOT EXISTS pipeline_alerts (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_unique_active
 ON pipeline_alerts(entity_type, entity_id, alert_type)
 WHERE resolved = 0;
+
+CREATE TABLE IF NOT EXISTS lifecycle_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_type TEXT,
+    entity_id   INTEGER,
+    channel_id  INTEGER,
+    phase       TEXT,
+    event       TEXT,
+    status      TEXT,
+    message     TEXT,
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -459,6 +475,63 @@ def test_stale_info_alerts_are_retired_after_retention(tmp_path):
     assert rows["editorial_review_success"] == 1
     assert rows["ia_mark_health_ok"] == 0
     assert rows["phase_nonfatal"] == 0
+
+
+def _insert_generating(db, vid, *, phase='video',
+                       hb_offset='-0 minutes', start_offset='-300 minutes'):
+    """Vídeo generando + job con heartbeat + evento de fase 'started'."""
+    with db._connect() as conn:
+        conn.execute(
+            "INSERT INTO videos (id, channel_id, canal, video_path, status, "
+            "progress_phase, created_at) VALUES (?, 1, 'canal1', '/tmp/x.mp4', "
+            "'generating', ?, datetime('now','-10 days'))",
+            (vid, phase),
+        )
+        conn.execute(
+            "INSERT INTO generation_jobs (id, channel_id, video_id, action, status, "
+            "last_heartbeat_at) VALUES (?, 1, ?, 'generate_only', 'running', "
+            "datetime('now', ?))",
+            (vid, vid, hb_offset),
+        )
+        conn.execute(
+            "INSERT INTO lifecycle_events (entity_type, entity_id, phase, event, "
+            "status, created_at) VALUES ('video', ?, ?, ?, 'started', "
+            "datetime('now', ?))",
+            (vid, phase, f"{phase}_started", start_offset),
+        )
+        conn.commit()
+
+
+def test_phase_stuck_not_alerted_when_heartbeat_fresh(tmp_path):
+    """Un render largo pero vivo (heartbeat fresco) NO es un atasco."""
+    db = _build_db(tmp_path)
+    _insert_generating(db, 50, hb_offset='-0 minutes', start_offset='-300 minutes')
+    assert _check_video_phase_stuck(db) == 0
+
+
+def test_phase_stuck_resolves_alert_when_heartbeat_fresh(tmp_path):
+    db = _build_db(tmp_path)
+    _insert_generating(db, 51, hb_offset='-1 minutes', start_offset='-300 minutes')
+    with db._connect() as conn:
+        conn.execute(
+            "INSERT INTO pipeline_alerts(entity_type, entity_id, channel_id, alert_type, "
+            "severity, title) VALUES ('video', 51, 1, 'stuck', 'warning', 'stuck')"
+        )
+        conn.commit()
+
+    assert _check_video_phase_stuck(db) == 0
+    with db._connect() as conn:
+        row = conn.execute(
+            "SELECT resolved FROM pipeline_alerts WHERE alert_type='stuck' AND entity_id=51"
+        ).fetchone()
+    assert row["resolved"] == 1
+
+
+def test_phase_stuck_alerted_when_heartbeat_stale(tmp_path):
+    """Heartbeat congelado + fase sobre el timeout → alerta real."""
+    db = _build_db(tmp_path)
+    _insert_generating(db, 52, hb_offset='-60 minutes', start_offset='-300 minutes')
+    assert _check_video_phase_stuck(db) == 1
 
 
 def test_quota_recovery_timeout_covers_sleep_interval():

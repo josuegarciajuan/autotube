@@ -112,6 +112,11 @@ PHASE_TIMEOUTS = {
     ('short', 'extract'): 20,
 }
 
+# Un render largo pero VIVO no está atascado. El worker late cada 30 s; si el
+# heartbeat es más reciente que esto, la fase progresa aunque supere su timeout
+# (p. ej. un render de muchas escenas → falso positivo "stuck", video 2469).
+STUCK_HEARTBEAT_STALE_MIN = 15
+
 # Videos stuck in uploaded_private (not yet public) for too long
 PUBLISH_DELAY_THRESHOLD_HOURS = 48  # warn if uploaded_private > 48h
 
@@ -592,6 +597,23 @@ def resolve_all_alerts(db, severity: Optional[str] = None) -> int:
 # Internal health checks
 # ═══════════════════════════════════════════════════════════════
 
+def _resolve_stuck_alert(conn, video_id: int) -> int:
+    """Cierra la alerta 'stuck' de un vídeo que en realidad está progresando."""
+    try:
+        cur = conn.execute(
+            """UPDATE pipeline_alerts
+               SET resolved = 1, resolved_at = datetime('now'), acknowledged = 1,
+                   message = COALESCE(message, '') ||
+                     ' [Auto-resuelto: fase viva (heartbeat fresco)]'
+               WHERE entity_type = 'video' AND entity_id = ?
+                 AND alert_type = 'stuck' AND resolved = 0""",
+            (video_id,),
+        )
+        return cur.rowcount
+    except Exception:
+        return 0
+
+
 def _check_video_phase_stuck(db) -> int:
     """Alert on videos stuck in generating status with no progress."""
     created = 0
@@ -613,6 +635,18 @@ def _check_video_phase_stuck(db) -> int:
                 entity_type = "video"
                 timeout = PHASE_TIMEOUTS.get((entity_type, phase), 60)
 
+                # Edad del heartbeat: una fase larga pero viva NO está atascada.
+                hb_age_min = None
+                if row["last_heartbeat_at"]:
+                    try:
+                        hb = datetime.strptime(row["last_heartbeat_at"], "%Y-%m-%d %H:%M:%S")
+                        hb_age_min = (_utcnow() - hb).total_seconds() / 60
+                    except (ValueError, TypeError):
+                        hb_age_min = None
+                heartbeat_alive = (
+                    hb_age_min is not None and hb_age_min <= STUCK_HEARTBEAT_STALE_MIN
+                )
+
                 # Check last lifecycle event for this phase
                 last_event = conn.execute(
                     """SELECT created_at, status FROM lifecycle_events
@@ -622,37 +656,45 @@ def _check_video_phase_stuck(db) -> int:
                     (row["id"], phase),
                 ).fetchone()
 
+                stuck = False
+                reason = ""
+                meta = {"phase": phase}
                 if not last_event:
                     # No start event logged yet — check job heartbeat
-                    if row["last_heartbeat_at"]:
-                        try:
-                            hb = datetime.strptime(row["last_heartbeat_at"], "%Y-%m-%d %H:%M:%S")
-                            stuck_min = (_utcnow() - hb).total_seconds() / 60
-                            if stuck_min > timeout:
-                                created += _maybe_create_alert(
-                                    db, conn, "video", row["id"], row["channel_id"],
-                                    "stuck", "warning",
-                                    f"Video #{row['id']} stuck in phase '{phase}'",
-                                    f"No progress for {int(stuck_min)} min (timeout: {timeout} min)",
-                                    {"phase": phase, "stuck_minutes": int(stuck_min), "job_id": row["job_id"]},
-                                )
-                        except (ValueError, TypeError):
-                            pass
+                    if hb_age_min is not None and hb_age_min > timeout:
+                        stuck = True
+                        meta = {"phase": phase, "stuck_minutes": int(hb_age_min),
+                                "job_id": row["job_id"]}
+                        reason = (f"No progress for {int(hb_age_min)} min "
+                                  f"(timeout: {timeout} min)")
                 else:
-                    # Check if start was too long ago
+                    # Start event exists: alerta solo si superó el timeout Y el
+                    # heartbeat está congelado (si no, el render sigue vivo).
                     try:
-                        started_at = datetime.strptime(last_event["created_at"][:19], "%Y-%m-%d %H:%M:%S")
+                        started_at = datetime.strptime(
+                            last_event["created_at"][:19], "%Y-%m-%d %H:%M:%S")
                         elapsed_min = (_utcnow() - started_at).total_seconds() / 60
-                        if elapsed_min > timeout and last_event["status"] == "started":
-                            created += _maybe_create_alert(
-                                db, conn, "video", row["id"], row["channel_id"],
-                                "stuck", "warning",
-                                f"Video #{row['id']} stuck in phase '{phase}'",
-                                f"Phase started {int(elapsed_min)} min ago (timeout: {timeout} min)",
-                                {"phase": phase, "elapsed_minutes": int(elapsed_min)},
-                            )
+                        if (elapsed_min > timeout and last_event["status"] == "started"
+                                and not heartbeat_alive):
+                            stuck = True
+                            meta = {"phase": phase, "elapsed_minutes": int(elapsed_min)}
+                            reason = (f"Phase started {int(elapsed_min)} min ago "
+                                      f"(timeout: {timeout} min)")
                     except (ValueError, TypeError):
                         pass
+
+                if stuck:
+                    created += _maybe_create_alert(
+                        db, conn, "video", row["id"], row["channel_id"],
+                        "stuck", "warning",
+                        f"Video #{row['id']} stuck in phase '{phase}'",
+                        reason, meta,
+                    )
+                elif heartbeat_alive:
+                    # La fase avanza (heartbeat fresco): no hay atasco, cierra
+                    # cualquier alerta previa (p. ej. falso positivo de render largo).
+                    _resolve_stuck_alert(conn, row["id"])
+            conn.commit()
     except Exception as exc:
         logger.warning("Video stuck check failed: %s", exc)
     return created
