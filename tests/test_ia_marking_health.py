@@ -135,3 +135,8 @@ def test_backfill_stalled_check():
     assert h.backfill_stalled_check(None) is True
     assert h.backfill_stalled_check("2020-01-01T00:00:00") is True
     assert h.backfill_stalled_check(datetime.now().isoformat(timespec="seconds")) is False
+    # El estado real se guarda con tz (Europe/Madrid): no debe dar estancado.
+    from datetime import timezone, timedelta as _td
+    aware_now = datetime.now(timezone(_td(hours=2))).isoformat(timespec="seconds")
+    assert h.backfill_stalled_check(aware_now) is False
+    assert h.backfill_stalled_check("2020-01-01T00:00:00+02:00") is True
