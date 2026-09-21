@@ -31,6 +31,25 @@ alta (load > 20) el riesgo aumenta.
 2. `pipeline/youtube_browser.py` (driver de Playwright; hereda el env).
 3. `autotube-panel.service` (`Environment=UV_USE_IO_URING=0`).
 
+### Defensa en profundidad a nivel kernel (host)
+
+`UV_USE_IO_URING=0` no cubre a todo proceso node (p. ej. `npm install`/`npm ci`
+lanzados a mano, o `vite build` que ya estuviera en vuelo). Refuerzo del host:
+
+```conf
+# /etc/sysctl.d/99-io-uring-disable.conf
+kernel.io_uring_disabled=2
+```
+
+- `0` = io_uring habilitado (por defecto).
+- `2` = **deshabilitado para todos** (incluido root): cualquier intento de crear
+  un anillo io_uring falla con `EPERM`. Node/libuv hace fallback y no puede
+  quedarse colgado en el teardown.
+- Efecto inmediato para procesos nuevos: `sysctl --system` (no requiere reboot).
+  Los procesos ya atascados siguen hasta el reinicio.
+
+Comprobación: `cat /proc/sys/kernel/io_uring_disabled` → `2`.
+
 ## Detección
 
 `api/services/system_watchdog.py::check_node_io_uring` se ejecuta en el
@@ -44,9 +63,15 @@ Un proceso en estado `D` **solo se limpia reiniciando el host** (no hay vía
 userland). El watchdog avisa para elegir una ventana segura:
 
 1. `systemctl stop autotube-ia-backfill.{service,timer}`.
-2. Confirmar 0 generaciones/upload activos.
-3. `systemctl stop autotube-panel && reboot`.
-4. Verificar servicios/timers y relanzar el backfill.
+2. Confirmar 0 generaciones/upload activos:
+   `python3 scripts/deploy_safety.py` (aborta si hay long-form in-process) y
+   `sqlite3 autotube.db "SELECT id,status FROM videos WHERE status IN
+   ('generating','reassembling','uploading')"`.
+3. Asegurar el sysctl persistente: `cat /proc/sys/kernel/io_uring_disabled` → `2`.
+4. `systemctl stop autotube-panel && reboot`.
+5. Verificar servicios/timers (`systemctl list-units 'autotube*'`), que
+   `node_io_uring_stuck` se haya resuelto y relanzar el backfill.
 
 El coste de dejarlo es bajo (RAM/fds), así que puede posponerse al próximo
-reinicio natural.
+reinicio natural. La alerta `node_io_uring_stuck` se resuelve sola en el primer
+barrido del watchdog tras el reinicio (no hay procesos en estado `D`).

@@ -14,6 +14,9 @@ User=root
 WorkingDirectory=/root/autotube
 Environment=PYTHONUNBUFFERED=1
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
+# C5: evitar cuelgues de node en estado D (io_uring). Ver specs/io_uring-cuelgues.md.
+# Debe coincidir con el unit instalado en /etc/systemd/system/autotube-panel.service.
+Environment=UV_USE_IO_URING=0
 
 # Ensure DB is migrated, then start
 # Use /bin/sh -c to safely handle semicolons in Python -c code
