@@ -133,6 +133,20 @@ fuente correcta es el **YouTube Reporting API** (bulk, cuota propia):
 - Panel: signos vitales **Impresiones** y **CTR** en el Dashboard + panel
   "Embudo de alcance (Nd)" en ChannelDetail.
 
+**Latencia esperada (importante):** el Reporting API **no** sirve datos al
+instante. Tras crear el job, el primer informe tarda **hasta 48 h** (el del día de
+creación) y en esos primeros días publica también el **backfill de los 30 días
+previos**. Por tanto, tras activar la API y recolectar, `video_reach_daily` puede
+estar vacía legítimamente durante ~2 días — NO es un fallo de parseo ni un cero
+real. Estados explícitos que emite `ReachReportClient.sync` / `result["reach"]`:
+`disabled` (API no habilitada en el proyecto GCP → alerta accionable
+`reach_reporting_api_disabled`), `awaiting_reports` (jobs creados, informes aún no
+publicados), `no_jobs`, `no_auth`, `collected`. El panel se apoya además en
+`has_reach_data` / `reach_status` (`pending` vs `reporting_api`) para no leer un 0
+como dato real. La primera sincronización usa `REACH_REPORTS_MAX_PER_JOB=0` =
+**backfill completo** (tope duro 90 informes/job) para bajar los 30 días
+históricos en una sola pasada.
+
 Métricas secundarias expuestas en `GET /api/analytics/experiment`:
 `rejected.topic_dedup_rejected`, `rejected.script_novelty_blocked` y
 `reach_funnel` por canal.
