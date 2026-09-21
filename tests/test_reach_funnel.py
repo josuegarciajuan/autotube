@@ -87,3 +87,14 @@ def test_reach_report_seen(tmp_path):
     assert db.reach_report_seen("rep-1") is True
     # Idempotente
     db.mark_reach_report_seen("rep-1", job_id="job-1", report_type_id="channel_reach_basic_a1")
+
+
+def test_service_disabled_detection():
+    from pipeline.youtube_reach import service_disabled_error
+
+    class _E(Exception):
+        pass
+
+    assert service_disabled_error(_E("SERVICE_DISABLED")) is True
+    assert service_disabled_error(_E("API has not been used in project 123 before")) is True
+    assert service_disabled_error(_E("404 Not Found")) is False

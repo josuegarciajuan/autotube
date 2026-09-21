@@ -74,6 +74,26 @@ def _to_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def service_disabled_error(exc: Exception) -> bool:
+    """True si el 403 indica que la YouTube Reporting API no está habilitada.
+
+    Ocurre hasta que se activa la API en el proyecto GCP del canal. Es una acción
+    manual del operador (Cloud Console), no un bug: se degrada sin romper.
+    """
+    text = str(exc)
+    return (
+        "SERVICE_DISABLED" in text
+        or "has not been used in project" in text
+        or "it is disabled" in text
+    )
+
+
+def _activation_hint(exc: Exception) -> str:
+    import re as _re
+    m = _re.search(r"(https://console\.developers\.google\.com/[^\s\"']+)", str(exc))
+    return m.group(1) if m else "https://console.cloud.google.com/apis/library/youtubereporting.googleapis.com"
+
+
 def _normalize_ctr_pct(raw: Any) -> float:
     """Normaliza el CTR a porcentaje (0-100).
 
@@ -140,7 +160,14 @@ class ReachReportClient:
         try:
             self._load_report_types()
         except Exception as exc:  # noqa: BLE001
-            logger.warning("reportTypes.list failed for %s: %s", self.slug, exc)
+            if service_disabled_error(exc):
+                logger.warning(
+                    "[%s] YouTube Reporting API NO habilitada en el proyecto GCP "
+                    "(las impresiones/CTR no se recolectarán hasta activarla): %s",
+                    self.slug, _activation_hint(exc),
+                )
+            else:
+                logger.warning("reportTypes.list failed for %s: %s", self.slug, exc)
         return True
 
     def _load_report_types(self) -> None:
@@ -175,19 +202,30 @@ class ReachReportClient:
 
         existing: dict[str, str] = {}
         page_cursor = None
-        while True:
-            resp = (
-                self._service.jobs()
-                .list(**{_PAGE_KW: page_cursor, "pageSize": 100})
-                .execute()
-            )
-            for job in resp.get("jobs", []) or []:
-                rid = job.get("reportTypeId", "")
-                if rid and rid not in existing:
-                    existing[rid] = job.get("id", "")
-            page_cursor = resp.get("next" + "PageToken")
-            if not page_cursor:
-                break
+        try:
+            while True:
+                resp = (
+                    self._service.jobs()
+                    .list(**{_PAGE_KW: page_cursor, "pageSize": 100})
+                    .execute()
+                )
+                for job in resp.get("jobs", []) or []:
+                    rid = job.get("reportTypeId", "")
+                    if rid and rid not in existing:
+                        existing[rid] = job.get("id", "")
+                page_cursor = resp.get("next" + "PageToken")
+                if not page_cursor:
+                    break
+        except HttpError as exc:
+            if service_disabled_error(exc):
+                logger.warning(
+                    "[%s] YouTube Reporting API NO habilitada en el proyecto GCP — "
+                    "las impresiones/CTR no se pueden recolectar. Habilitar en: %s",
+                    self.slug, _activation_hint(exc),
+                )
+            else:
+                logger.warning("[%s] jobs().list falló: %s", self.slug, exc)
+            return {}
 
         for rid in RELEVANT_REPORT_TYPES:
             if rid in existing:
@@ -210,6 +248,12 @@ class ReachReportClient:
                 # 409: ya existe un job para ese tipo (carrera o creado fuera).
                 if getattr(exc, "resp", None) is not None and exc.resp.status == 409:
                     logger.info("[%s] job ya existía para %s", self.slug, rid)
+                elif service_disabled_error(exc):
+                    logger.warning(
+                        "[%s] YouTube Reporting API NO habilitada — habilitar en: %s",
+                        self.slug, _activation_hint(exc),
+                    )
+                    break
                 else:
                     logger.warning("[%s] no se pudo crear job %s: %s", self.slug, rid, exc)
             except Exception as exc:  # noqa: BLE001
