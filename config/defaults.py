@@ -107,6 +107,13 @@ SCRIPT_HISTORY_GATE_THRESHOLD = 0.55   # Jaccard de 4-gramas (conservador)
 # propios dicts {key, name, guidance} para forzar su repertorio.
 NARRATIVE_ARCHETYPES = []
 
+# ── Embudo de alcance: YouTube Reporting API (reach reports) ─────────────────
+# La Analytics API no expone impresiones orgánicas ni CTR; el Reporting API sí
+# (bulk, cuota propia). Kill-switch: poner False desactiva la recolección del
+# embudo sin desplegar (ver scripts/collect_reach_reports.py).
+REACH_REPORTS_ENABLED = True
+REACH_REPORTS_MAX_PER_JOB = 10
+
 # ═══════════════════════════════════════════════════════════════════
 # TEST MODE
 # ═══════════════════════════════════════════════════════════════════

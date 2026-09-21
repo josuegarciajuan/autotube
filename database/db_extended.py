@@ -1406,6 +1406,9 @@ def migrate_v2(db_path: str = None):
     # ── v59: altered-content skip columns (backfill IA robusto) ──
     _migrate_v59(conn, logger)
 
+    # ── v60: embudo de alcance (Reporting API reach reports) ──
+    _migrate_v60(conn, logger)
+
     conn.commit()
     conn.close()
     
@@ -3565,6 +3568,49 @@ def _migrate_v59(conn, logger):
                     logger.debug("v59 %s.%s: %s", table, column, e)
     conn.commit()
     logger.info("Migration v59: altered-content skip columns ensured (%d added)", added)
+
+
+def _migrate_v60(conn, logger):
+    """Idempotent v60: embudo de alcance (Reporting API reach reports).
+
+    La Analytics API no expone impresiones orgánicas ni su CTR; el Reporting API
+    las sirve en bulk por vídeo y día. Estas tablas guardan la serie diaria del
+    embudo (impresiones → CTR → retención → watch/subs) y el registro de reportes
+    ya descargados para no reprocesarlos.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS video_reach_daily (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id INTEGER NOT NULL,
+            yt_video_id TEXT NOT NULL,
+            date TEXT NOT NULL,                       -- YYYY-MM-DD (día YouTube)
+            impressions INTEGER DEFAULT 0,            -- video_thumbnail_impressions
+            impressions_ctr REAL DEFAULT 0,           -- % clicks/impresiones (0-100)
+            retention_pct REAL DEFAULT 0,             -- average_view_duration_percentage
+            watch_minutes REAL DEFAULT 0,
+            subs_gained INTEGER DEFAULT 0,
+            views INTEGER DEFAULT 0,
+            traffic_source TEXT,
+            source TEXT DEFAULT 'reporting_api',
+            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(channel_id, yt_video_id, date)
+        );
+        CREATE INDEX IF NOT EXISTS idx_vrd_channel_date
+            ON video_reach_daily(channel_id, date);
+        CREATE INDEX IF NOT EXISTS idx_vrd_video
+            ON video_reach_daily(yt_video_id, date);
+
+        CREATE TABLE IF NOT EXISTS reach_reports_seen (
+            report_id TEXT PRIMARY KEY,
+            job_id TEXT,
+            report_type_id TEXT,
+            downloaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+    )
+    conn.commit()
+    logger.info("Migration v60: video_reach_daily + reach_reports_seen ensured")
 
 
 def _migrate_v10(conn, logger):
@@ -6616,6 +6662,172 @@ class ExtendedDatabase(Database):
                 }
         return result
 
+    # ── Embudo de alcance (Reporting API reach reports, v60) ──
+
+    def upsert_video_reach_daily(
+        self,
+        channel_id: int,
+        yt_video_id: str,
+        date: str,
+        *,
+        impressions: int | None = None,
+        impressions_ctr: float | None = None,
+        retention_pct: float | None = None,
+        watch_minutes: float | None = None,
+        subs_gained: int | None = None,
+        views: int | None = None,
+        traffic_source: str | None = None,
+        source: str = "reporting_api",
+    ) -> None:
+        """Upsert de una fila del embudo por vídeo/día.
+
+        Los campos no aportados se conservan (COALESCE con el valor existente):
+        el reach report solo trae impresiones/CTR y el basic report trae
+        retención/watch/subs, así que se escriben en pasadas distintas.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO video_reach_daily
+                     (channel_id, yt_video_id, date, impressions, impressions_ctr,
+                      retention_pct, watch_minutes, subs_gained, views,
+                      traffic_source, source, fetched_at)
+                   VALUES (?, ?, ?, COALESCE(?,0), COALESCE(?,0), COALESCE(?,0),
+                           COALESCE(?,0), COALESCE(?,0), COALESCE(?,0), ?, ?,
+                           CURRENT_TIMESTAMP)
+                   ON CONFLICT(channel_id, yt_video_id, date) DO UPDATE SET
+                     impressions = COALESCE(?, video_reach_daily.impressions),
+                     impressions_ctr = COALESCE(?, video_reach_daily.impressions_ctr),
+                     retention_pct = COALESCE(?, video_reach_daily.retention_pct),
+                     watch_minutes = COALESCE(?, video_reach_daily.watch_minutes),
+                     subs_gained = COALESCE(?, video_reach_daily.subs_gained),
+                     views = COALESCE(?, video_reach_daily.views),
+                     traffic_source = COALESCE(?, video_reach_daily.traffic_source),
+                     source = ?,
+                     fetched_at = CURRENT_TIMESTAMP""",
+                (
+                    channel_id, yt_video_id, date, impressions, impressions_ctr,
+                    retention_pct, watch_minutes, subs_gained, views,
+                    traffic_source, source,
+                    impressions, impressions_ctr, retention_pct, watch_minutes,
+                    subs_gained, views, traffic_source, source,
+                ),
+            )
+            conn.commit()
+
+    def reach_report_seen(self, report_id: str) -> bool:
+        """True si el reporte bulk ya se descargó (evita reprocesarlo)."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM reach_reports_seen WHERE report_id = ?", (report_id,)
+            ).fetchone()
+        return row is not None
+
+    def mark_reach_report_seen(
+        self, report_id: str, job_id: str = "", report_type_id: str = ""
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO reach_reports_seen
+                     (report_id, job_id, report_type_id) VALUES (?, ?, ?)""",
+                (report_id, job_id, report_type_id),
+            )
+            conn.commit()
+
+    def get_channel_funnel(self, channel_id: int, days: int = 30) -> dict:
+        """Embudo agregado del canal: impresiones → clics → vistas → watch → subs.
+
+        Lee de ``video_reach_daily`` (Reporting API). Incluye conversión entre
+        etapas para localizar dónde se pierde el alcance.
+        """
+        with self._connect() as conn:
+            agg = conn.execute(
+                """SELECT
+                     COALESCE(SUM(impressions), 0) AS impressions,
+                     COALESCE(SUM(impressions * impressions_ctr / 100.0), 0) AS clicks,
+                     COALESCE(SUM(views), 0) AS views,
+                     COALESCE(SUM(watch_minutes), 0) AS watch_minutes,
+                     COALESCE(SUM(subs_gained), 0) AS subs_gained,
+                     ROUND(AVG(CASE WHEN retention_pct > 0 THEN retention_pct END), 2) AS retention_pct,
+                     COUNT(DISTINCT yt_video_id) AS videos
+                   FROM video_reach_daily
+                   WHERE channel_id = ?
+                     AND date >= date('now', ?)""",
+                (channel_id, f"-{days} days"),
+            ).fetchone()
+
+            videos = conn.execute(
+                """SELECT yt_video_id,
+                          SUM(impressions) AS impressions,
+                          ROUND(SUM(impressions * impressions_ctr / 100.0), 0) AS clicks,
+                          SUM(views) AS views,
+                          ROUND(SUM(watch_minutes), 1) AS watch_minutes,
+                          SUM(subs_gained) AS subs_gained,
+                          ROUND(AVG(CASE WHEN retention_pct > 0 THEN retention_pct END), 2) AS retention_pct
+                   FROM video_reach_daily
+                   WHERE channel_id = ? AND date >= date('now', ?)
+                   GROUP BY yt_video_id
+                   ORDER BY impressions DESC
+                   LIMIT 100""",
+                (channel_id, f"-{days} days"),
+            ).fetchall()
+
+        impressions = int(agg["impressions"] or 0)
+        clicks = int(agg["clicks"] or 0)
+        views = int(agg["views"] or 0)
+        watch_minutes = float(agg["watch_minutes"] or 0)
+        subs = int(agg["subs_gained"] or 0)
+
+        def _pct(num, den):
+            return round(num / den * 100, 2) if den else None
+
+        return {
+            "channel_id": channel_id,
+            "days": days,
+            "impressions": impressions,
+            "clicks": clicks,
+            "views": views,
+            "watch_hours": round(watch_minutes / 60.0, 1),
+            "subs_gained": subs,
+            "ctr_pct": _pct(clicks, impressions),
+            "retention_pct": float(agg["retention_pct"]) if agg["retention_pct"] else None,
+            "video_count": int(agg["videos"] or 0),
+            "conversion": {
+                "impression_to_click_pct": _pct(clicks, impressions),
+                "click_to_view_pct": _pct(views, clicks),
+                "view_to_sub_pct": _pct(subs, views),
+            },
+            "videos": [dict(r) for r in videos],
+        }
+
+    def get_daily_reach_series(self, days: int = 30) -> dict[int, dict]:
+        """Serie diaria agregada de impresiones/CTR/views por canal (sparklines).
+
+        Returns: {channel_id: {"impressions": [...], "ctr": [...], "views": [...]}}
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT channel_id, date,
+                          SUM(impressions) AS impressions,
+                          SUM(impressions * impressions_ctr / 100.0) AS clicks,
+                          SUM(views) AS views
+                   FROM video_reach_daily
+                   WHERE date >= date('now', ?)
+                   GROUP BY channel_id, date
+                   ORDER BY channel_id, date""",
+                (f"-{days} days",),
+            ).fetchall()
+
+        out: dict[int, dict] = {}
+        for r in rows:
+            cid = r["channel_id"]
+            bucket = out.setdefault(cid, {"impressions": [], "ctr": [], "views": []})
+            imp = int(r["impressions"] or 0)
+            clk = float(r["clicks"] or 0)
+            bucket["impressions"].append(imp)
+            bucket["ctr"].append(round(clk / imp * 100, 2) if imp else 0)
+            bucket["views"].append(int(r["views"] or 0))
+        return out
+
     # ── Growth Data for Charts ───────────────────────────────
 
     def get_channel_growth_data(self, channel_id: int, days: int = 30) -> list[dict]:
@@ -7010,6 +7222,44 @@ class ExtendedDatabase(Database):
             for r in shorts_eng_rows:
                 shorts_eng_data[r["days_ago"]] = r["engagement"] or 0
 
+            # ── Embudo de alcance (Reporting API, v60): impresiones + CTR ──
+            sparkline_impressions: list = []
+            sparkline_ctr: list = []
+            reach_where = "AND channel_id = ?" if channel_id else ""
+            reach_by_date: dict = {}
+            total_impressions = 0
+            reach_ctr = 0.0
+            try:
+                reach_spark_rows = conn.execute(
+                    f"""SELECT date,
+                               SUM(impressions) AS imp,
+                               SUM(impressions * impressions_ctr / 100.0) AS clicks
+                        FROM video_reach_daily
+                        WHERE date >= date('now', '-8 days') {reach_where}
+                        GROUP BY date ORDER BY date""",
+                    ch_params,
+                ).fetchall()
+                reach_by_date = {
+                    r["date"]: (int(r["imp"] or 0), float(r["clicks"] or 0))
+                    for r in reach_spark_rows
+                }
+                reach_tot = conn.execute(
+                    f"""SELECT COALESCE(SUM(impressions), 0) AS imp,
+                               COALESCE(SUM(impressions * impressions_ctr / 100.0), 0) AS clicks
+                        FROM video_reach_daily
+                        WHERE date >= date('now', '-30 days') {reach_where}""",
+                    ch_params,
+                ).fetchone()
+                total_impressions = int(reach_tot["imp"] or 0)
+                reach_ctr = (
+                    round(float(reach_tot["clicks"] or 0) / total_impressions * 100, 2)
+                    if total_impressions else 0.0
+                )
+            except sqlite3.OperationalError:
+                # Migración v60 pendiente: el dashboard degrada a ceros sin romper.
+                pass
+            _now_utc = datetime.now(_dt_timezone.utc)
+
             for days_ago in range(7, -1, -1):
                 sd = spark_data.get(days_ago, {})
                 sparkline_subscribers.append(sd.get("subs", 0))
@@ -7020,6 +7270,10 @@ class ExtendedDatabase(Database):
                 sparkline_watch_hours.append(
                     round(sd.get("watch_minutes", 0) / 60.0, 1)
                 )
+                _reach_day = (_now_utc - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+                _imp, _clk = reach_by_date.get(_reach_day, (0, 0))
+                sparkline_impressions.append(_imp)
+                sparkline_ctr.append(round(_clk / _imp * 100, 2) if _imp else 0)
 
             # ── Helper: build action history from timestamps ──
             def _build_action_history(row_dict: dict) -> list:
@@ -7226,10 +7480,22 @@ class ExtendedDatabase(Database):
                     "value": total_watch_hours,
                     "delta": _delta_pct(total_watch_hours, total_watch_hours_prev),
                 },
+                # Embudo de alcance (Reporting API reach): impresiones de
+                # miniatura 30d y su CTR. Alimentan los signos vitales del panel.
+                "impressions": {
+                    "value": total_impressions,
+                    "delta": None,
+                },
+                "ctr": {
+                    "value": reach_ctr,
+                    "delta": None,
+                },
                 "sparkline_subscribers": sparkline_subscribers,
                 "sparkline_views": sparkline_views,
                 "sparkline_engagement": sparkline_engagement,
                 "sparkline_watch_hours": sparkline_watch_hours,
+                "sparkline_impressions": sparkline_impressions,
+                "sparkline_ctr": sparkline_ctr,
             },
             "channels": channels_data,
             "pipeline": [dict(r) for r in pipeline],
@@ -7391,6 +7657,27 @@ class ExtendedDatabase(Database):
         ).fetchall()
         agg_map = {r["channel_id"]: dict(r) for r in agg_rows}
 
+        # ── v60: embudo de alcance real (Reporting API reach) ──
+        # Es la fuente fiable de impresiones orgánicas + CTR (la Analytics API no
+        # las expone). Si hay datos de embudo, mandan sobre el snapshot.
+        reach_map: dict[int, dict] = {}
+        try:
+            reach_rows = conn.execute(
+                f"""SELECT channel_id,
+                           COALESCE(SUM(impressions), 0) AS total_imp,
+                           COALESCE(SUM(impressions * impressions_ctr / 100.0), 0) AS clicks,
+                           ROUND(AVG(CASE WHEN retention_pct > 0 THEN retention_pct END), 2) AS avg_ret,
+                           MAX(fetched_at) AS last_fetch
+                    FROM video_reach_daily
+                    WHERE channel_id IN ({placeholders})
+                      AND date >= date('now', '-30 days')
+                    GROUP BY channel_id""",
+                channel_ids,
+            ).fetchall()
+            reach_map = {r["channel_id"]: dict(r) for r in reach_rows}
+        except sqlite3.OperationalError:
+            reach_map = {}
+
         # ── Coverage: latest collection run per channel ──
         cov_rows = conn.execute(
             f"""SELECT s1.channel_id, s1.status, s1.created_at
@@ -7411,21 +7698,37 @@ class ExtendedDatabase(Database):
             ch_id = ch["id"]
             agg = agg_map.get(ch_id, {})
             cov = cov_map.get(ch_id, {})
+            reach = reach_map.get(ch_id, {})
             has_data = bool(agg.get("cnt"))
+            reach_imp = int(reach.get("total_imp") or 0)
+
+            if reach_imp > 0:
+                # Embudo real: impresiones + CTR + retención del Reporting API.
+                avg_ctr_30d = round(float(reach.get("clicks") or 0) / reach_imp * 100, 2)
+                avg_ret_30d = reach.get("avg_ret") or 0
+                total_imp_30d = reach_imp
+                has_data = True
+            else:
+                avg_ctr_30d = agg.get("avg_ctr") if has_data else 0
+                avg_ret_30d = agg.get("avg_ret") if has_data else 0
+                total_imp_30d = int(agg.get("total_imp") or 0) if has_data else 0
+
             result[ch_id] = {
                 "channel_id": ch_id,
                 "channel_name": ch.get("name", ""),
                 "channel_slug": ch.get("slug", ""),
-                "avg_ctr_30d": agg.get("avg_ctr") if has_data else 0,
-                "avg_retention_30d": agg.get("avg_ret") if has_data else 0,
+                "avg_ctr_30d": avg_ctr_30d,
+                "avg_retention_30d": avg_ret_30d,
                 "avg_view_duration_30d": agg.get("avg_avd") if has_data else 0,
-                "total_impressions_30d": int(agg.get("total_imp") or 0) if has_data else 0,
+                "total_impressions_30d": total_imp_30d,
                 "impression_video_count": int(agg.get("imp_cnt") or 0) if has_data else 0,
                 "ctr_video_count": int(agg.get("imp_cnt") or 0) if has_data else 0,
                 "retention_video_count": int(agg.get("cnt") or 0) if has_data else 0,
                 "analytics_status": cov.get("status", "no_data"),
                 "last_collection_at": str(cov.get("created_at", "")) if cov else "",
                 "has_analytics_data": has_data,
+                # Origen del embudo (auditoría): reporting_api vs snapshot
+                "reach_source": "reporting_api" if reach_imp > 0 else "snapshot",
             }
         return result
 
@@ -10455,6 +10758,32 @@ class ExtendedDatabase(Database):
                 (key, value),
             )
             conn.commit()
+
+    def bump_system_counter(self, key: str, delta: int = 1) -> int:
+        """Incrementa un contador entero en system_state y devuelve el nuevo valor.
+
+        Se usa para métricas secundarias del experimento (p. ej. temas
+        rechazados por dedup/novedad) sin necesidad de tabla propia.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT value FROM system_state WHERE key = ?", (key,)
+            ).fetchone()
+            try:
+                current = int(row["value"]) if row and row["value"] not in (None, "") else 0
+            except (TypeError, ValueError):
+                current = 0
+            new_value = current + delta
+            conn.execute(
+                """INSERT INTO system_state (key, value, updated_at)
+                   VALUES (?, ?, datetime('now'))
+                   ON CONFLICT(key) DO UPDATE SET
+                     value = excluded.value,
+                     updated_at = excluded.updated_at""",
+                (key, str(new_value)),
+            )
+            conn.commit()
+        return new_value
 
     def is_channel_spam_blocked(self, channel_id: int) -> bool:
         """Return True if the channel's uploads are blocked by a YouTube spam strike.

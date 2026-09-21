@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api, API_TIME_ZONE } from '../lib/api'
 import { useDashboard, useRecentEvents, useQuotaStatus } from '../hooks/useQueries'
-import { Users, Eye, Heart, Clock, Cog, Wrench, Loader2, RefreshCw, X, CheckCircle2, AlertCircle, SkipForward, Zap, Share2 } from 'lucide-react'
+import { Users, Eye, Heart, Clock, Cog, Wrench, Loader2, RefreshCw, X, CheckCircle2, AlertCircle, SkipForward, Zap, Share2, BarChart2, MousePointerClick } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useChannelFilter } from '../context/ChannelFilterContext'
 import { useEasterEgg } from '../context/EasterEggContext'
@@ -357,6 +357,25 @@ export default function Dashboard() {
       breakdown: kpis?.total_views?.breakdown,
     },
     {
+      // Embudo de alcance (Reporting API reach): impresiones de miniatura 30d.
+      key: 'sparkline_impressions',
+      label: 'Impres.',
+      value: kpis?.impressions?.value ?? 0,
+      delta: kpis?.impressions?.delta ?? null,
+      icon: BarChart2,
+      color: '#38bdf8',
+    },
+    {
+      // CTR = clics / impresiones (%). El cuello de botella del packaging.
+      key: 'sparkline_ctr',
+      label: 'CTR',
+      value: kpis?.ctr?.value ?? 0,
+      delta: kpis?.ctr?.delta ?? null,
+      icon: MousePointerClick,
+      color: '#f472b6',
+      suffix: '%',
+    },
+    {
       key: 'sparkline_engagement',
       label: 'Engage',
       value: kpis?.engagement?.value ?? 0,
@@ -387,6 +406,8 @@ export default function Dashboard() {
   const sparklines: Record<string, number[]> = {
     sparkline_subscribers: kpis?.sparkline_subscribers || [],
     sparkline_views: kpis?.sparkline_views || [],
+    sparkline_impressions: kpis?.sparkline_impressions || [],
+    sparkline_ctr: kpis?.sparkline_ctr || [],
     sparkline_engagement: kpis?.sparkline_engagement || [],
     sparkline_watch_hours: kpis?.sparkline_watch_hours || [],
     in_production: Array(8).fill(kpis?.in_production?.value || 0),

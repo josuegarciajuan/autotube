@@ -378,6 +378,9 @@ export const api = {
   // Advanced analytics (CTR, traffic, demographics)
   getChannelCTR: (channelId: number) =>
     request<any>(`/channels/${channelId}/analytics/ctr`),
+  // Embudo de alcance (Reporting API reach): impresiones → CTR → vistas → watch → subs
+  getChannelFunnel: (channelId: number, days = 30) =>
+    request<any>(`/channels/${channelId}/analytics/funnel?days=${days}`),
   getChannelTraffic: (channelId: number) =>
     request<any>(`/channels/${channelId}/analytics/traffic`),
   getChannelDemographics: (channelId: number) =>

@@ -284,6 +284,7 @@ export default function ChannelDetail() {
   const [milestonesData, setMilestonesData] = useState<any>(null)
   const [contentRanking, setContentRanking] = useState<any[]>([])
   const [thumbStyles, setThumbStyles] = useState<any[]>([])
+  const [funnelData, setFunnelData] = useState<any>(null)
   const [growthDays, setGrowthDays] = useState(30)
 
   // Cleanup error videos state
@@ -486,13 +487,14 @@ export default function ChannelDetail() {
     if (videoTab !== 'growth' || !channelId) return
     async function loadGrowth() {
       try {
-        const [growth, mon, milestones, content, watchtime, thumbstyles] = await Promise.all([
+        const [growth, mon, milestones, content, watchtime, thumbstyles, funnel] = await Promise.all([
           api.getChannelGrowth(channelId, growthDays),
           api.getChannelMonetization(channelId),
           api.getChannelMilestones(channelId),
           api.getChannelContentRanking(channelId, 'views', 15),
           api.getChannelWatchTime(channelId),
           api.getThumbnailStyleCtr(channelId),
+          api.getChannelFunnel(channelId, growthDays),
         ])
         setGrowthData(growth)
         setMonetizationData(mon)
@@ -500,6 +502,7 @@ export default function ChannelDetail() {
         setContentRanking(content?.videos || [])
         setWatchTimeData(watchtime)
         setThumbStyles(thumbstyles?.styles || [])
+        setFunnelData(funnel)
       } catch (e) {
         console.error('Error loading growth data:', e)
       }
@@ -1573,6 +1576,43 @@ export default function ChannelDetail() {
                 yppProgressPct={watchTimeData.ypp_progress_pct}
                 remainingHours={watchTimeData.remaining_hours}
               />
+            )}
+
+            {/* Embudo de alcance (Reporting API reach, v60) */}
+            {funnelData && (funnelData.impressions > 0 || funnelData.video_count > 0) && (
+              <div className="glass p-4 rounded-xl">
+                <div className="flex items-center gap-2 mb-3">
+                  <BarChart3 size={18} className="text-neon-cyan" />
+                  <h3 className="text-sm font-semibold text-gray-300">
+                    Embudo de alcance ({funnelData.days}d)
+                  </h3>
+                  <span className="text-[10px] text-gray-600">
+                    fuente: {funnelData.video_count} videos · Reporting API
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-3">
+                  {[
+                    { label: 'Impresiones', value: formatShortNumber(funnelData.impressions) },
+                    { label: 'Clics (CTR)', value: `${formatShortNumber(funnelData.clicks)} · ${funnelData.ctr_pct ?? 0}%` },
+                    { label: 'Vistas', value: formatShortNumber(funnelData.views) },
+                    { label: 'Watch h', value: funnelData.watch_hours },
+                    { label: 'Subs', value: funnelData.subs_gained },
+                  ].map((s, i) => (
+                    <div key={i} className="rounded-lg border border-white/5 bg-dark-800/40 p-3">
+                      <div className="text-[10px] text-gray-500 uppercase tracking-wider">{s.label}</div>
+                      <div className="text-lg font-bold font-mono text-white">{s.value}</div>
+                    </div>
+                  ))}
+                </div>
+                <div className="flex flex-wrap gap-4 text-[11px] text-gray-500">
+                  <span>Impr.→clic: <b className="text-gray-300">{funnelData.conversion?.impression_to_click_pct ?? '—'}%</b></span>
+                  <span>clic→vista: <b className="text-gray-300">{funnelData.conversion?.click_to_view_pct ?? '—'}%</b></span>
+                  <span>vista→sub: <b className="text-gray-300">{funnelData.conversion?.view_to_sub_pct ?? '—'}%</b></span>
+                  {funnelData.retention_pct != null && (
+                    <span>Retención: <b className="text-gray-300">{funnelData.retention_pct}%</b></span>
+                  )}
+                </div>
+              </div>
             )}
 
             {/* Content Ranking */}

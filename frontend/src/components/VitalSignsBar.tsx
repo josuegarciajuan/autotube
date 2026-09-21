@@ -13,6 +13,8 @@ interface KPI {
   icon: typeof Heart
   color: string
   breakdown?: { longform: number; shorts: number }
+  /** Sufijo de la cifra (p. ej. '%' para el CTR). */
+  suffix?: string
 }
 
 interface VitalSignsBarProps {
@@ -66,7 +68,7 @@ export default function VitalSignsBar({ kpis, sparklines, channelBreakdown, prev
       {/* Scanline overlay */}
       <div className="relative">
         {/* KPI Row */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3"
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-7 gap-3"
           style={{
             background: 'linear-gradient(180deg, rgba(0,229,255,0.02) 0%, rgba(255,51,85,0.02) 100%)',
             borderRadius: '12px',
@@ -106,6 +108,7 @@ export default function VitalSignsBar({ kpis, sparklines, channelBreakdown, prev
                 <div className="flex items-baseline gap-1">
                   <span className={`text-xl font-bold font-mono ${isExpanded ? 'text-neon-red' : 'text-white'}`}>
                     <CountUpValue value={kpi.value} />
+                    {kpi.suffix && <span className="text-sm text-gray-400">{kpi.suffix}</span>}
                   </span>
                   <DeltaBadge delta={kpi.delta} color={kpi.color} />
                 </div>

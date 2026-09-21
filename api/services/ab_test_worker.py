@@ -422,6 +422,27 @@ class ABTestWorker:
         except Exception as exc:
             logger.debug("Local CTR fetch failed for %s: %s", video_id, exc)
 
+        # ── Fuente fiable: embudo de alcance (Reporting API reach, v60) ──
+        # La Analytics API NO expone impresiones orgánicas; el Reporting API sí.
+        try:
+            conn = self._get_db_conn()
+            rr = conn.execute(
+                """SELECT COALESCE(SUM(impressions), 0) AS imp,
+                          COALESCE(SUM(impressions * impressions_ctr / 100.0), 0) AS clicks
+                   FROM video_reach_daily
+                   WHERE yt_video_id = ?""",
+                (yt_video_id,),
+            ).fetchone()
+            imp = int(rr["imp"] or 0) if rr else 0
+            if imp > 0:
+                return {
+                    "ctr": round(float(rr["clicks"] or 0) / imp * 100, 2),
+                    "impressions": imp,
+                    "avg_duration": 0.0,
+                }
+        except Exception as exc:
+            logger.debug("Reach CTR fetch failed for %s: %s", video_id, exc)
+
         # ── Fallback: YouTube Analytics API ────────────────────
         if channel_slug:
             try:

@@ -603,6 +603,10 @@ class PipelineOrchestrator:
                             self.canal, (_ct_title or _ct)[:70], (_dup_label or "")[:70],
                         )
                         self.db.mark_content_used(content_item.get("id"))
+                        try:
+                            self.db.bump_system_counter("topic_dedup_rejected")
+                        except Exception:  # noqa: BLE001
+                            pass
                         continue
             except Exception as _td_exc:
                 logger.warning(f"[{self.canal}] topic-dedup check error (fail-open): {_td_exc}")
@@ -1815,6 +1819,10 @@ class PipelineOrchestrator:
                     exclude_id=script.get("id"),
                 )
                 if not _novelty.novel:
+                    try:
+                        self.db.bump_system_counter("script_novelty_blocked")
+                    except Exception:  # noqa: BLE001
+                        pass
                     try:
                         from api.services.lifecycle_monitor import emit_alert
                         _ch = self.db.get_channel_by_slug(self.canal)

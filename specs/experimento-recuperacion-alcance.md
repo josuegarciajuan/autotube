@@ -116,6 +116,33 @@ Cada subsistema tiene kill-switch sin despliegue:
 - `scripts/audit_catalog_duplicates.py` → reporte (solo lectura) de near-duplicados,
   plantillas y disclosure faltante.
 
+### 9.1 Embudo de alcance (impresiones → CTR → retención) — v51 (sep 2026)
+La **Analytics API no expone impresiones orgánicas ni su CTR**: la métrica
+`impressions` no existe (se renombró a `adImpressions`, impresiones de anuncios) y
+pedirla devolvía 400, invalidando además la consulta bulk de retención/subs. La
+fuente correcta es el **YouTube Reporting API** (bulk, cuota propia):
+
+- `pipeline/youtube_reach.py` → reach reports `channel_reach_basic_a1`
+  (`video_thumbnail_impressions`, `video_thumbnail_impressions_ctr`) y
+  `channel_basic_a3` (retención/watch/subs).
+- `scripts/collect_reach_reports.py` → recolección **manual** (respeta
+  `STATS_AUTO_COLLECT=False`); también se dispara en la recolección profunda
+  ("Recolectar stats" con `deep=true`).
+- Persistencia: tabla `video_reach_daily` (migración v60).
+- Endpoint: `GET /api/channels/{id}/analytics/funnel?days=30`.
+- Panel: signos vitales **Impresiones** y **CTR** en el Dashboard + panel
+  "Embudo de alcance (Nd)" en ChannelDetail.
+
+Métricas secundarias expuestas en `GET /api/analytics/experiment`:
+`rejected.topic_dedup_rejected`, `rejected.script_novelty_blocked` y
+`reach_funnel` por canal.
+
+### 9.2 Cadencia congelada durante el experimento
+`pacing_profile.auto_transition_enabled()` devuelve **False** mientras el
+experimento esté activo (T+45), para no escalar a `normal` en plena recuperación.
+`scripts/freeze_pacing_for_experiment.py` fija el perfil (`recovery` por defecto)
+y desactiva la auto-transición; `--off` revierte.
+
 ## 10. Criterio de cierre
 El experimento se cierra cuando, a T+45: avisos = 0, alcance por vídeo recuperado y
 long-form con distribución y retención > 40 %, o cuando una regla de decisión obligue a

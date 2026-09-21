@@ -278,6 +278,10 @@ Devuelve SOLO un array JSON con 3 objetos, cada uno con campos "title" y "tema":
                                     "[%s] Tema ya consumido, descartado: '%s' ≈ '%s'",
                                     self.channel_slug, _lbl[:60], (_dl or "")[:60],
                                 )
+                                try:
+                                    self.db.bump_system_counter("topic_dedup_rejected")
+                                except Exception:  # noqa: BLE001
+                                    pass
                                 continue
                             _kept.append(_idea)
                         result = _kept
