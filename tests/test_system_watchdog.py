@@ -18,6 +18,11 @@ FAKE_PS = """\
 2222 Ss    10 node  node server.js
 3333 D     20 python3 python3 algo.py
 4444 D    1200 node  node driver.js
+5555 D    2000 npm   install     npm install
+6666 Dl   3000 npm   ci          npm ci
+7777 D    1500 python3 python3 algo.py
+8888 Ss      10 node  node server.js
+9999 D     900 cp    cp -r /root/x/node_modules /tmp
 """
 
 
@@ -25,12 +30,24 @@ def _fake_run(*a, **k):
     return types.SimpleNamespace(stdout=FAKE_PS)
 
 
-def test_find_stuck_filters_node_d_only(monkeypatch):
+def test_find_stuck_filters_node_tools_d_only(monkeypatch):
     monkeypatch.setattr(w.subprocess, "run", _fake_run)
     stuck = w.find_stuck_node_processes(min_seconds=600)
     pids = sorted(s["pid"] for s in stuck)
-    # 1234 (node, D, 3600s) y 4444 (node, D, 1200s); se excluyen el Ss y el python.
-    assert pids == [1234, 4444]
+    # node (1234, 4444) + npm (5555, 6666). Se excluyen Ss, python y el cp con
+    # 'node_modules' (basename no es una herramienta Node).
+    assert pids == [1234, 4444, 5555, 6666]
+
+
+def test_strict_matcher_ignores_node_modules_substring():
+    # Rutas/args con 'node'/'npm' como substring NO deben contar.
+    assert w._is_node_tool_process("cp", "cp -r /root/x/node_modules /tmp") is False
+    assert w._is_node_tool_process("cp", "cp -r /root/x/npm-cache /tmp") is False
+    # Herramientas Node reales (incluidas envueltas) SÍ cuentan.
+    assert w._is_node_tool_process("node", "node server.js") is True
+    assert w._is_node_tool_process("npm", "install npm install") is True
+    assert w._is_node_tool_process("sh", 'sh -c "npm ci"') is True
+    assert w._is_node_tool_process("npx", "npx vite build") is True
 
 
 def test_alert_emitted_when_stuck(monkeypatch):
