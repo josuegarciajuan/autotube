@@ -78,7 +78,8 @@ class RepackDB:
             """CREATE TABLE videos (
                 id INTEGER PRIMARY KEY, channel_id INTEGER, status TEXT,
                 yt_video_id TEXT, target_public_at TEXT, scheduled_upload_at TEXT,
-                uploaded_at TEXT, created_at TEXT, publish_mode TEXT)"""
+                uploaded_at TEXT, created_at TEXT, publish_mode TEXT,
+                published_at TEXT)"""
         )
         self.conn.execute(
             "CREATE TABLE channels (id INTEGER PRIMARY KEY, slug TEXT, config_json TEXT)"
@@ -262,6 +263,38 @@ class TestNullTargetFlagsChannel:
         assert 7 in affected, (
             f"canal con target NULL debe entrar al repack, affected={affected}"
         )
+
+
+# ── 3b. Hoy cubierto por un publicado hoy no es déficit ────────
+
+class TestPublishedTodayCountsAsCoverage:
+    """Un vídeo ya publicado HOY (fecha local) debe contar como cobertura del
+    día: sin esto, cada auditoría posterior a su publicación marcaba un hueco
+    falso y generaba la alerta de déficit a diario (bug canal4, sep 2026)."""
+
+    def test_published_today_count_excludes_old_and_unpublished(self):
+        import pytz
+
+        db = RepackDB(
+            videos=[
+                (1, 5, "published", "YT1", None, None, "2000-01-01 00:00:00",
+                 "2000-01-01 00:00:00", "scheduled"),
+                (2, 5, "published", "YT2", None, None, "2000-01-01 00:00:00",
+                 "2000-01-01 00:00:00", "scheduled"),
+                (3, 5, "uploaded_private", "YT3", None, None, "2000-01-01 00:00:00",
+                 "2000-01-01 00:00:00", "scheduled"),
+            ],
+        )
+        db.conn.execute("UPDATE videos SET published_at=datetime('now') WHERE id=1")
+        db.conn.execute("UPDATE videos SET published_at=datetime('now','-3 days') WHERE id=2")
+        db.conn.execute("UPDATE videos SET published_at=datetime('now') WHERE id=3")
+        db.conn.commit()
+
+        from api.services.publish_coverage import _published_today_count
+
+        tz = pytz.timezone("Europe/Madrid")
+        # Solo el id=1: published + hoy. El id=2 es antiguo; el id=3 no publicado.
+        assert _published_today_count(db, 5, tz) == 1
 
 
 # ── 4. _resolve_videos_per_day sigue al perfil de pacing ───────
