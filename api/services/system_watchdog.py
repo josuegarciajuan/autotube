@@ -1,17 +1,24 @@
-"""Watchdog de procesos node atascados en estado D (io_uring).
+"""Watchdog de procesos Node/npm atascados en estado D (io_uring).
 
-Contexto (sep 2026): un `vite build` quedó en estado `D (disk sleep)` dentro de
-`io_uring_cancel_generic` → `do_exit`, sin poder ser matado por ningún signal y
-bloqueando ocasionalmente el lock del hook post-merge. Este watchdog detecta
-procesos node atascados y avisa para poder reiniciar el host en ventana segura.
+Contexto (sep 2026): un `vite build` (o un `npm install`/`npm ci`) quedó en
+estado `D (disk sleep)` dentro de `io_uring_cancel_generic` → `do_exit`, sin
+poder ser matado por ningún signal y bloqueando ocasionalmente el lock del hook
+post-merge. Este watchdog detecta procesos Node/npm atascados y avisa para poder
+reiniciar el host en ventana segura.
+
+Detección: coincidencia EXACTA por palabra (basename, case-insensitive) contra
+`_NODE_TOOL_NAMES`. Antes el filtro era un substring `"node" in comm|args`, lo
+que (a) no detectaba `npm install`/`npm ci` (comm/args sin "node") y (b) podía
+dar falsos positivos por rutas que contienen "node" (p. ej. `node_modules`).
 
 Mitigación preventiva: `UV_USE_IO_URING=0` (en `apply_changes.sh`, en el driver
-de Playwright y en `autotube-panel.service`).
+de Playwright y en `autotube-panel.service`) + `kernel.io_uring_disabled=2`.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 
 logger = logging.getLogger("autotube.system_watchdog")
@@ -19,9 +26,28 @@ logger = logging.getLogger("autotube.system_watchdog")
 DEFAULT_MIN_SECONDS = 600  # 10 minutos
 ALERT_TYPE = "node_io_uring_stuck"
 
+# Ejecutables/palabras Node que pueden quedarse atascados en el teardown de
+# io_uring. Coincidencia exacta por palabra (no substring) para no confundir rutas.
+_NODE_TOOL_NAMES = frozenset({"node", "npm", "npx", "pnpm", "yarn", "corepack"})
+
+
+def _is_node_tool_process(comm: str, args: str) -> bool:
+    """True si alguna palabra de ``comm``/``args`` es una herramienta Node.
+
+    Coincidencia EXACTA por palabra con ``basename`` (case-insensitive): detecta
+    `node`/`npm`/`npx`/`pnpm`/`yarn`/`corepack` (incluso envueltos, p. ej.
+    ``sh -c "npm ci"``) sin marcar por error rutas como ``/x/node_modules``
+    (basename ``node_modules`` no está en el conjunto).
+    """
+    for word in f"{comm} {args}".split():
+        word = word.strip("\"'")  # sh -c "npm ci" → palabra '"npm' → 'npm'
+        if os.path.basename(word).lower() in _NODE_TOOL_NAMES:
+            return True
+    return False
+
 
 def find_stuck_node_processes(min_seconds: int = DEFAULT_MIN_SECONDS) -> list[dict]:
-    """Procesos node en estado D durante >= ``min_seconds``.
+    """Procesos Node/npm en estado D durante >= ``min_seconds``.
 
     Lee ``ps`` (barato y estable). Devuelve [{pid, elapsed_s, args}].
     """
@@ -42,7 +68,7 @@ def find_stuck_node_processes(min_seconds: int = DEFAULT_MIN_SECONDS) -> list[di
         pid_s, stat, etimes_s, comm, args = parts
         if not stat.startswith("D"):
             continue
-        if "node" not in comm.lower() and "node" not in args.lower():
+        if not _is_node_tool_process(comm, args):
             continue
         try:
             elapsed = int(etimes_s)
@@ -55,7 +81,7 @@ def find_stuck_node_processes(min_seconds: int = DEFAULT_MIN_SECONDS) -> list[di
 
 
 def check_node_io_uring(db, min_seconds: int = DEFAULT_MIN_SECONDS) -> dict:
-    """Emite alerta si hay node atascados; resuelve la alerta cuando se limpian."""
+    """Emite alerta si hay Node/npm atascados; la resuelve cuando se limpian."""
     stuck = find_stuck_node_processes(min_seconds=min_seconds)
     try:
         from api.services.lifecycle_monitor import create_alert
@@ -67,9 +93,9 @@ def check_node_io_uring(db, min_seconds: int = DEFAULT_MIN_SECONDS) -> dict:
         create_alert(
             db, entity_type="system", entity_id=0,
             alert_type=ALERT_TYPE, severity="warning",
-            title=f"⚠️ {len(stuck)} proceso(s) node atascado(s) en estado D",
+            title=f"⚠️ {len(stuck)} proceso(s) Node/npm atascado(s) en estado D",
             message=(
-                "Procesos node en sueño ininterrumpible (posible io_uring). "
+                "Procesos Node/npm en sueño ininterrumpible (posible io_uring). "
                 "No se pueden matar; se limpian con un reinicio del host. "
                 "No bloquean los deploys, pero conviene reiniciar en ventana segura. "
                 + "; ".join(f"pid={p['pid']} ({p['elapsed_s']//60} min): {p['args'][:80]}"

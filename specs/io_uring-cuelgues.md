@@ -53,9 +53,15 @@ Comprobación: `cat /proc/sys/kernel/io_uring_disabled` → `2`.
 ## Detección
 
 `api/services/system_watchdog.py::check_node_io_uring` se ejecuta en el
-`_health_monitor_loop` (cada 90 s): si hay un proceso node en estado `D` durante
-≥ 10 min emite la alerta **`node_io_uring_stuck`** (warning); cuando se limpia,
-la resuelve automáticamente.
+`_health_monitor_loop` (cada 90 s): si hay un proceso Node/npm en estado `D`
+durante ≥ 10 min emite la alerta **`node_io_uring_stuck`** (warning); cuando se
+limpia, la resuelve automáticamente.
+
+Herramientas detectadas: `node`, `npm`, `npx`, `pnpm`, `yarn`, `corepack`, con
+**coincidencia exacta por palabra** (basename, case-insensitive) sobre `comm`/`args`. Esto
+incluye `npm install`/`npm ci` (cuyo `comm`/`args` no contiene "node") y evita
+falsos positivos por rutas con `node`/`npm` como substring (p. ej.
+`node_modules`).
 
 ## Remediación
 
