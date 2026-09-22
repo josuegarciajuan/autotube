@@ -181,6 +181,40 @@ def _get_or_create_playwright():
         return pw
 
 
+def _context_is_alive(context) -> bool:
+    """True si un BrowserContext de Playwright sigue usable.
+
+    Un contexto puede morir (crash de Chromium, OOM, cierre inesperado) sin que
+    ``self._context`` pase a ``None`` ni cambie el hilo propietario. Sin este
+    chequeo, ``new_page()`` lanza "Target page, context or browser has been
+    closed" y el llamador nunca se recupera (bug que abortaba el backfill IA).
+    """
+    if context is None:
+        return False
+    try:
+        browser = getattr(context, "browser", None)
+        if browser is not None and hasattr(browser, "is_connected"):
+            if not browser.is_connected():
+                return False
+    except Exception:
+        # Acceder a ``.browser`` sobre un contexto cerrado lanza en Playwright.
+        return False
+    return True
+
+
+def _is_dead_context_error(exc: BaseException) -> bool:
+    """True si la excepción indica que el contexto/navegador murió."""
+    msg = str(exc).lower()
+    return any(s in msg for s in (
+        "has been closed",
+        "browser has been closed",
+        "target closed",
+        "browser closed",
+        "connection closed",
+        "target page, context or browser",
+    ))
+
+
 def _ensure_xvfb():
     global _xvfb_proc
     try:
@@ -258,11 +292,16 @@ class YouTubeBrowser:
         """
         current_thread = threading.get_native_id()
 
-        # ── Same thread — context is valid ──
-        if self._context is not None and self._owning_thread_id == current_thread:
+        # ── Same thread AND context alive — reuse ──
+        if (self._context is not None
+                and self._owning_thread_id == current_thread
+                and _context_is_alive(self._context)):
             return
 
-        # ── Different thread (or first call) — tear down old context ──
+        # ── Different thread, first call, OR dead context — tear down ──
+        # ``self._context`` no se pone a None cuando Chromium crashea (OOM /
+        # cierre inesperado): sin el chequeo de vida, reusar el contexto muerto
+        # hace que todo ``new_page()`` falle para siempre. Se recrea aquí.
         if self._context is not None:
             try:
                 self._context.close()
@@ -355,6 +394,33 @@ class YouTubeBrowser:
         raise RuntimeError(
             f"Failed to launch browser for {self.account} after 3 attempts: {last_error}"
         )
+
+    def _reset_context(self):
+        """Tira el contexto/navegador (posiblemente muerto) para que el
+        siguiente ``_ensure_browser()`` reconstruya una sesión limpia.
+
+        Se usa tras un fallo por contexto cerrado: sin esto, el objeto seguía
+        apuntando a un Chromium muerto (``_owning_thread_id`` no cambia) y todos
+        los ``new_page()`` posteriores fallaban.
+        """
+        try:
+            if self._context is not None:
+                self._context.close()
+        except Exception:
+            pass
+        self._context = None
+        self._owning_thread_id = None
+        if self._playwright is not None:
+            try:
+                self._playwright.stop()
+            except Exception:
+                pass
+            try:
+                _unregister_playwright(self._playwright)
+            except Exception:
+                pass
+        self._playwright = None
+        time.sleep(1.5)
 
     def _cleanup_stale_locks(self):
         """Remove Chromium singleton locks left by killed/interrupted sessions.
@@ -783,27 +849,48 @@ class YouTubeBrowser:
                 _unregister_playwright(self._playwright)
                 self._playwright = None
 
-    def mark_altered_content(self, youtube_video_id: str) -> bool:
+    def mark_altered_content(self, youtube_video_id: str,
+                             max_attempts: int = 3) -> bool:
         # Lock de proceso (threading) + lock de fichero por cuenta: el backfill
         # y el worker de generación son procesos distintos y no deben abrir dos
         # sesiones sobre el mismo perfil de Chromium.
         from pipeline.browser_lock import browser_account_lock
         account = getattr(self, "account", None) or "default"
         self.last_mark_reason = ""
+        ok, reason = False, "exception"
+        # Reintentos: un contexto muerto (crash de Chromium/OOM) es transitorio
+        # y se recupera reconstruyendo el navegador. Un fallo permanente del
+        # ítem (radio no encontrado, guardar deshabilitado) o una sesión
+        # caducada NO se reintentan.
         with self._lock, browser_account_lock(account):
-            try:
-                self._ensure_browser()
-                page = self._context.new_page()
-                ok, reason = self._do_mark(page, youtube_video_id)
-            except Exception as e:
-                logger.error("mark_altered_content failed for %s: %s", youtube_video_id, e)
-                ok, reason = False, "exception"
-            self.last_mark_reason = reason
-        if not ok:
-            self._alert_mark_failed(youtube_video_id)
+            for attempt in range(1, max(1, max_attempts) + 1):
+                try:
+                    self._ensure_browser()
+                    page = self._context.new_page()
+                    ok, reason = self._do_mark(page, youtube_video_id)
+                except Exception as e:
+                    logger.error(
+                        "mark_altered_content failed for %s (attempt %d/%d): %s",
+                        youtube_video_id, attempt, max_attempts, e,
+                    )
+                    ok, reason = False, "exception"
+                    if _is_dead_context_error(e):
+                        self._reset_context()
+                self.last_mark_reason = reason
+                if ok:
+                    break
+                # Solo se reintenta lo transitorio (contexto muerto / timeout).
+                if reason not in ("exception", "timeout"):
+                    break
+                if attempt < max_attempts:
+                    time.sleep(2.0)
+        if ok:
+            self._resolve_session_expired()
+        else:
+            self._alert_mark_failed(youtube_video_id, reason)
         return ok
 
-    def _alert_mark_failed(self, youtube_video_id: str) -> None:
+    def _alert_mark_failed(self, youtube_video_id: str, reason: str = "") -> None:
         """Alerta (una vez por vídeo) cuando falla el auto-marcado de
         'contenido alterado/IA' en YouTube Studio.
 
@@ -850,10 +937,73 @@ class YouTubeBrowser:
                     f"al flag de spam/IA de YouTube. Revisa el marcado manualmente o "
                     f"verifica las sesiones de navegador (python3 scripts/yt_browser_login.py)."
                 ),
-                metadata={"video_id": youtube_video_id, "action": "marcado manual requerido"},
+                metadata={"video_id": youtube_video_id, "action": "marcado manual requerido",
+                          "reason": reason or "unknown"},
             )
         except Exception as exc:
             logger.warning("mark-altered alert failed: %s", exc)
+
+    def _alert_session_expired(self) -> None:
+        """Alerta crítica cuando la sesión de YouTube Studio caduca.
+
+        Se dispara únicamente en un intento REAL de marcado/automatización que
+        acaba en la pantalla de login (no hay chequeos periódicos caros). Nombra
+        la cuenta y los canales afectados para re-autenticar lo antes posible.
+        """
+        try:
+            from database.db_extended import ExtendedDatabase
+            from api.services.lifecycle_monitor import create_alert
+            db = ExtendedDatabase()
+            account = getattr(self, "account", None) or "default"
+            channels: list[str] = []
+            try:
+                with db._connect() as conn:
+                    rows = conn.execute(
+                        "SELECT slug FROM channels WHERE google_account=? "
+                        "AND COALESCE(active,1)=1",
+                        (account,),
+                    ).fetchall()
+                channels = [r["slug"] for r in rows]
+            except Exception:
+                channels = []
+            create_alert(
+                db,
+                entity_type="channel" if channels else "system",
+                entity_id=0,
+                alert_type="browser_session_expired",
+                severity="critical",
+                title=f"🔑 Sesión de YouTube Studio caducada ({account})",
+                message=(
+                    f"La cuenta '{account}' redirige a login al abrir YouTube Studio"
+                    + (f" (canales: {', '.join(channels)})" if channels else "")
+                    + ". El marcado IA y las pantallas finales fallarán hasta "
+                    "re-autenticar: python3 scripts/yt_browser_login.py "
+                    f"--account {account}."
+                ),
+                metadata={"account": account, "channels": channels},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("session-expired alert failed: %s", exc)
+
+    def _resolve_session_expired(self) -> None:
+        """Cierra la alerta de sesión caducada de esta cuenta tras un marcado OK."""
+        try:
+            from database.db_extended import ExtendedDatabase
+            db = ExtendedDatabase()
+            account = getattr(self, "account", None) or "default"
+            with db._connect() as conn:
+                conn.execute(
+                    """UPDATE pipeline_alerts
+                       SET resolved=1, resolved_at=datetime('now'), acknowledged=1,
+                           message=COALESCE(message,'') ||
+                           ' [Auto-resuelto: sesión re-autenticada]'
+                       WHERE alert_type='browser_session_expired' AND resolved=0
+                         AND metadata_json LIKE ?""",
+                    (f'%{account}%',),
+                )
+                conn.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("resolve session-expired alert failed: %s", exc)
 
     def _do_mark(self, page, video_id: str) -> tuple[bool, str]:
         """Marca 'contenido alterado/IA'. Devuelve ``(ok, reason)``.
@@ -867,8 +1017,20 @@ class YouTubeBrowser:
             edit_url = f"https://studio.youtube.com/video/{video_id}/edit"
             page.goto(edit_url, wait_until="domcontentloaded", timeout=60000)
             human_delay(4.0, 8.0, "page load")
-            if "/video/" not in page.url or "/edit" not in page.url:
-                logger.error("Navigation failed: %s", page.url[:120])
+            current_url = page.url or ""
+            if "accounts.google.com" in current_url or "/signin" in current_url:
+                # La sesión persistentemente autenticada ya no sirve: avisar de
+                # inmediato (crítico) en vez de clasificarlo como fallo genérico.
+                logger.error("Session expired for account %s (redirected to login)",
+                             getattr(self, "account", "?"))
+                try:
+                    page.close()
+                except Exception:
+                    pass
+                self._alert_session_expired()
+                return False, "session_expired"
+            if "/video/" not in current_url or "/edit" not in current_url:
+                logger.error("Navigation failed: %s", current_url[:120])
                 page.close()
                 return False, "navigation_failed"
 
@@ -2152,6 +2314,39 @@ def get_account_for_channel(channel_slug: str) -> Optional[str]:
     except Exception:
         pass
     return None
+
+
+def mark_altered_content_robust(browser, video_id: str, attempts: int = 3,
+                                base_backoff: float = 30.0) -> bool:
+    """Marcado robusto para SUBIDAS NUEVAS: reintentos con backoff.
+
+    Complementa los reintentos internos de ``mark_altered_content`` cubriendo el
+    caso de YouTube aún procesando el vídeo recién subido (``radio_not_found``):
+    reintenta los motivos transitorios espaciando los intentos. NO reintenta
+    fallos permanentes del ítem (radio/save deshabilitado) ni sesión caducada
+    (requiere re-login). Mientras opera no recrea el navegador a mano: el
+    contexto muerto se auto-recupera vía ``_ensure_browser`` en cada intento.
+    """
+    transient = {"radio_not_found", "timeout", "exception",
+                 "navigation_failed", "save_disabled"}
+    total = max(1, attempts)
+    for i in range(1, total + 1):
+        try:
+            ok = browser.mark_altered_content(video_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("robust mark attempt %d/%d for %s failed: %s",
+                         i, total, video_id, exc)
+            ok = False
+        if ok:
+            return True
+        reason = getattr(browser, "last_mark_reason", "") or "unknown"
+        if reason not in transient:
+            return False
+        if i < total:
+            wait_s = base_backoff * i
+            logger.info("Reintento marcado IA %s en %.0fs (motivo=%s)", video_id, wait_s, reason)
+            time.sleep(wait_s)
+    return False
 
 
 # ── Session health check ───────────────────────────────────────
