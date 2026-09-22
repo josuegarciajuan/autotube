@@ -105,6 +105,25 @@ def collect_ia_marking_status(db, grace_hours: int = DEFAULT_GRACE_HOURS) -> dic
     }
 
 
+def _backfill_recently_active(db, minutes: int = 15) -> bool:
+    """True si el backfill histórico está progresando ahora mismo.
+
+    El backfill y este loop comparten el perfil de Chromium por cuenta; si el
+    backfill está marcando (escribe ``ia_backfill_last_progress`` en cada éxito),
+    la reconciliación cede para no forzar recreaciones de navegador cruzadas.
+    """
+    try:
+        ts = db.get_system_state("ia_backfill_last_progress")
+        if not ts:
+            return False
+        from datetime import datetime, timedelta
+        dt = datetime.fromisoformat(str(ts))
+        now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+        return (now - dt) < timedelta(minutes=minutes)
+    except Exception:
+        return False
+
+
 def _mark_done(db, kind: str, db_id: int) -> None:
     """Marca en BD el ítem como 'contenido alterado/IA' hecho."""
     table = "videos" if kind == "video" else "shorts"
@@ -126,6 +145,10 @@ def reconcile_recent_ia_marks(db, grace_hours: int = DEFAULT_GRACE_HOURS,
     navegador local (con lock de cuenta, sin interferir con el worker).
     """
     result = {"attempted": 0, "marked": 0, "failed": 0, "session_expired": False}
+    # Si el backfill está activo, él ya cubre todo (incl. recientes): no competir
+    # por el perfil de navegador de la misma cuenta.
+    if _backfill_recently_active(db):
+        return result
     since = f"-{int(grace_hours)} hours"
     try:
         rows = _rows(db, """

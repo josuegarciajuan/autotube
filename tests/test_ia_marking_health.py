@@ -7,6 +7,7 @@ import sqlite3
 import sys
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -189,6 +190,33 @@ def test_reconcile_reports_session_expired(monkeypatch):
     result = h.reconcile_recent_ia_marks(db, grace_hours=72, limit=10)
     assert result["failed"] == 2
     assert result["session_expired"] is True
+
+
+def test_reconcile_yields_while_backfill_active(monkeypatch):
+    """Con el backfill progresando, la reconciliación cede (no compite por Chromium)."""
+    db = FakeDB()
+    db.conn.execute(
+        "INSERT INTO system_state (key,value) VALUES ('ia_backfill_last_progress',?)",
+        (datetime.now().isoformat(timespec="seconds"),))
+    db.conn.commit()
+    result = h.reconcile_recent_ia_marks(db, grace_hours=72)
+    assert result["attempted"] == 0
+
+
+def test_reconcile_runs_when_backfill_stale(monkeypatch):
+    db = FakeDB()
+    db.conn.execute(
+        "INSERT INTO system_state (key,value) VALUES ('ia_backfill_last_progress',?)",
+        ("2026-08-01T00:00:00",))
+    db.conn.commit()
+    import pipeline.youtube_browser as yb
+    import api.services.egress_delegation as ed
+    monkeypatch.setattr(yb, "get_browser", lambda acct: SimpleNamespace(last_mark_reason="ok"))
+    monkeypatch.setattr(yb, "get_account_for_channel", lambda slug: "acct")
+    monkeypatch.setattr(yb, "mark_altered_content_robust", lambda b, v, attempts=3: True)
+    monkeypatch.setattr(ed, "egress_client_for", lambda slug: None)
+    result = h.reconcile_recent_ia_marks(db, grace_hours=72)
+    assert result["marked"] == 2
 
 
 def test_reconcile_noop_when_nothing_pending(monkeypatch):
