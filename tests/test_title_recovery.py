@@ -135,3 +135,14 @@ def test_retitle_marks_no_script_specificity_as_manual(monkeypatch):
     assert res["manual"] == 1
     assert res["retitled"] == 0
     assert db.updated == []
+
+
+def test_incomplete_phrase_is_repairable_and_stripped():
+    """C1a: un título que acaba en conector se sanea de forma determinista."""
+    assert "incomplete_phrase" in tr.REPAIRABLE_TITLE_REASONS
+    out = tr.sanitize_title_for_upload(
+        "El genio que nadie vio venir: la mente que cambió todo sin", CFG,
+    )
+    assert out is not None
+    assert not out.endswith(" sin")
+    assert 28 <= len(out) <= 65

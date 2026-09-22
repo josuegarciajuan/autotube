@@ -64,6 +64,12 @@ REPAIRABLE_TITLE_REASONS = frozenset({
     "unbalanced_punctuation",
     "excessive_caps",
     "all_caps",
+    # ``incomplete_phrase`` (has_dangling_tail) es determinista: un título que
+    # termina en conector ("...cambió todo sin") se sanea quitando el conector
+    # colgante en ``sanitize_title_for_upload`` -> ``_strip_dangling_tail``.
+    # Sin incluirlo aquí, el gate dejaba el vídeo en ``validation_failed`` para
+    # siempre aunque hubiera una reparación segura (bug ago 2026, v2468).
+    "incomplete_phrase",
 })
 
 # Conectores que quedan colgando al cortar un título por el separador '|'.
@@ -172,6 +178,69 @@ def _candidate_from_llm(cfg, guion, keywords, row, attempts: int) -> tuple[str |
     return None, []
 
 
+def retitle_one_video(
+    db,
+    row: dict,
+    cfg,
+    use_llm: bool = True,
+    max_llm_attempts: int = 2,
+    dry_run: bool = False,
+) -> dict:
+    """Re-title a SINGLE ``validation_failed`` video. Never raises on validation.
+
+    Returns ``{video_id, action, new_title, reasons}`` where ``action`` is one of
+    ``retitled`` | ``would_retitle`` (dry-run) | ``skipped`` (has script but no
+    candidate) | ``manual`` (no script = no safe evidence).
+
+    Shared by the bulk sweep (:func:`retitle_validation_failed`) and by the
+    packaging-recovery loop, which needs per-video, bounded repair.
+    """
+    vid = row.get("id")
+    title = row.get("titulo_final") or ""
+    current = _validate(cfg, title, row)
+    if current.valid:
+        candidate, titles = title, [title]
+    else:
+        guion, keywords = _script_context(db, row.get("script_id"))
+        candidate, titles = None, []
+        if use_llm and guion:
+            candidate, titles = _candidate_from_llm(
+                cfg, guion, keywords, row, max_llm_attempts,
+            )
+        if not candidate:
+            repaired = repair_title(title, cfg)
+            if repaired and _validate(cfg, repaired, row).valid:
+                candidate, titles = repaired, [repaired]
+
+    if not candidate:
+        guion_exists = bool(row.get("script_id"))
+        return {
+            "video_id": vid,
+            "action": "manual" if not guion_exists else "skipped",
+            "new_title": None,
+            "reasons": list(current.reasons),
+        }
+
+    if dry_run:
+        return {
+            "video_id": vid, "action": "would_retitle",
+            "new_title": candidate, "reasons": list(current.reasons),
+        }
+
+    db.update_video(
+        vid,
+        titulo_final=candidate,
+        title_options=json.dumps(titles, ensure_ascii=False),
+        status="awaiting_upload",
+        progress=5,
+        progress_phase="upload",
+        scheduled_upload_at=None,
+        error_message="Retitled by title recovery",
+    )
+    return {"video_id": vid, "action": "retitled", "new_title": candidate,
+            "reasons": list(current.reasons)}
+
+
 def retitle_validation_failed(
     db=None,
     dry_run: bool = False,
@@ -211,7 +280,6 @@ def retitle_validation_failed(
             continue
 
         result["scanned"] += 1
-        title = row.get("titulo_final") or ""
         try:
             cfg = get_channel_config(slug)
         except Exception as exc:
@@ -219,61 +287,28 @@ def retitle_validation_failed(
             logger.warning("title recovery: config error for %s: %s", slug, exc)
             continue
 
-        current = _validate(cfg, title, row)
-        if current.valid:
-            candidate, titles = title, [title]
-        else:
-            guion, keywords = _script_context(db, row.get("script_id"))
-            candidate, titles = None, []
-            if use_llm and guion:
-                candidate, titles = _candidate_from_llm(
-                    cfg, guion, keywords, row, max_llm_attempts,
-                )
-            if not candidate:
-                repaired = repair_title(title, cfg)
-                if repaired and _validate(cfg, repaired, row).valid:
-                    candidate, titles = repaired, [repaired]
-
-        if not candidate:
-            guion_exists = bool(row.get("script_id"))
-            action = "manual" if not guion_exists else "skipped"
-            result[action] += 1
-            result["details"].append({
-                "video_id": vid, "slug": slug, "action": action,
-                "reasons": list(current.reasons),
-            })
-            continue
-
-        if dry_run:
-            result["retitled"] += 1
-            result["details"].append({
-                "video_id": vid, "slug": slug, "action": "would_retitle",
-                "new_title": candidate,
-            })
-            continue
-
         try:
-            db.update_video(
-                vid,
-                titulo_final=candidate,
-                title_options=json.dumps(titles, ensure_ascii=False),
-                status="awaiting_upload",
-                progress=5,
-                progress_phase="upload",
-                scheduled_upload_at=None,
-                error_message="Retitled by title recovery",
+            detail = retitle_one_video(
+                db, row, cfg, use_llm=use_llm,
+                max_llm_attempts=max_llm_attempts, dry_run=dry_run,
             )
         except Exception as exc:
             result["errors"] += 1
-            logger.error("title recovery: failed to update #%s: %s", vid, exc)
+            logger.error("title recovery: failed for #%s: %s", vid, exc)
             continue
 
-        result["retitled"] += 1
-        result["details"].append({
-            "video_id": vid, "slug": slug, "action": "retitled",
-            "new_title": candidate,
-        })
-        logger.warning("[%s] title recovery: #%s re-titled → %s", slug, vid, candidate[:60])
+        action = detail["action"]
+        detail["slug"] = slug
+        result["details"].append(detail)
+        if action in ("retitled", "would_retitle"):
+            result["retitled"] += 1
+            if action == "retitled":
+                logger.warning("[%s] title recovery: #%s re-titled → %s",
+                               slug, vid, (detail.get("new_title") or "")[:60])
+        elif action == "manual":
+            result["manual"] += 1
+        else:
+            result["skipped"] += 1
 
     if result["retitled"]:
         logger.info(

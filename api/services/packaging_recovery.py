@@ -22,6 +22,70 @@ MAX_RECOVERIES_PER_CHANNEL_PER_CYCLE = 5
 # Hard cap per invocation.
 MAX_RECOVERIES_PER_CYCLE = 25
 
+# Motivos de título que NO se pueden reparar de forma determinista: exigen
+# evidencia del contenido, así que solo el LLM (o un humano) puede proponer un
+# título válido. Si el vídeo tiene guion, se intenta regenerar UNA vez por
+# vídeo y ciclo; el resto de motivos los cubre el saneado determinista.
+_EVIDENCE_ONLY_TITLE_REASONS = frozenset({
+    "specificity", "generic_sensationalism", "banned_token",
+})
+
+
+def _is_evidence_only_title_failure(reasons) -> bool:
+    r = set(reasons or ())
+    return bool(r) and r <= _EVIDENCE_ONLY_TITLE_REASONS
+
+
+def _retitle_attempted_key(video_id) -> str:
+    return f"title_recovery_attempted_{video_id}"
+
+
+def _already_retitle_attempted(db, video_id) -> bool:
+    try:
+        return db.get_system_state(_retitle_attempted_key(video_id)) == "1"
+    except Exception:
+        return False
+
+
+def _mark_retitle_attempted(db, video_id) -> None:
+    try:
+        db.set_system_state(_retitle_attempted_key(video_id), "1")
+    except Exception:
+        pass
+
+
+def _llm_retitle_once(db, row: dict, cfg, dry_run: bool = False) -> bool:
+    """Try one LLM re-title for a video whose title fails for evidence-only
+    reasons. Returns True if the video is (or would be) requeued.
+
+    Bounded: a per-video ``system_state`` flag prevents burning LLM credits on
+    every 30-min cycle when the model cannot produce a valid title.
+    """
+    video_id = row.get("id")
+    if _already_retitle_attempted(db, video_id):
+        return False
+    from api.services.title_recovery import retitle_one_video
+    try:
+        detail = retitle_one_video(db, row, cfg, use_llm=True,
+                                   max_llm_attempts=2, dry_run=dry_run)
+    except Exception as exc:
+        logger.warning("packaging recovery: LLM retitle failed for #%s: %s",
+                       video_id, exc)
+        if not dry_run:
+            _mark_retitle_attempted(db, video_id)
+        return False
+
+    if detail.get("action") in ("retitled", "would_retitle"):
+        return True
+
+    if not dry_run:
+        _mark_retitle_attempted(db, video_id)
+    logger.info(
+        "packaging recovery: #%s still unpublishable after LLM retitle (%s) — "
+        "left for manual review", video_id, detail.get("reasons"),
+    )
+    return False
+
 
 def recover_packaging_held_videos(
     db=None,
@@ -132,6 +196,20 @@ def recover_packaging_held_videos(
                         new_title = repaired
                         result = retry
             if not result.valid:
+                # C1b: los motivos que exigen evidencia (specificity,
+                # generic_sensationalism, banned_token) no se pueden reparar de
+                # forma determinista. Si hay guion, se intenta regenerar el
+                # título con el LLM UNA vez por vídeo (guard en system_state).
+                if (_is_evidence_only_title_failure(result.reasons)
+                        and row.get("script_id")
+                        and _llm_retitle_once(db, row, cfg, dry_run=dry_run)):
+                    recovered += 1
+                    per_channel[channel_id] = per_channel.get(channel_id, 0) + 1
+                    details.append({
+                        "video_id": vid, "slug": slug,
+                        "action": "would_llm_retitle" if dry_run else "llm_retitled",
+                    })
+                    continue
                 skipped += 1
                 details.append({
                     "video_id": vid, "slug": slug, "action": "still_invalid",
