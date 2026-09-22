@@ -232,7 +232,8 @@ def _auto_mark_ia_worker(yt_video_id: str, canal: str, account: str, video_id: i
                                             params={"video_id": yt_video_id})
                 success = bool(_r.get("ok"))
             else:
-                success = browser.mark_altered_content(yt_video_id)
+                from pipeline.youtube_browser import mark_altered_content_robust
+                success = mark_altered_content_robust(browser, yt_video_id, attempts=3)
             if success:
                 from database.db_extended import ExtendedDatabase
                 db = ExtendedDatabase()

@@ -512,6 +512,12 @@ async def lifespan(app: FastAPI):
     # uploads plus a daily channel audit. They never mutate historical videos.
     editorial_reviews_task = _supervised_loop("editorial_reviews", _editorial_reviews_loop)
 
+    # ── Red de seguridad del marcado IA (sep 2026) ──
+    # Reintenta marcar subidas recientes sin marcar cada 30 min (0 cuota). Cubre
+    # el caso en que el hilo daemon post-subida falló; si la sesión de YT Studio
+    # caducó, emite la alerta crítica browser_session_expired.
+    ia_mark_reconcile_task = _supervised_loop("ia_mark_reconcile", _ia_mark_reconcile_loop)
+
     yield
     
     # Shutdown
@@ -531,6 +537,7 @@ async def lifespan(app: FastAPI):
         packaging_recovery_task,
         replan_bg_task,
         editorial_reviews_task,
+        ia_mark_reconcile_task,
     ]
     if _startup_tasks is not None:
         _shutdown_tasks.append(_startup_tasks)
@@ -857,6 +864,44 @@ async def _yt_state_reconcile_loop():
             logger.warning("YT state reconcile error: %s", exc)
 
         await asyncio.sleep(300)  # Every 5 minutes
+
+
+async def _ia_mark_reconcile_loop():
+    """Background loop: red de seguridad del marcado 'contenido alterado/IA'.
+
+    Cada ~30 min reintenta marcar las subidas recientes (long + short) que
+    quedaron sin marcar porque el hilo daemon post-subida falló. 3 intentos con
+    backoff por ítem (vía ``mark_altered_content_robust``). No consume cuota
+    (navegador). Si detecta la sesión de YT Studio caducada, el propio marcado
+    emite la alerta crítica ``browser_session_expired``. Fail-open.
+    """
+    import asyncio, logging
+    logger = logging.getLogger("autotube.ia_mark_reconcile")
+
+    await asyncio.sleep(180)  # Let API + other loops stabilize first
+
+    while True:
+        try:
+            from api.services.lifecycle_monitor import touch_task_heartbeat as _tth
+            _tth("ia_mark_reconcile")
+            from database.db_extended import ExtendedDatabase
+            from api.services.ia_marking_health import reconcile_recent_ia_marks
+            # Hard cap: el marcado con Playwright puede tardar; 600s < 900s del
+            # watchdog para no ser cancelado por heartbeat vencido.
+            summary = await asyncio.wait_for(
+                asyncio.to_thread(reconcile_recent_ia_marks, ExtendedDatabase()),
+                timeout=600,
+            )
+            if summary.get("attempted", 0) > 0:
+                logger.info(
+                    "IA mark reconcile: attempted=%d marked=%d failed=%d session_expired=%s",
+                    summary.get("attempted", 0), summary.get("marked", 0),
+                    summary.get("failed", 0), summary.get("session_expired", False),
+                )
+        except Exception as exc:
+            logger.warning("IA mark reconcile error: %s", exc)
+
+        await asyncio.sleep(1800)  # Every 30 minutes
 
 
 async def _packaging_recovery_loop():

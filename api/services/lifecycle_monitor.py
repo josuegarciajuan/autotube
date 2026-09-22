@@ -44,6 +44,9 @@ TASK_TIMEOUTS = {
     "reminders": 900,                # recordatorios operativos que solo alertan (60s)
     "planning_replan": 600,          # consumo de recomputaciones durables (loop 15s; to_thread puede tardar)
     "editorial_reviews": 3600,        # revisiones por vídeo + auditoría diaria
+    # Reconciliación del marcado IA (loop duerme 1800s + hasta 600s de marcado).
+    # Debe ir AL FINAL para no desplazar los entity_id de las tareas existentes.
+    "ia_mark_reconcile": 3600,
 }
 
 _TASK_HEARTBEATS_MONOTONIC: dict[str, float] = {}

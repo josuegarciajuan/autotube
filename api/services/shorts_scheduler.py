@@ -657,7 +657,8 @@ def _auto_mark_ia_for_short(yt_id: str, channel_slug: str, account: str, short_i
                                         params={"video_id": yt_id})
             success = bool(_r.get("ok"))
         else:
-            success = browser.mark_altered_content(yt_id)
+            from pipeline.youtube_browser import mark_altered_content_robust
+            success = mark_altered_content_robust(browser, yt_id, attempts=3)
         if success:
             import sqlite3
             from config.settings import DATABASE_PATH
