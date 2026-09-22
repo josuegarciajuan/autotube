@@ -139,6 +139,67 @@ def test_check_emits_stalled_when_no_progress(monkeypatch):
     assert "ia_backfill_stalled" in types
 
 
+def test_reconcile_recent_marks_marks_and_persists(monkeypatch):
+    """La reconciliación activa marca los recientes sin marcar y lo persiste."""
+    db = FakeDB()
+    import pipeline.youtube_browser as yb
+    import api.services.egress_delegation as ed
+
+    marked_ids: list[str] = []
+
+    class _FakeBrowser:
+        last_mark_reason = "ok"
+
+    def fake_robust(browser, vid, attempts=3):
+        marked_ids.append(vid)
+        return True
+
+    monkeypatch.setattr(yb, "get_browser", lambda acct: _FakeBrowser())
+    monkeypatch.setattr(yb, "get_account_for_channel", lambda slug: "acct")
+    monkeypatch.setattr(yb, "mark_altered_content_robust", fake_robust)
+    monkeypatch.setattr(ed, "egress_client_for", lambda slug: None)
+
+    result = h.reconcile_recent_ia_marks(db, grace_hours=72, limit=10)
+    assert result["marked"] == 2
+    assert result["failed"] == 0
+    assert set(marked_ids) == {"V_NEW_A", "S_NEW"}
+    # Persistidos en BD
+    assert db.conn.execute(
+        "SELECT manual_altered_content_done FROM videos WHERE yt_video_id='V_NEW_A'"
+    ).fetchone()[0] == 1
+    assert db.conn.execute(
+        "SELECT manual_altered_content_done FROM shorts WHERE youtube_id='S_NEW'"
+    ).fetchone()[0] == 1
+
+
+def test_reconcile_reports_session_expired(monkeypatch):
+    """Si el marcado detecta sesión caducada, se refleja en el resumen."""
+    db = FakeDB()
+    import pipeline.youtube_browser as yb
+    import api.services.egress_delegation as ed
+
+    class _FakeBrowser:
+        last_mark_reason = "session_expired"
+
+    monkeypatch.setattr(yb, "get_browser", lambda acct: _FakeBrowser())
+    monkeypatch.setattr(yb, "get_account_for_channel", lambda slug: "acct")
+    monkeypatch.setattr(yb, "mark_altered_content_robust", lambda b, v, attempts=3: False)
+    monkeypatch.setattr(ed, "egress_client_for", lambda slug: None)
+
+    result = h.reconcile_recent_ia_marks(db, grace_hours=72, limit=10)
+    assert result["failed"] == 2
+    assert result["session_expired"] is True
+
+
+def test_reconcile_noop_when_nothing_pending(monkeypatch):
+    db = FakeDB()
+    db.conn.execute("UPDATE videos SET manual_altered_content_done=1")
+    db.conn.execute("UPDATE shorts SET manual_altered_content_done=1")
+    db.conn.commit()
+    result = h.reconcile_recent_ia_marks(db, grace_hours=72)
+    assert result == {"attempted": 0, "marked": 0, "failed": 0, "session_expired": False}
+
+
 def test_backfill_stalled_check():
     assert h.backfill_stalled_check(None) is True
     assert h.backfill_stalled_check("2020-01-01T00:00:00") is True

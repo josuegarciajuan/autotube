@@ -40,7 +40,9 @@ DB_PATH = Path(os.environ.get("DATABASE_PATH") or (PROJECT_ROOT / "autotube.db")
 
 # Motivos de fallo que indican un problema técnico de sesión/navegador (no del
 # ítem): si se repiten, abortamos la sesión del día en vez de blacklistear ítems.
-TECHNICAL_REASONS = {"exception", "navigation_failed"}
+# ``session_expired`` (login de YT Studio caducado) se trata aparte: aborta al
+# primer intento, sin blacklistear (requiere re-login, no reintentar ítems).
+TECHNICAL_REASONS = {"exception", "navigation_failed", "session_expired"}
 
 CHANNEL_ORDER = ["canal2", "canal3", "canal4", "canal5"]
 STATE_CURRENT = "ia_backfill_current_channel"
@@ -369,6 +371,21 @@ def process_channel(db, canal: str, args, total_done: int) -> tuple[int, bool]:
         else:
             failures += 1
             logger.warning("[%s] FALLO %s (%s)", canal, item["yt_id"], reason)
+            if reason == "session_expired":
+                # La sesión de YT Studio ya no sirve para NINGÚN ítem: no tiene
+                # sentido seguir ni blacklistear; se aborta y se avisa.
+                logger.error(
+                    "[%s] Sesión de YouTube Studio caducada — se aborta el día "
+                    "(re-autenticar: python3 scripts/yt_browser_login.py --account %s)",
+                    canal, account)
+                alert(db, "ia_backfill_aborted", "critical",
+                      f"Backfill IA abortado ({canal}) — sesión caducada",
+                      f"La cuenta '{account}' redirige a login en YouTube Studio. "
+                      f"El marcado IA no puede continuar hasta re-autenticar: "
+                      f"python3 scripts/yt_browser_login.py --account {account}.",
+                      {"canal": canal, "account": account, "reason": reason},
+                      channel_id=_channel_id(db, canal))
+                return total_done, False
             if reason in TECHNICAL_REASONS:
                 consec_technical += 1
                 if consec_technical >= args.max_consecutive_technical_failures:

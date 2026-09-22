@@ -83,7 +83,8 @@ def _auto_mark_altered_content(yt_video_id: str, canal: str, account: str, video
                                             params={"video_id": yt_video_id})
                 success = bool(_r.get("ok"))
             else:
-                success = browser.mark_altered_content(yt_video_id)
+                from pipeline.youtube_browser import mark_altered_content_robust
+                success = mark_altered_content_robust(browser, yt_video_id, attempts=3)
             if success:
                 db.update_video(video_id, manual_altered_content_done=1)
                 logger.info("[%s] IA altered content marked for %s", canal, yt_video_id)
