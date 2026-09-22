@@ -211,6 +211,40 @@ def test_process_channel_skips_after_max_attempts(tmp_path, monkeypatch):
     assert row[2] == 3
 
 
+def test_process_channel_aborts_immediately_on_session_expired(tmp_path, monkeypatch):
+    """Sesión caducada: aborta al primer ítem, avisa y NO blacklistea el ítem."""
+    db_path = tmp_path / "s.db"
+    _make_db(db_path)
+    monkeypatch.setattr(m, "DB_PATH", db_path)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("INSERT INTO videos (id,channel_id,yt_video_id,uploaded_at)"
+                 " VALUES (20,3,'SE','2026-09-15 10:00:00')")
+    conn.commit()
+    conn.close()
+
+    fake = _FakeBrowser({"SE": "session_expired"})
+    _patch_browser(monkeypatch, fake)
+    alerts = []
+    monkeypatch.setattr(m, "alert", lambda db, atype, *a, **k: alerts.append(atype))
+
+    done, finished = m.process_channel(object(), "canal2", _args(), 0)
+    assert finished is False
+    assert done == 0
+    assert "ia_backfill_aborted" in alerts
+
+    conn = sqlite3.connect(str(db_path))
+    row = conn.execute("SELECT manual_altered_content_skip, manual_altered_content_attempts"
+                       " FROM videos WHERE yt_video_id='SE'").fetchone()
+    conn.close()
+    # No se descarta ni se contabiliza intento: es un problema de sesión, no del ítem.
+    assert row[0] == 0
+    assert row[1] == 0
+
+
+def test_technical_reasons_include_session_expired():
+    assert "session_expired" in m.TECHNICAL_REASONS
+
+
 def test_process_channel_aborts_on_consecutive_technical_failures(tmp_path, monkeypatch):
     db_path = tmp_path / "m.db"
     _make_db(db_path)
