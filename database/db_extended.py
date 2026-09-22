@@ -8686,17 +8686,31 @@ class ExtendedDatabase(Database):
         - long-form: videos con yt_video_id subidos hoy
         - shorts:    shorts con youtube_id publicados hoy
         Ambos usan videos.insert (1600 unidades de cuota) — se contabilizan juntos.
+
+        El día natural es **Madrid** (invariante sep 2026). Antes se comparaba
+        ``date(uploaded_at)`` (UTC) contra ``date('now','localtime')`` (Madrid),
+        lo que descuadraba las subidas de la franja 00:00-02:00 Madrid (p. ej.
+        una subida a las 00:21 Madrid = 22:21 UTC del día anterior no contaba).
+        Ahora se usan los bounds UTC-naive de ``madrid_day_range()``.
         """
+        from api.time_utils import madrid_day_range
+        day_start, day_end = madrid_day_range()
         with self._connect() as conn:
             long_n = conn.execute(
                 "SELECT COUNT(*) FROM videos "
                 "WHERE yt_video_id IS NOT NULL AND yt_video_id != '' "
-                "AND date(uploaded_at) = date('now', 'localtime')"
+                "AND uploaded_at IS NOT NULL "
+                "AND substr(replace(uploaded_at, 'T', ' '), 1, 19) >= ? "
+                "AND substr(replace(uploaded_at, 'T', ' '), 1, 19) < ?",
+                (day_start, day_end),
             ).fetchone()[0]
             short_n = conn.execute(
                 "SELECT COUNT(*) FROM shorts "
                 "WHERE youtube_id IS NOT NULL AND youtube_id != '' "
-                "AND date(published_at) = date('now', 'localtime')"
+                "AND published_at IS NOT NULL "
+                "AND substr(replace(published_at, 'T', ' '), 1, 19) >= ? "
+                "AND substr(replace(published_at, 'T', ' '), 1, 19) < ?",
+                (day_start, day_end),
             ).fetchone()[0]
         return (long_n or 0) + (short_n or 0)
     
