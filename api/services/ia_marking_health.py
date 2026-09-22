@@ -105,12 +105,14 @@ def collect_ia_marking_status(db, grace_hours: int = DEFAULT_GRACE_HOURS) -> dic
     }
 
 
-def _backfill_recently_active(db, minutes: int = 15) -> bool:
-    """True si el backfill histórico está progresando ahora mismo.
+def _backfill_recently_active(db, minutes: int = 50) -> bool:
+    """True si el backfill histórico está progresando (o pausando) ahora mismo.
 
     El backfill y este loop comparten el perfil de Chromium por cuenta; si el
     backfill está marcando (escribe ``ia_backfill_last_progress`` en cada éxito),
     la reconciliación cede para no forzar recreaciones de navegador cruzadas.
+    La ventana (50 min) cubre la pausa larga máxima del backfill (40 min) para no
+    confundir una pausa con una sesión terminada.
     """
     try:
         ts = db.get_system_state("ia_backfill_last_progress")
