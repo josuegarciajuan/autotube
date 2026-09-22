@@ -20,7 +20,7 @@ but only between 10:00-23:00 CEST (local time for Spain/Europe).
 """
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 import pytz
@@ -41,6 +41,33 @@ RECOVERY_INTERVAL_MINUTES = 60     # How often to run (used for logging only)
 def _now_madrid() -> datetime:
     """Return current datetime in Europe/Madrid timezone."""
     return datetime.now(pytz.timezone("Europe/Madrid"))
+
+
+def _slot_is_productive(slot: dict, now_utc_naive: Optional[datetime] = None) -> bool:
+    """True si un slot pending/running va a producir realmente un vídeo.
+
+    Un slot ``running`` o con ``video_id``/``job_id`` es cobertura real. Un slot
+    ``pending`` **past-due** y sin vídeo/job es un "fantasma" (nunca se
+    despachó) y NO debe contar como cobertura: contarlo hacía que el planner
+    declarase "on track" con el canal seco y no generase la recuperación
+    (bug sep 2026: canal seco + slot fantasma → `publish_coverage_dry`).
+    Un pending futuro sin vídeo aún es válido (se despachará a su hora).
+    """
+    if slot.get("status") == "running":
+        return True
+    if slot.get("video_id") or slot.get("job_id"):
+        return True
+    sched = slot.get("scheduled_at")
+    if not sched:
+        return True
+    if now_utc_naive is None:
+        now_utc_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+    try:
+        # planned_slots.scheduled_at se guarda UTC-naive ('YYYY-MM-DD HH:MM:SS').
+        dt = datetime.fromisoformat(str(sched).replace("T", " ").replace("Z", ""))
+    except Exception:
+        return True
+    return dt > now_utc_naive
 
 
 def _parse_hour_from_slot(slot: dict, field: str = "scheduled_at") -> Optional[int]:
@@ -170,6 +197,7 @@ def _auto_recover_missing_publications_impl(db=None) -> dict:
     now_local = _now_madrid()
     now_hour = now_local.hour
     now_minute_of_day = now_local.hour * 60 + now_local.minute
+    now_utc_naive = datetime.now(timezone.utc).replace(tzinfo=None)
 
     # ── Window guard: only run during active hours ──
     # Exception: in catch-up mode (past-due slots exist), run 24/7
@@ -234,8 +262,24 @@ def _auto_recover_missing_publications_impl(db=None) -> dict:
 
         # ── 2. Count pending/running planned slots for today ──
         today_slots = db.get_channel_slots_today(channel_id, today)
-        active_slots = [s for s in today_slots
-                        if s.get("status") in ("pending", "running")]
+        pending_running = [s for s in today_slots
+                           if s.get("status") in ("pending", "running")]
+        active_slots = []
+        for s in pending_running:
+            if _slot_is_productive(s, now_utc_naive):
+                active_slots.append(s)
+            else:
+                # C4: slot fantasma (pending past-due sin video/job) → cancelar
+                # para que el cómputo de `missing` recupere el hueco real.
+                try:
+                    db.update_slot_status(int(s["id"]), "cancelled")
+                    logger.warning(
+                        "[%s] Recovery: slot fantasma #%s (pending past-due sin "
+                        "video/job) cancelado para recuperar cobertura",
+                        slug, s.get("id"),
+                    )
+                except Exception as exc:
+                    logger.debug("[%s] phantom slot cancel skipped: %s", slug, exc)
         active_count = len(active_slots)
 
         total_covered = published_today + active_count
