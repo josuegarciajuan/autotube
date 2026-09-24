@@ -196,6 +196,28 @@ def _emit_skip_alert(reason: str) -> None:
         pass
 
 
+def _resolve_skip_alerts() -> None:
+    """Close pending deploy_skipped alerts after a deploy actually proceeds.
+
+    Sin esto, un deploy omitido dejaba una alerta warning abierta para siempre
+    aunque el siguiente deploy sí se aplicase (bug sep 2026).
+    """
+    try:
+        from database.db_extended import ExtendedDatabase
+
+        with ExtendedDatabase()._connect() as conn:
+            conn.execute(
+                """UPDATE pipeline_alerts
+                   SET resolved = 1, resolved_at = datetime('now'), acknowledged = 1,
+                       message = COALESCE(message, '') ||
+                         ' [Auto-resuelto: deploy aplicado correctamente]'
+                   WHERE alert_type = 'deploy_skipped' AND resolved = 0"""
+            )
+            conn.commit()
+    except Exception:
+        pass
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     force = os.environ.get("SKIP_ACTIVE_WORKER_CHECK", "false").strip().lower() == "true"
     isatty = bool(getattr(sys.stdin, "isatty", lambda: False)())
@@ -205,6 +227,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     if jobs is None:
         if force:
             print("DEPLOY_SAFE: forced (SKIP_ACTIVE_WORKER_CHECK) — estado de generación ilegible")
+            _resolve_skip_alerts()
             return 0
         reason = "no se pudo leer el estado de generación de la DB"
         print(f"DEPLOY_BLOCKED: {reason}")
@@ -227,6 +250,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if decision == "proceed":
         print(f"DEPLOY_SAFE: {reason}")
+        _resolve_skip_alerts()
         return 0
 
     print(f"DEPLOY_BLOCKED: {reason}")

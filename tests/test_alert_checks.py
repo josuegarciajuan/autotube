@@ -32,7 +32,9 @@ from api.services.lifecycle_monitor import (
     TASK_TIMEOUTS,
     _auto_resolve_completed,
     _auto_resolve_stale_info,
+    _auto_resolve_stale_warnings,
     INFO_ALERT_RETENTION_DAYS,
+    WARNING_ALERT_RETENTION_DAYS,
     check_all_health,
 )
 
@@ -475,6 +477,97 @@ def test_stale_info_alerts_are_retired_after_retention(tmp_path):
     assert rows["editorial_review_success"] == 1
     assert rows["ia_mark_health_ok"] == 0
     assert rows["phase_nonfatal"] == 0
+
+
+def test_packaging_invalid_resolves_once_video_requeued(tmp_path):
+    """La alerta de packaging desaparece cuando el vídeo sale de validation_failed."""
+    db = _build_db(tmp_path)
+    _insert_video(db, vid=2424, status='validation_failed', finished='2026-01-01 00:00:00')
+    with db._connect() as conn:
+        conn.execute(
+            "INSERT INTO pipeline_alerts(entity_type, entity_id, channel_id, alert_type, severity, title) "
+            "VALUES ('video', 2424, 1, 'packaging_invalid', 'warning', 'packaging')"
+        )
+        conn.commit()
+
+    # Sigue en validation_failed → la alerta permanece
+    assert _auto_resolve_completed(db) == 0
+
+    # packaging_recovery lo reencola → awaiting_upload
+    with db._connect() as conn:
+        conn.execute("UPDATE videos SET status = 'awaiting_upload' WHERE id = 2424")
+        conn.commit()
+
+    assert _auto_resolve_completed(db) == 1
+    with db._connect() as conn:
+        row = conn.execute(
+            "SELECT resolved FROM pipeline_alerts WHERE alert_type='packaging_invalid'"
+        ).fetchone()
+    assert row["resolved"] == 1
+
+
+def test_channel_scoped_altered_mark_resolves_when_item_marked(tmp_path):
+    """Alerta channel/global de marcado IA se cierra al marcarse el vídeo referenciado."""
+    db = _build_db(tmp_path)
+    _insert_video(db, vid=9, status='published', finished='2026-01-01 00:00:00')
+    with db._connect() as conn:
+        conn.execute("UPDATE videos SET yt_video_id='YT9' WHERE id = 9")
+        conn.execute(
+            "INSERT INTO pipeline_alerts(entity_type, entity_id, channel_id, alert_type, severity, "
+            "title, metadata_json) VALUES ('channel', NULL, NULL, 'altered_content_mark_failed', "
+            "'warning', 'marca IA', '{\"video_id\": \"YT9\"}')"
+        )
+        conn.commit()
+
+    assert _auto_resolve_completed(db) == 0
+
+    with db._connect() as conn:
+        conn.execute("UPDATE videos SET manual_altered_content_done = 1 WHERE id = 9")
+        conn.commit()
+
+    assert _auto_resolve_completed(db) == 1
+    with db._connect() as conn:
+        row = conn.execute(
+            "SELECT resolved FROM pipeline_alerts WHERE alert_type='altered_content_mark_failed'"
+        ).fetchone()
+    assert row["resolved"] == 1
+
+
+def test_stale_warning_alerts_are_retired_after_retention(tmp_path):
+    db = _build_db(tmp_path)
+    with db._connect() as conn:
+        # Warning huérfano antiguo → se retira
+        conn.execute(
+            "INSERT INTO pipeline_alerts(entity_type, entity_id, alert_type, severity, title, created_at) "
+            "VALUES ('short', 1, 'short_dispatch_failed', 'warning', 'w', datetime('now', '-30 days'))"
+        )
+        conn.execute(
+            "INSERT INTO pipeline_alerts(entity_type, entity_id, alert_type, severity, title, created_at) "
+            "VALUES ('system', 0, 'deploy_skipped', 'warning', 'w', datetime('now', '-30 days'))"
+        )
+        # Warning del mismo tipo pero reciente → se conserva
+        conn.execute(
+            "INSERT INTO pipeline_alerts(entity_type, entity_id, alert_type, severity, title, created_at) "
+            "VALUES ('short', 2, 'short_dispatch_failed', 'warning', 'w', datetime('now', '-1 days'))"
+        )
+        # Otro warning no listado → NUNCA se toca (aunque sea antiguo)
+        conn.execute(
+            "INSERT INTO pipeline_alerts(entity_type, entity_id, alert_type, severity, title, created_at) "
+            "VALUES ('video', 3, 'phase_nonfatal', 'warning', 'w', datetime('now', '-30 days'))"
+        )
+        conn.commit()
+
+    assert WARNING_ALERT_RETENTION_DAYS == 7
+    assert _auto_resolve_stale_warnings(db) == 2
+    with db._connect() as conn:
+        rows = {
+            (r["alert_type"], r["entity_id"]): r["resolved"]
+            for r in conn.execute("SELECT alert_type, entity_id, resolved FROM pipeline_alerts").fetchall()
+        }
+    assert rows[("short_dispatch_failed", 1)] == 1
+    assert rows[("deploy_skipped", 0)] == 1
+    assert rows[("short_dispatch_failed", 2)] == 0
+    assert rows[("phase_nonfatal", 3)] == 0
 
 
 def _insert_generating(db, vid, *, phase='video',

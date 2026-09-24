@@ -93,6 +93,19 @@ INFO_ALERT_RETENTION_TYPES = (
     "ia_mark_health_ok",
 )
 
+# ── Retención de alertas warning huérfanas ─────────────────────
+# Tipos de warning que se emiten como EVENTO puntual (no ligados a una condición
+# reevaluable): si su resolver puntual no los cierra (deploy que no vuelve a
+# correr, short cancelado por content-safety, packaging retenido), quedaban
+# abiertos para siempre. Red de seguridad: se auto-resuelven pasados N días.
+# Los resolvers específicos los cierran antes cuando la condición desaparece.
+WARNING_ALERT_RETENTION_DAYS = 7
+WARNING_ALERT_RETENTION_TYPES = (
+    "short_dispatch_failed",
+    "deploy_skipped",
+    "packaging_invalid",
+)
+
 # ── UTC timestamp helper ──────────────────────────────────────
 def _utcnow():
     """Return current UTC datetime as naive (consistent with SQLite CURRENT_TIMESTAMP)."""
@@ -378,6 +391,7 @@ def check_all_health(db) -> dict:
     resolved += _auto_resolve_completed(db)
     resolved += _auto_resolve_recovery_checkpoints(db)
     resolved += _auto_resolve_stale_info(db)
+    resolved += _auto_resolve_stale_warnings(db)
 
     # ── Check 7: Platform auth/token failures (Facebook, Rumble) ──
     created += _check_platform_auth_errors(db)
@@ -502,6 +516,38 @@ def _auto_resolve_stale_info(db) -> int:
                 conn.commit()
     except Exception as exc:
         logger.warning("Stale info auto-resolve failed: %s", exc)
+    return resolved
+
+
+def _auto_resolve_stale_warnings(db) -> int:
+    """Retira alertas warning huérfanas (evento puntual) pasados N días.
+
+    Red de seguridad para tipos sin condición reevaluable que, si su resolver
+    específico no los cierra, quedarían abiertos indefinidamente (p. ej. un
+    short cancelado por content-safety o un deploy omitido que ya no aplica).
+    Nunca toca alertas critical ni tipos accionables con resolver propio.
+    """
+    resolved = 0
+    try:
+        placeholders = ",".join("?" * len(WARNING_ALERT_RETENTION_TYPES))
+        params = list(WARNING_ALERT_RETENTION_TYPES)
+        params.append(f"-{WARNING_ALERT_RETENTION_DAYS} days")
+        with db._connect() as conn:
+            cur = conn.execute(
+                f"""UPDATE pipeline_alerts
+                    SET resolved = 1, resolved_at = datetime('now'), acknowledged = 1,
+                        message = COALESCE(message, '') ||
+                          ' [Auto-resuelto: retención de alertas warning]'
+                    WHERE resolved = 0 AND severity = 'warning'
+                      AND alert_type IN ({placeholders})
+                      AND created_at < datetime('now', ?)""",
+                params,
+            )
+            resolved = cur.rowcount
+            if resolved:
+                conn.commit()
+    except Exception as exc:
+        logger.warning("Stale warning auto-resolve failed: %s", exc)
     return resolved
 
 
@@ -1030,8 +1076,8 @@ def _auto_resolve_completed(db) -> int:
                    FROM pipeline_alerts pa
                    JOIN videos v ON v.id = pa.entity_id AND pa.entity_type = 'video'
                     WHERE pa.resolved = 0
-                      AND v.status NOT IN ('error', 'generating', 'draft')
-                      AND pa.alert_type IN ('stuck', 'timeout', 'awaiting_upload_stuck', 'failed')"""
+                      AND v.status NOT IN ('error', 'generating', 'draft', 'validation_failed')
+                      AND pa.alert_type IN ('stuck', 'timeout', 'awaiting_upload_stuck', 'failed', 'packaging_invalid')"""
             ).fetchall()
 
             for alert in alerts:
@@ -1179,6 +1225,55 @@ def _auto_resolve_completed(db) -> int:
                     (alert["id"],),
                 )
                 resolved += 1
+
+            # Variante channel/global de altered_content_mark_failed: se creaba
+            # cuando el ítem no estaba en `videos` (p. ej. un short antes del fix).
+            # Se resuelve cuando el ítem referenciado (metadata.video_id) ya está
+            # marcado o ya no está en YouTube. Sin esto, la alerta quedaba eterna
+            # porque el resolver por id solo cubría entity_type video/short.
+            try:
+                alerts = conn.execute(
+                    """SELECT id, metadata_json FROM pipeline_alerts
+                       WHERE resolved = 0
+                         AND alert_type = 'altered_content_mark_failed'
+                         AND entity_type NOT IN ('video', 'short')"""
+                ).fetchall()
+                for alert in alerts:
+                    try:
+                        yt_id = (json.loads(alert["metadata_json"] or "{}") or {}).get("video_id")
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        yt_id = None
+                    if not yt_id:
+                        continue
+                    item = conn.execute(
+                        """SELECT manual_altered_content_done AS done, status, yt_visibility
+                           FROM videos WHERE yt_video_id=? LIMIT 1""", (yt_id,)
+                    ).fetchone()
+                    if item is None:
+                        item = conn.execute(
+                            """SELECT manual_altered_content_done AS done, status, yt_visibility
+                               FROM shorts WHERE youtube_id=? LIMIT 1""", (yt_id,)
+                        ).fetchone()
+                    if item is None:
+                        continue
+                    marked = int(item["done"] or 0) == 1
+                    gone = str(item["status"] or "") in ("deleted_on_yt", "discarded", "removed") \
+                        or str(item["yt_visibility"] or "").lower() in ("removed", "unavailable")
+                    if not (marked or gone):
+                        continue
+                    conn.execute(
+                        """UPDATE pipeline_alerts
+                           SET resolved = 1, resolved_at = datetime('now'), acknowledged = 1,
+                               message = COALESCE(message, '') ||
+                                 ' [Auto-resuelto: marcado IA realizado o ítem ya no en YouTube]'
+                           WHERE id = ?""",
+                        (alert["id"],),
+                    )
+                    resolved += 1
+            except Exception as exc:  # noqa: BLE001
+                # Esquemas reducidos (tests) pueden no tener youtube_id/yt_visibility
+                # en shorts: no debe abortar el resto de auto-resolves.
+                logger.debug("Channel altered-mark auto-resolve skipped: %s", exc)
 
             conn.commit()
     except Exception as exc:
