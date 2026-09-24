@@ -5663,14 +5663,31 @@ class ExtendedDatabase(Database):
             return cur.rowcount > 0
 
     def resolve_scheduled_reminder(self, reminder_id: int) -> bool:
-        """Mark a reminder as resolved (operator reviewed the follow-up)."""
+        """Mark a reminder as resolved (operator reviewed the follow-up).
+
+        Cierra también la alerta de sistema asociada (``alert_id``); sin esto el
+        aviso quedaba abierto en el panel aunque el operador ya lo hubiese
+        revisado (bug sep 2026).
+        """
         with self._connect() as conn:
+            row = conn.execute(
+                "SELECT alert_id FROM scheduled_reminders WHERE id = ?", (reminder_id,)
+            ).fetchone()
             cur = conn.execute(
                 """UPDATE scheduled_reminders
                    SET status = 'resolved', resolved_at = datetime('now')
                    WHERE id = ? AND status = 'alerted'""",
                 (reminder_id,),
             )
+            if cur.rowcount and row and row["alert_id"]:
+                conn.execute(
+                    """UPDATE pipeline_alerts
+                       SET resolved = 1, resolved_at = datetime('now'), acknowledged = 1,
+                           message = COALESCE(message, '') ||
+                             ' [Auto-resuelto: recordatorio revisado]'
+                       WHERE id = ? AND resolved = 0""",
+                    (row["alert_id"],),
+                )
             conn.commit()
             return cur.rowcount > 0
 

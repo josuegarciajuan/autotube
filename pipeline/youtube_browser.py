@@ -81,6 +81,12 @@ SEL_RADIO_YES = '[name="VIDEO_HAS_ALTERED_CONTENT_YES"]'
 SEL_GUARDAR_ENABLED = "button:has-text('Guardar'):not([disabled])"
 SEL_SAVE_CONFIRM = "text=Guardado"
 
+# Razones de no-marcado que significan que el ítem NO es marcable por Studio
+# (radio bloqueado/ausente, p. ej. contenido restringido por edad) y no un fallo
+# real de la automatización. Coherente con scripts/yt_mark_pending_ia.py
+# (UNMARKABLE_REASONS). No generan alerta: alertar aquí era ruido (bug sep 2026).
+UNMARKABLE_MARK_REASONS = frozenset({"radio_disabled", "radio_not_found"})
+
 # -- End screen selectors (confirmed 2026-07-17) --
 SEL_ADD_ENDSCREEN_BTN = "#add-endscreen-icon-button"
 SEL_ADD_ELEMENT_MENU = "#add-element-menu-button"
@@ -916,6 +922,13 @@ class YouTubeBrowser:
         YouTube (antiban, ago 2026): sin el marcado, el contenido generado
         por IA es el principal desencadenante de eliminaciones.
         """
+        # Un ítem no marcable (radio bloqueado/ausente) NO es un fallo de la
+        # automatización: no alertar (evita el aviso eterno por `radio_disabled`).
+        if reason in UNMARKABLE_MARK_REASONS:
+            logger.info(
+                "Mark-altered %s no marcable (%s) — sin alerta", youtube_video_id, reason,
+            )
+            return
         try:
             from database.db_extended import ExtendedDatabase
             from api.services.lifecycle_monitor import create_alert
@@ -925,26 +938,39 @@ class YouTubeBrowser:
                 return
             db.set_system_state(key, "1")
             channel_id = None
-            video_db_id = None
+            entity_id = None
+            entity_type = "channel"
             try:
                 # ``self.account`` is the Google account, not the channel slug.
-                # Resolve the actual video first so the alert is attached to the
-                # video that needs manual action (and not to an unrelated channel).
+                # Resolve the actual item first so the alert is attached to the
+                # video/short that needs manual action (and not to an unrelated
+                # channel). Los shorts viven en su propia tabla: antes solo se
+                # buscaban en `videos` y los shorts caían a una alerta de canal
+                # con entity_id=NULL imposible de auto-resolver (bug sep 2026).
                 with db._connect() as conn:
                     row = conn.execute(
                         "SELECT id, channel_id FROM videos WHERE yt_video_id=? LIMIT 1",
                         (youtube_video_id,),
                     ).fetchone()
+                    if row:
+                        entity_type = "video"
+                    else:
+                        row = conn.execute(
+                            "SELECT id, channel_id FROM shorts WHERE youtube_id=? LIMIT 1",
+                            (youtube_video_id,),
+                        ).fetchone()
+                        if row:
+                            entity_type = "short"
                 if row:
-                    video_db_id = row["id"]
+                    entity_id = row["id"]
                     channel_id = row["channel_id"]
             except Exception:
-                video_db_id = None
+                entity_id = None
                 channel_id = None
             create_alert(
                 db,
-                entity_type="video" if video_db_id else "channel",
-                entity_id=video_db_id if video_db_id else channel_id,
+                entity_type=entity_type,
+                entity_id=entity_id if entity_id else channel_id,
                 channel_id=channel_id,
                 alert_type="altered_content_mark_failed",
                 severity="warning",

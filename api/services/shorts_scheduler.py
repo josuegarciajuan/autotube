@@ -3734,6 +3734,10 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
             # voice speed). Instead of cancelling, set back to 'pending'
             # for up to 2 automatic retries. After 2 failures, cancel permanently.
             conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
+            # Row factory necesario para leer `error_message` por nombre más abajo
+            # (sin él, `_row["error_message"]` lanzaba TypeError y el motivo real
+            # del fallo se perdía → alerta con "desconocido", bug sep 2026).
+            conn.row_factory = sqlite3.Row
             retries = 0
             try:
                 row = conn.execute(

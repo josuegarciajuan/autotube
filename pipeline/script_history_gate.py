@@ -63,6 +63,12 @@ def _recent_scripts(db, slug: str, lookback: int,
         # se compara consigo mismo y da similitud 1.00 → bloquea TODA generación.
         if exclude_id is not None:
             out = [(sid, g) for sid, g in out if sid != int(exclude_id)]
+            # Solo guiones ANTERIORES: un id mayor se insertó después del
+            # candidato (generación concurrente / reintento) y no es "historial".
+            # Sin esto, comparar contra un guion posterior casi-idéntico
+            # (mismo tema) daba sim=1.00 y bloqueaba el guion válido — causó la
+            # sequía de canal3 (sep 2026).
+            out = [(sid, g) for sid, g in out if sid < int(exclude_id)]
         return out
     except Exception as exc:  # noqa: BLE001
         logger.warning("script-history lookup failed (%s): %s", slug, exc)
