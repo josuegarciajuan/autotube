@@ -312,6 +312,27 @@ usan el worker independiente. Si `False`, usan el modo legacy (in-process, muere
 porque matará la generación.** `scripts/apply_changes.sh` lo detecta vía
 `scripts/deploy_safety.py` y aborta con `exit 1` (el modo subprocess sí permite el deploy).
 
+### 🎬 Worker de shorts independiente (sep 2026)
+
+Los shorts (**native / clip / standalone**) también corren en un **proceso
+independiente** (`api/services/shorts_worker.py`) lanzado por `_spawn_short_worker`
+(`api/services/shorts_scheduler.py`) con `start_new_session=True`:
+
+- El worker escribe `worker_pid` + heartbeat en `generation_jobs` y **posee el ciclo
+  completo** (genera + finaliza: enlaza el slot, estados, retries, defer, alertas vía
+  `_finalize_short_dispatch`). La API solo lanza el proceso.
+- Beneficios: un reinicio del API no mata el render; `scripts/deploy_safety.py` los
+  clasifica como subprocess (patrón `(full_pipeline_worker|shorts_worker)`) y **no
+  bloquea el deploy**; el render no compite con el event loop.
+- Se despliegan por los 3 puntos de dispatch (`dispatch_next_due_shorts_slot`,
+  `_fill_native_short_queue`, `dispatch_standalone_shorts_daily`).
+- **Gate anti-contención:** `should_defer_shorts_for_longform_load(...)` difiere el short
+  si hay un render long-form activo (evita timeouts por saturación de CPU).
+- **Gate D (backoff):** el tope diario de standalone (`today_count`) cuenta también
+  `failed/retrying/deferred`, y se emite alerta `standalone_short_failed` tras ≥2 fallos/día.
+- **Kill-switch:** `SHORTS_USE_SUBPROCESS_WORKER=false` → vuelve al modo in-process legacy.
+- `generation_jobs.result_short_id` (migración v61) guarda el `shorts.id` producido.
+
 ### Base de datos — schema y migraciones
 - Schema base: `database/schema.sql`
 - Schema v2 (panel): `database/schema_v2.sql`  
