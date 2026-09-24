@@ -620,6 +620,10 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
             # ── Antiban (ago 2026): quitar sufijos de credibilidad clickbait
             # tipo (REAL)/(CASO REAL) por si el LLM los incluyó igualmente.
             title = _strip_clickbait_suffix(title)
+            # Fase 1 packaging: saneo determinista (pipes/corchetes/caps/colas)
+            # antes del truncado. Opt-in por canal.
+            if getattr(self.config, "TITLE_HARDEN_ENABLED", False):
+                title = _harden_title(title, self.config)
             title = truncate_title_at_word(title, self.title_max_chars)
             title_check = validate_title(title, self.config)
 
@@ -1009,6 +1013,46 @@ _SPAM_SUFFIX_TAIL_RE = _re.compile(
     _re.IGNORECASE | _re.DOTALL,
 )
 _re_spam = _re.compile(r"[a-záéíóúüñ0-9]+")
+
+# Conectores que quedan colgando al partir un título por el separador '|'.
+_HARDEN_DANGLING_WORDS = frozenset({
+    "al", "a", "el", "la", "los", "las", "un", "una", "unos", "unas",
+    "de", "del", "en", "con", "sin", "por", "para", "que", "su", "sus",
+    "y", "o", "u", "e", "como", "más", "mas",
+})
+
+
+def _harden_title(text: str, cfg) -> str:
+    """Endurece un título ANTES del truncado (Fase 1 packaging, CTR).
+
+    Determinista y sin LLM:
+      - Si lleva ``|`` (patrón típico de título plantilla), se queda con el
+        segmento más informativo (el más largo).
+      - Elimina corchetes residuales.
+      - Quita sufijos clickbait y reaplica la política de mayúsculas del canal.
+      - Recorta conectores colgantes al final.
+    Nunca devuelve vacío: si el saneo deja el título vacío, conserva el original
+    colapsado (fail-open; el packaging gate sigue validando por su cuenta).
+    """
+    from pipeline.title_engine import apply_caps_policy
+
+    original = " ".join(str(text or "").split())
+    if not original:
+        return original
+    t = original
+    if "|" in t:
+        segments = [s.strip() for s in t.split("|") if s.strip()]
+        if segments:
+            t = max(segments, key=len)
+    t = t.replace("[", " ").replace("]", " ")
+    t = " ".join(t.split())
+    t = _strip_clickbait_suffix(t)
+    t = apply_caps_policy(t, cfg)
+    words = t.split()
+    while words and words[-1].strip(".,;:·•–—-|¿?¡!").casefold() in _HARDEN_DANGLING_WORDS:
+        words.pop()
+    t = " ".join(words).strip(" .,;:·•–—-|")
+    return t or original
 
 
 def _append_title_suffix(title: str, raw_suffix: str) -> str:

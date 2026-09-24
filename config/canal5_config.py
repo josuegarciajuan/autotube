@@ -407,6 +407,15 @@ THUMBNAIL_MEDICAL_ECG = True
 THUMBNAIL_MEDICAL_CROSS = False
 THUMBNAIL_MEDICAL_DIAGNOSIS = False
 THUMBNAIL_ALLOW_FACES = True
+# Fase 1 packaging (CTR): texto mayor y overlay más corto (3-4 palabras).
+THUMBNAIL_FONT_SIZE = 64
+THUMBNAIL_MAX_OVERLAY_CHARS = 26
+# Caras selectivas: la política decide por sujeto (no repetición sistemática).
+THUMBNAIL_FACE_ROLE = "auto"
+# A/B real de miniatura/título por canal (Fase 1 packaging).
+ENABLE_AB_TESTING = True
+# Saneo determinista de títulos (sin '|', sin genéricos, caps controladas).
+TITLE_HARDEN_ENABLED = True
 # Sujeto-tema primero: imagen clínica de alto impacto (radiografía, ADN, ECG).
 # La cara solo es protagonista si el vídeo es el caso de una persona concreta;
 # en ese caso, rostro real de stock (sin menores) y sin sangre visible.

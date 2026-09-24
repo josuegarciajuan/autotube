@@ -75,6 +75,23 @@ def get_experiment_metrics():
     }
 
 
+@router.get("/analytics/experiment/report")
+def get_experiment_report(days: int = 14):
+    """Informe accionable del experimento (Fase 0): KPIs leading/lagging + deltas.
+
+    KPIs leading: CTR, impresiones/vídeo y retención long-form (responden en días).
+    KPIs lagging: subs netos y alcance Shorts a 7 d. Incluye la bitácora de
+    intervenciones. Solo lectura, 0 cuota. Contrato:
+    ``specs/experimento-recuperacion-alcance.md``.
+    """
+    db = get_db()
+    from api.services.experiment_report import build_report
+    try:
+        return build_report(db, days_now=max(1, min(int(days), 90)))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)[:300])
+
+
 @router.get("/channels/{channel_id}/analytics/growth")
 def get_channel_growth(channel_id: int, days: int = 30):
     """Get daily growth data for a channel (subs, views, watch hours, revenue)."""

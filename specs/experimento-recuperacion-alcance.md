@@ -161,3 +161,52 @@ y desactiva la auto-transición; `--off` revierte.
 El experimento se cierra cuando, a T+45: avisos = 0, alcance por vídeo recuperado y
 long-form con distribución y retención > 40 %, o cuando una regla de decisión obligue a
 revertir. El resultado se anota en este documento con fecha.
+
+---
+
+## 11. Bitácora (fuente única para "¿cómo va el experimento?")
+
+> Esta sección es el punto de verdad. Cada intervención se registra aquí y en
+> `system_state["experiment_interventions"]` el día que se despliega.
+
+### 11.1 Cómo consultar el estado (0 cuota, solo lectura)
+```
+python3 scripts/experiment_report.py            # informe legible + bitácora
+python3 scripts/experiment_report.py --json     # salida JSON
+python3 scripts/experiment_report.py --log "texto de la intervención"
+```
+También vía API: `GET /api/analytics/experiment/report?days=14`.
+
+### 11.2 KPIs oficiales
+**Leading** (responden en días a packaging/contenido):
+| KPI | Baseline | Objetivo |
+|---|---|---|
+| CTR long-form | ~1,9 % | ≥ 4 % |
+| Impresiones/vídeo long-form | ~400–3.900 (vida) | tendencia ↑ sostenida |
+| Retención long-form | ~25 % | > 40 % |
+
+**Lagging** (tardan semanas): % browse/suggested (> 0), subs netos, alcance Shorts a 7 d.
+El Reporting API tiene latencia de hasta 48 h: los últimos 1-2 días pueden faltar.
+
+### 11.3 Diagnóstico T+7 (24/9/2026)
+- **Long-form:** 0 browse/suggested; tráfico solo de search/related/subs; CTR ~1,9 %;
+  retención ~25 %. → el cuello de botella es **packaging (CTR)** + impresiones.
+- **Shorts:** alcance 7 d por vídeo cayó ~50 % (de ~450 en jul a ~170-260 en sep),
+  coincidiendo con la ola de strikes de agosto. Es supresión de distribución, no clics.
+- Vistas/día post-experimento −39 % a −64 % (parcialmente esperado por recortar shorts).
+- **Avisos de política/strikes = 0** desde 11/9 (único objetivo cumplido).
+
+### 11.4 Intervenciones registradas
+| Fecha | Intervención | Efecto esperado |
+|---|---|---|
+| 17/9 | Instrumentación del experimento (baseline + checkpoints T+7/21/45) | Medir sin ambigüedad |
+| 24/9 | Drenaje de shorts por canal (fix inanición canal2/canal3) | Restaurar producción de shorts |
+| 24/9 | Congelación de cadencia en `recovery` (auto-transición off) | Ritmo prudente durante el experimento |
+| (Fase 1) | Packaging: A/B por canal + caras selectivas + composición + saneo títulos (canal3/canal5) | Subir CTR e impresiones/vídeo |
+| (Fase 2) | Search-first: temas por demanda de búsqueda | Impresiones vía búsqueda |
+| (Fase 3) | Retención: hooks/estructura + bucle de feedback | Retención > 40 % |
+
+### 11.5 Cómo decidir
+Aplicar la matriz de §6 con los KPIs leading: si en 2-4 semanas CTR/impresiones-por-vídeo
+suben, continuar y propagar; si están planos, refinar packaging/temas; si aparecen avisos,
+revertir el cambio señalado.
