@@ -472,13 +472,22 @@ THUMBNAIL_FONT_FAMILY = "DejaVuSans-Bold"
 THUMBNAIL_BORDER_COLOR = "#D4A843"
 THUMBNAIL_SHOW_4K_BADGE = False
 THUMBNAIL_TEXT_STROKE_COLOR = "#1A0F08"
+# Fase 1 packaging (CTR): texto mayor y overlay más corto (3-4 palabras).
+THUMBNAIL_FONT_SIZE = 64
+THUMBNAIL_MAX_OVERLAY_CHARS = 26
+# Caras selectivas: la política decide por sujeto (no repetición sistemática).
+THUMBNAIL_FACE_ROLE = "auto"
+# A/B real de miniatura/título por canal (Fase 1 packaging).
+ENABLE_AB_TESTING = True
+# Saneo determinista de títulos (sin '|', sin genéricos, caps controladas).
+TITLE_HARDEN_ENABLED = True
 
 # v3 (tema-primero): el color nace del contenido; la firma es el marco.
 THUMBNAIL_COLOR_MODE = "image_content"
 THUMBNAIL_FRAME_STYLE = "double_border"
 THUMBNAIL_LAYOUT_POOL = [
-    "topic_hero", "artifact_document", "negative_space_top",
-    "split_diagonal", "subject_closeup",
+    "subject_closeup", "topic_hero", "artifact_document",
+    "negative_space_top", "split_diagonal",
 ]
 
 THUMBNAIL_VISUAL_STYLE = "ancient_mystery"

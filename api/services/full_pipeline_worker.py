@@ -1550,9 +1550,14 @@ def run_job(
         # ═══════════════════════════════════════════════════════
         ab_test_variant_paths = []
         try:
-            from config.settings import ENABLE_AB_TESTING
+            from config.settings import ENABLE_AB_TESTING as _AB_GLOBAL
         except ImportError:
-            ENABLE_AB_TESTING = False
+            _AB_GLOBAL = False
+        # Fase 1 packaging: el A/B se resuelve POR CANAL (defaults=False; se
+        # activa en los canales en experimentación). El flag global legacy solo
+        # se usa si el canal no define el suyo.
+        _ab_channel = getattr(config, "ENABLE_AB_TESTING", None)
+        ENABLE_AB_TESTING = bool(_AB_GLOBAL if _ab_channel is None else _ab_channel)
         
         # Default must exist for both the generation-only and real-upload paths.
         # The completion handler reads it after either branch finishes.

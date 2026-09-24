@@ -604,6 +604,13 @@ THUMBNAIL_EMPHASIS_ENABLED = True
 THUMBNAIL_FACE_ROLE = "auto"
 THUMBNAIL_TYPOGRAPHY_POOL = ["DejaVuSans-Bold"]
 
+# ── Fase 1 packaging ──
+# El A/B real (3 variantes de miniatura, ganador por CTR) se activa POR CANAL
+# vía `ENABLE_AB_TESTING` (definido abajo, en el bloque AB_*); el flag global
+# `config.settings.ENABLE_AB_TESTING` queda como fallback legacy.
+# Saneo determinista de títulos antes del truncado. Opt-in por canal.
+TITLE_HARDEN_ENABLED = False
+
 # ═══════════════════════════════════════════════════════════════════
 # VOICE / TTS DEFAULTS
 # ═══════════════════════════════════════════════════════════════════

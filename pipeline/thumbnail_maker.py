@@ -97,6 +97,27 @@ def _find_font(size: int, bold: bool = False,
     return ImageFont.load_default()
 
 
+def resolve_allow_faces(cfg) -> bool:
+    """Resuelve si la miniatura puede usar caras, unificando la config del canal.
+
+    ``THUMBNAIL_FACE_ROLE`` es la fuente canónica:
+      - "auto" (default): la política decide por tipo de sujeto (cara solo cuando
+        el sujeto es una persona) — conserva variedad y evita la repetición.
+      - "allow"/"protagonist"/"supporting"/"on": permite caras.
+      - "none"/"deny"/"off": prohíbe caras.
+    Si el canal no define FACE_ROLE, se respeta el legacy ``THUMBNAIL_ALLOW_FACES``
+    (default True). Antes el código solo leía ``THUMBNAIL_ALLOW_FACES`` y el
+    ``THUMBNAIL_FACE_ROLE`` documentado en defaults quedaba muerto.
+    """
+    role = str(getattr(cfg, "THUMBNAIL_FACE_ROLE", "auto") or "auto").strip().lower()
+    if role in ("none", "deny", "off", "false", "no"):
+        return False
+    if role in ("allow", "on", "true", "yes", "protagonist", "supporting"):
+        return True
+    # "auto" (o valor desconocido) → legacy allow_faces (default True).
+    return bool(getattr(cfg, "THUMBNAIL_ALLOW_FACES", True))
+
+
 class ThumbnailMaker:
     """Generates YouTube thumbnails with image, gradient overlay, and title text."""
 
@@ -498,7 +519,7 @@ class ThumbnailMaker:
         if art_direction is None and base_image_path and self._last_art_direction is not None:
             art_direction = self._last_art_direction
         if art_direction is None:
-            allow_faces = getattr(self._channel_cfg, "THUMBNAIL_ALLOW_FACES", True)
+            allow_faces = resolve_allow_faces(self._channel_cfg)
             art_direction = self.art_director.plan(
                 title=title,
                 script_text=script_text,
@@ -688,7 +709,7 @@ class ThumbnailMaker:
         if not variant_briefs:
             return []
 
-        allow_faces = getattr(self._channel_cfg, "THUMBNAIL_ALLOW_FACES", True)
+        allow_faces = resolve_allow_faces(self._channel_cfg)
 
         # ── F3: Generate ONE base image (shared across variants) ──
         logger.info("[Thumbnail v2] F3: Generating shared base image for %d variants", len(variant_briefs))
@@ -765,7 +786,13 @@ class ThumbnailMaker:
                 layout=layout,
                 inset_image_path=inset_path,
                 color_plan=color_plan,
-                face_chip_path=face_chip_path,
+                # Diversidad de la variante: la última renuncia al "face chip"
+                # (recorte de cara) para que el A/B compare con/sin énfasis de
+                # cara en vez de testear tres copias equivalentes.
+                face_chip_path=(
+                    None if (len(variant_briefs) > 1 and i == len(variant_briefs) - 1)
+                    else face_chip_path
+                ),
                 emphasis_word=getattr(brief, 'emphasis_word', '') or art.emphasis_word,
             )
             variant_paths.append(thumb_path)
@@ -879,7 +906,7 @@ class ThumbnailMaker:
 
         # Per-channel concept directive (appended to the topic-first rule)
         cfg = self._channel_cfg
-        allow_faces = getattr(cfg, "THUMBNAIL_ALLOW_FACES", True)
+        allow_faces = resolve_allow_faces(cfg)
         concept_directive = getattr(cfg, "THUMBNAIL_CONCEPT_DIRECTIVE", "")
 
         brainstorm = ThumbnailBrainstorm()

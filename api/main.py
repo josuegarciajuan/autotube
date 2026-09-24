@@ -1793,8 +1793,23 @@ async def _schedule_checker_loop():
                 # YT API if data is stale. Skip only if ALL projects are exhausted.
                 if not _all_quota_exhausted and now - last_ab_test_check > 3600:
                     try:
-                        from config.settings import ENABLE_AB_TESTING
-                        if ENABLE_AB_TESTING:
+                        from config.settings import ENABLE_AB_TESTING as _AB_GLOBAL
+                        _ab_on = bool(_AB_GLOBAL)
+                        if not _ab_on:
+                            # Fase 1 packaging: el A/B se activa POR CANAL.
+                            # El ciclo debe correr si CUALQUIER canal lo tiene on.
+                            try:
+                                from config.config_bridge import get_channel_config
+                                for _ch in (_sched_db.get_channels(active_only=True) or []):
+                                    if getattr(
+                                        get_channel_config(_ch.get("slug", "")),
+                                        "ENABLE_AB_TESTING", False,
+                                    ):
+                                        _ab_on = True
+                                        break
+                            except Exception:
+                                pass
+                        if _ab_on:
                             from api.services.ab_test_worker import ABTestWorker
                             _ab = ABTestWorker(_sched_db)
                             await asyncio.to_thread(_ab.run_cycle)
