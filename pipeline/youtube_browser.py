@@ -122,6 +122,27 @@ def _unregister_playwright(pw):
         _playwright_registry.discard(pw)
 
 
+def _stop_playwright(pw) -> None:
+    """Stop a Playwright instance and mark it so it is NEVER reused.
+
+    ``Playwright`` no expone su estado; si un thread-local se queda apuntando a
+    una instancia ya detenida, reutilizarla lanza "Event loop is closed! Is
+    Playwright already stopped?". Marcamos la instancia al pararla y
+    ``_get_or_create_playwright`` la descarta en vez de devolverla.
+    """
+    if pw is None:
+        return
+    try:
+        pw.stop()
+    except Exception:
+        pass
+    try:
+        setattr(pw, "_autotube_stopped", True)
+    except Exception:
+        pass
+    _unregister_playwright(pw)
+
+
 def _cleanup_all_playwrights():
     """Stop ALL known Playwright instances and clear the registry.
 
@@ -131,25 +152,19 @@ def _cleanup_all_playwrights():
         instances = list(_playwright_registry)
         _playwright_registry.clear()
     for pw in instances:
-        try:
-            pw.stop()
-        except Exception:
-            pass
+        _stop_playwright(pw)
 
 
 def _cleanup_current_thread_playwright():
     """Stop the Playwright instance owned by the CURRENT thread (if any).
 
     Used in daemon thread finally blocks — each thread should clean up
-    its own instance to prevent leaked driver processes.
+    its own instance to prevent leaked driver processes. Also clears the
+    thread-local so a stopped instance is never handed out again.
     """
     pw = getattr(_thread_local, "playwright", None)
     if pw is not None:
-        try:
-            pw.stop()
-        except Exception:
-            pass
-        _unregister_playwright(pw)
+        _stop_playwright(pw)
         _thread_local.playwright = None
 
 
@@ -166,12 +181,16 @@ def _get_or_create_playwright():
     to a different thread (which happens to have exited)" errors.
     """
     pw = getattr(_thread_local, "playwright", None)
-    if pw is not None:
+    if pw is not None and not getattr(pw, "_autotube_stopped", False):
         return pw
+    # Instancia detenida en el thread-local (reciclada): descartarla y crear una
+    # nueva — reutilizarla lanzaría "Event loop is closed".
+    if pw is not None:
+        _thread_local.playwright = None
     with _playwright_lock:
         # Double-check after acquiring lock
         pw = getattr(_thread_local, "playwright", None)
-        if pw is not None:
+        if pw is not None and not getattr(pw, "_autotube_stopped", False):
             return pw
         _ensure_xvfb()
         pw = sync_playwright().start()
@@ -302,6 +321,7 @@ class YouTubeBrowser:
         # ``self._context`` no se pone a None cuando Chromium crashea (OOM /
         # cierre inesperado): sin el chequeo de vida, reusar el contexto muerto
         # hace que todo ``new_page()`` falle para siempre. Se recrea aquí.
+        same_thread = (self._owning_thread_id == current_thread)
         if self._context is not None:
             try:
                 self._context.close()
@@ -309,16 +329,16 @@ class YouTubeBrowser:
                 pass
             self._context = None
             self._owning_thread_id = None
-            # Reset playwright ref so _get_or_create_playwright() creates a clean instance
-            # for the current thread (prevents "cannot switch to a different thread"
-            # when old greenlet died with the previous thread)
-            # CRITICAL: stop the old instance first to prevent driver process leaks
-            if self._playwright is not None:
-                try:
-                    self._playwright.stop()
-                except Exception:
-                    pass
-                _unregister_playwright(self._playwright)
+            if same_thread:
+                # La instancia de Playwright pertenece a ESTE hilo: hay que
+                # pararla Y limpiar el thread-local. Si no, _get_or_create_playwright()
+                # devuelve la instancia detenida → "Event loop is closed".
+                _cleanup_current_thread_playwright()
+            elif self._playwright is not None:
+                # Hilo distinto: parar la instancia del hilo anterior (para no
+                # filtrar procesos driver). El thread-local del hilo actual no
+                # se toca — aún no existe o es propio de este hilo.
+                _stop_playwright(self._playwright)
             self._playwright = None
             time.sleep(1.5)  # let Singletons-lock fully release
 
@@ -410,15 +430,13 @@ class YouTubeBrowser:
             pass
         self._context = None
         self._owning_thread_id = None
-        if self._playwright is not None:
-            try:
-                self._playwright.stop()
-            except Exception:
-                pass
-            try:
-                _unregister_playwright(self._playwright)
-            except Exception:
-                pass
+        # Parar el Playwright de ESTE hilo y limpiar su thread-local: si no se
+        # limpia, el siguiente _ensure_browser() reutiliza la instancia detenida
+        # y falla con "Event loop is closed! Is Playwright already stopped?".
+        pw = self._playwright
+        _cleanup_current_thread_playwright()
+        if pw is not None and not getattr(pw, "_autotube_stopped", False):
+            _stop_playwright(pw)
         self._playwright = None
         time.sleep(1.5)
 
