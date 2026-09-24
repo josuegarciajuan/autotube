@@ -38,8 +38,10 @@ import sys
 from typing import Callable, Iterable, Optional
 
 # Worker process pattern. Long-form workers are spawned as
-# ``full_pipeline_worker.py --job-id <N>`` in their own session.
-_WORKER_PATTERN = "full_pipeline_worker.*--job-id {job_id}"
+# ``full_pipeline_worker.py --job-id <N>`` and shorts workers as
+# ``shorts_worker.py --job-id <N>``, each in their own session. Both survive an
+# API restart (systemd KillMode=process), so both count as "subprocess" here.
+_WORKER_PATTERN = "(full_pipeline_worker|shorts_worker).*--job-id {job_id}"
 
 # When executed as ``python3 scripts/deploy_safety.py``, sys.path[0] is the
 # ``scripts/`` directory, so the project root is NOT importable and

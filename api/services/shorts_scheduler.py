@@ -144,7 +144,8 @@ def _autotube_render_process_count() -> int:
                 cmd = " ".join(proc.info.get("cmdline") or [])
                 if not cmd:
                     continue
-                if "imageio_ffmpeg" in cmd or "full_pipeline_worker" in cmd:
+                if ("imageio_ffmpeg" in cmd or "full_pipeline_worker" in cmd
+                        or "shorts_worker" in cmd):
                     count += 1
             except (psutil.NoSuchProcess, psutil.AccessDenied, TypeError):
                 continue
@@ -2346,21 +2347,29 @@ def _fill_native_short_queue(db=None, loop=None) -> dict | None:
         db.update_job(job_id, status="running")
         db.update_shorts_slot_status(slot_id, "running", job_id=job_id)
 
-        _fill_coro = _dispatch_short_async(
-            slot_id=slot_id,
-            job_id=job_id,
-            channel_id=cid,
-            channel_slug=slug,
-            short_type="native",
-            target_upload_at=target_upload_at,
-            generate_only=True,
-        )
-        if loop is not None:
-            import asyncio as _asyncio_fill
-            _asyncio_fill.run_coroutine_threadsafe(_fill_coro, loop)
+        if _shorts_subprocess_enabled():
+            # Subprocess worker owns generation + finalization (sep 2026).
+            _spawn_short_worker(
+                short_type="native", channel_id=cid, channel_slug=slug,
+                job_id=job_id, slot_id=slot_id,
+                target_upload_at=target_upload_at, generate_only=True,
+            )
         else:
-            import asyncio as _asyncio_fill2
-            _asyncio_fill2.create_task(_fill_coro)
+            _fill_coro = _dispatch_short_async(
+                slot_id=slot_id,
+                job_id=job_id,
+                channel_id=cid,
+                channel_slug=slug,
+                short_type="native",
+                target_upload_at=target_upload_at,
+                generate_only=True,
+            )
+            if loop is not None:
+                import asyncio as _asyncio_fill
+                _asyncio_fill.run_coroutine_threadsafe(_fill_coro, loop)
+            else:
+                import asyncio as _asyncio_fill2
+                _asyncio_fill2.create_task(_fill_coro)
     except Exception as exc:
         logger.warning("[%s] Fill native queue failed: %s", slug, exc)
         return None
@@ -2893,21 +2902,31 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                     # from a thread-pool thread (no running event loop). Use
                     # run_coroutine_threadsafe when a loop is provided by the
                     # caller (main.py passes it via asyncio.get_running_loop).
-                    _short_async_coro = _dispatch_short_async(
-                        slot_id=slot_id, job_id=job_id_f,
-                        channel_id=channel_id, channel_slug=slug,
-                        short_type=short_type_f,
-                        source_video_id=source_video_id_f,
-                        slot_rank=slot_rank_f,
-                        target_upload_at=force_slot.get("target_upload_at"),
-                        generate_only=_spam_gen_only_f,
-                    )
-                    if loop is not None:
-                        import asyncio as _asyncio_f
-                        _asyncio_f.run_coroutine_threadsafe(_short_async_coro, loop)
+                    if _shorts_subprocess_enabled():
+                        _spawn_short_worker(
+                            short_type=short_type_f, channel_id=channel_id,
+                            channel_slug=slug, job_id=job_id_f, slot_id=slot_id,
+                            source_video_id=source_video_id_f,
+                            slot_rank=slot_rank_f,
+                            target_upload_at=force_slot.get("target_upload_at"),
+                            generate_only=_spam_gen_only_f,
+                        )
                     else:
-                        import asyncio as _asyncio_f
-                        _asyncio_f.create_task(_short_async_coro)
+                        _short_async_coro = _dispatch_short_async(
+                            slot_id=slot_id, job_id=job_id_f,
+                            channel_id=channel_id, channel_slug=slug,
+                            short_type=short_type_f,
+                            source_video_id=source_video_id_f,
+                            slot_rank=slot_rank_f,
+                            target_upload_at=force_slot.get("target_upload_at"),
+                            generate_only=_spam_gen_only_f,
+                        )
+                        if loop is not None:
+                            import asyncio as _asyncio_f
+                            _asyncio_f.run_coroutine_threadsafe(_short_async_coro, loop)
+                        else:
+                            import asyncio as _asyncio_f
+                            _asyncio_f.create_task(_short_async_coro)
                     return {
                         "slot_id": slot_id, "job_id": job_id_f,
                         "channel_slug": slug, "short_type": short_type_f,
@@ -3171,23 +3190,33 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
         # asyncio.create_task fails with RuntimeError when called
         # from a thread-pool thread (no running event loop). Use
         # run_coroutine_threadsafe when a loop is provided.
-        _short_async_coro = _dispatch_short_async(
-            slot_id=slot_id,
-            job_id=job_id,
-            channel_id=channel_id,
-            channel_slug=slug,
-            short_type=short_type,
-            source_video_id=source_video_id,
-            slot_rank=slot_rank,
-            target_upload_at=next_slot.get("target_upload_at"),
-            generate_only=_spam_gen_only,
-        )
-        if loop is not None:
-            import asyncio as _asyncio2
-            _asyncio2.run_coroutine_threadsafe(_short_async_coro, loop)
+        if _shorts_subprocess_enabled():
+            # Subprocess worker owns generation + finalization (sep 2026).
+            _spawn_short_worker(
+                short_type=short_type, channel_id=channel_id, channel_slug=slug,
+                job_id=job_id, slot_id=slot_id, source_video_id=source_video_id,
+                slot_rank=slot_rank,
+                target_upload_at=next_slot.get("target_upload_at"),
+                generate_only=_spam_gen_only,
+            )
         else:
-            import asyncio
-            asyncio.create_task(_short_async_coro)
+            _short_async_coro = _dispatch_short_async(
+                slot_id=slot_id,
+                job_id=job_id,
+                channel_id=channel_id,
+                channel_slug=slug,
+                short_type=short_type,
+                source_video_id=source_video_id,
+                slot_rank=slot_rank,
+                target_upload_at=next_slot.get("target_upload_at"),
+                generate_only=_spam_gen_only,
+            )
+            if loop is not None:
+                import asyncio as _asyncio2
+                _asyncio2.run_coroutine_threadsafe(_short_async_coro, loop)
+            else:
+                import asyncio
+                asyncio.create_task(_short_async_coro)
 
         return {
             "slot_id": slot_id,
@@ -3289,6 +3318,295 @@ def _resolve_clip_source(channel_id: int, long_slot_position) -> int | None:
         return found["id"]
 
     return None
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Shorts subprocess worker — spawn + finalize (sep 2026)
+#
+# Los shorts (native/clip/standalone) se generan en un PROCESO INDEPENDIENTE
+# (api/services/shorts_worker.py) para que (a) un reinicio del API no mate el
+# render, (b) el gate de deploy no se bloquee, y (c) el render no compita por el
+# event loop. El worker posee el ciclo completo: genera Y finaliza.
+# Kill-switch: SHORTS_USE_SUBPROCESS_WORKER=false → vuelve al modo in-process.
+# ═══════════════════════════════════════════════════════════════════
+
+def _shorts_subprocess_enabled() -> bool:
+    """Whether shorts run in a detached subprocess worker (default True)."""
+    try:
+        from config.settings import SHORTS_USE_SUBPROCESS_WORKER
+        return bool(SHORTS_USE_SUBPROCESS_WORKER)
+    except Exception:
+        return True
+
+
+def _find_pre_rendered_clip(slot_id: int) -> int | None:
+    """Return the id of an already-rendered 'ready' clip short linked to ``slot_id``."""
+    import sqlite3
+    from pathlib import Path
+    from config.settings import DATABASE_PATH
+    try:
+        conn = sqlite3.connect(str(DATABASE_PATH), timeout=10)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT s.id, s.file_path
+               FROM shorts s
+               JOIN shorts_planned_slots sps ON sps.short_id = s.id
+               WHERE sps.id = ?
+                 AND s.type = 'clip'
+                 AND s.status = 'ready'""",
+            (slot_id,),
+        ).fetchone()
+        conn.close()
+        if row and row["file_path"] and Path(row["file_path"]).exists():
+            return int(row["id"])
+    except Exception as exc:
+        logger.debug("Pre-render lookup for slot #%d failed (non-fatal): %s", slot_id, exc)
+    return None
+
+
+def _spawn_short_worker(*, short_type: str, channel_id: int, channel_slug: str,
+                        job_id: int, slot_id: int = 0, source_video_id: int = None,
+                        target_upload_at: str = None, generate_only: bool = False,
+                        slot_rank: int = 0):
+    """Launch a detached shorts subprocess worker for one short.
+
+    The worker owns the whole lifecycle (generation + finalization) and survives
+    API restarts (``start_new_session=True``). Returns the Popen or None on error.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    worker_script = Path(__file__).parent / "shorts_worker.py"
+    cmd = [
+        sys.executable, str(worker_script),
+        "--channel-id", str(channel_id),
+        "--channel-slug", channel_slug,
+        "--job-id", str(job_id),
+        "--slot-id", str(slot_id or 0),
+        "--slot-rank", str(slot_rank or 0),
+        f"--{short_type}",  # --native / --clip / --standalone
+    ]
+    if short_type == "clip":
+        if source_video_id:
+            cmd.extend(["--source-video-id", str(source_video_id)])
+        pre = _find_pre_rendered_clip(slot_id) if slot_id else None
+        if pre:
+            cmd.extend(["--pre-rendered-short-id", str(pre)])
+    if target_upload_at:
+        cmd.extend(["--target-upload-at", str(target_upload_at)])
+    if generate_only:
+        cmd.append("--generate-only")
+
+    try:
+        from config.settings import LOGS_DIR
+        log_path = Path(LOGS_DIR) / f"shorts_worker_{job_id}.log"
+    except Exception:
+        log_path = Path("logs") / f"shorts_worker_{job_id}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        proc = subprocess.Popen(
+            cmd, start_new_session=True,
+            stdout=open(log_path, "w"), stderr=subprocess.STDOUT,
+        )
+        logger.info(
+            "Shorts worker spawned: job=%d type=%s channel=%s pid=%d",
+            job_id, short_type, channel_slug, proc.pid,
+        )
+        return proc
+    except Exception as exc:
+        logger.error("Failed to spawn shorts worker for job #%d: %s", job_id, exc)
+        try:
+            from database.db_extended import ExtendedDatabase
+            ExtendedDatabase().update_job(
+                job_id, status="failed",
+                error_msg=f"Shorts worker spawn failed: {exc}"[:300],
+            )
+        except Exception:
+            pass
+        return None
+
+
+def _finalize_short_dispatch(slot_id, job_id, channel_id, short_id=None,
+                             exc=None, generate_only=False) -> None:
+    """Finalize one short dispatch: link slot, set statuses, retries, defer, alerts.
+
+    Called by the shorts subprocess worker (primary) and by the legacy in-process
+    path. Safe when ``slot_id`` is falsy (standalone shorts have no planned slot).
+    """
+    import sqlite3
+    from config.settings import DATABASE_PATH
+
+    try:
+        from pipeline.youtube_uploader import SpamRemovalError, QuotaExhaustedError
+    except Exception:  # pragma: no cover - import guard
+        SpamRemovalError = QuotaExhaustedError = ()  # type: ignore
+
+    def _connect_db():
+        return sqlite3.connect(str(DATABASE_PATH), timeout=30)
+
+    # ── 1. Success ──────────────────────────────────────────────
+    if short_id:
+        _slot_status = "generated" if generate_only else "completed"
+        conn = _connect_db()
+        try:
+            if slot_id:
+                conn.execute(
+                    "UPDATE shorts_planned_slots SET status = ?, short_id = ?, "
+                    "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (_slot_status, short_id, slot_id),
+                )
+            conn.execute(
+                "UPDATE generation_jobs SET status = 'completed', "
+                "result_short_id = ? WHERE id = ?",
+                (int(short_id), job_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        logger.info("Short dispatch finalized: job=%d slot=%s short_id=%s (%s)",
+                    job_id, slot_id or "-", short_id, _slot_status)
+        return
+
+    # ── 2. Spam removal — NEVER retry ───────────────────────────
+    if exc is not None and SpamRemovalError and isinstance(exc, SpamRemovalError):
+        logger.error(
+            "Slot #%s: YouTube REMOVED the short (%s) — spam strike, cancelling",
+            slot_id, str(exc)[:200],
+        )
+        conn = _connect_db()
+        try:
+            if slot_id:
+                conn.execute(
+                    "UPDATE shorts_planned_slots SET status='cancelled', "
+                    "error_message='YouTube removed short (spam) — no retry', "
+                    "updated_at=CURRENT_TIMESTAMP WHERE id = ?", (slot_id,),
+                )
+            conn.execute(
+                "UPDATE generation_jobs SET status='failed', error_msg=? WHERE id = ?",
+                (f"SpamRemovalError: {str(exc)[:300]}", job_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return
+
+    # ── 3. Quota exhausted — defer ──────────────────────────────
+    if exc is not None and QuotaExhaustedError and isinstance(exc, QuotaExhaustedError):
+        logger.warning("Shorts dispatch quota exhausted for slot #%s: %s", slot_id, exc)
+        conn = _connect_db()
+        try:
+            if slot_id:
+                conn.execute(
+                    "UPDATE shorts_planned_slots SET status='pending', "
+                    "error_message='YouTube quota exhausted — retry after reset', "
+                    "job_id=NULL, scheduled_at=datetime('now','+12 hours'), "
+                    "updated_at=CURRENT_TIMESTAMP WHERE id = ?", (slot_id,),
+                )
+            conn.execute(
+                "UPDATE generation_jobs SET status='deferred', error_msg=? WHERE id = ?",
+                (f"Quota exhausted: {str(exc)[:300]}", job_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return
+
+    # ── 4. Failure without slot (standalone) ────────────────────
+    _exc_reason = str(exc)[:300] if exc else ""
+    if not slot_id:
+        conn = _connect_db()
+        try:
+            conn.execute(
+                "UPDATE generation_jobs SET status='failed', error_msg=? WHERE id = ?",
+                (_exc_reason or "No short_id returned (standalone)", job_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        logger.warning("Standalone short failed (job=%d): %s",
+                       job_id, _exc_reason or "no short_id")
+        _alert_standalone_failed(channel_id, _exc_reason)
+        return
+
+    # ── 5. Failure with slot — retries / defer / cancel ─────────
+    conn = _connect_db()
+    try:
+        retries = 0
+        try:
+            row = conn.execute(
+                "SELECT retry_count FROM shorts_planned_slots WHERE id = ?", (slot_id,)
+            ).fetchone()
+            retries = int(row[0]) if row and row[0] else 0
+        except Exception:
+            pass
+
+        if retries < 2:
+            conn.execute(
+                "UPDATE shorts_planned_slots SET status = 'pending', retry_count = ?, "
+                "error_message = 'Auto-retry after failure (attempt ' || ? || '/2)', "
+                "job_id = NULL, scheduled_at = datetime('now', '+10 minutes'), "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (retries + 1, retries + 1, slot_id),
+            )
+            conn.execute(
+                "UPDATE generation_jobs SET status = 'retrying', "
+                "error_msg = 'No short_id returned (retry ' || ? || '/2)' WHERE id = ?",
+                (retries + 1, job_id),
+            )
+            conn.commit()
+            logger.warning("Shorts slot #%s failed (retry %d/2) — rescheduled as pending",
+                           slot_id, retries + 1)
+            return
+
+        # Preserve the REAL reason registered by _native_fail() (if any).
+        _reason = _exc_reason
+        try:
+            _row = conn.execute(
+                "SELECT error_message FROM shorts_planned_slots WHERE id = ?", (slot_id,)
+            ).fetchone()
+            if _row and _row[0]:
+                _reason = _row[0]
+        except Exception:
+            pass
+
+        # Pacing/quota failures are not definitive: defer instead of cancel.
+        _defer_reason = _defer_slot_pacing_reason(slot_id, channel_id)
+        if _defer_reason and not _reason:
+            _reason = _defer_reason
+        if _defer_reason:
+            conn.execute(
+                "UPDATE shorts_planned_slots SET status = 'pending', "
+                "retry_count = 0, job_id = NULL, error_message = ?, "
+                "scheduled_at = datetime('now', '+6 hours'), "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (_defer_reason + " — reintento diferido", slot_id),
+            )
+            conn.execute(
+                "UPDATE generation_jobs SET status = 'deferred', error_msg = ? WHERE id = ?",
+                (_defer_reason, job_id),
+            )
+            conn.commit()
+            logger.info("Shorts slot #%s deferred (no cancel): %s", slot_id, _defer_reason)
+            return
+
+        conn.execute(
+            "UPDATE shorts_planned_slots SET status = 'cancelled', "
+            "error_message = COALESCE(error_message, 'Exhausted retries (2/2)'), "
+            "updated_at = CURRENT_TIMESTAMP WHERE id = ?", (slot_id,),
+        )
+        conn.execute(
+            "UPDATE generation_jobs SET status = 'failed', "
+            "error_msg = COALESCE(error_msg, 'No short_id returned (exhausted retries)') "
+            "WHERE id = ?", (job_id,),
+        )
+        conn.commit()
+        logger.warning("Shorts slot #%s exhausted retries — cancelled (%s)",
+                       slot_id, (_reason or "sin motivo")[:100])
+        _alert_short_dispatch_failed(slot_id, channel_id, _reason)
+    finally:
+        conn.close()
 
 
 async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
@@ -3713,6 +4031,46 @@ def _native_fail(slot_id: int | None, job_id: int | None, reason: str) -> None:
     except Exception as e:
         logger.warning("Native short fail record failed (slot=%s job=%s): %s",
                        slot_id, job_id, e)
+
+
+def _alert_standalone_failed(channel_id: int, reason: str) -> None:
+    """Alerta (deduplicada por canal) cuando los standalone de un canal fallan hoy.
+
+    Gate D (sep 2026): un standalone que falla repetidamente (p. ej. timeout de
+    render) debe dejar rastro operativo, no fallar en silencio. Se emite una sola
+    alerta por canal y día (entity_id=channel_id) cuando ya hay ≥2 fallos hoy.
+    """
+    try:
+        import sqlite3
+        from config.settings import DATABASE_PATH
+        today = __import__("datetime").datetime.now().strftime("%Y-%m-%d")
+        conn = sqlite3.connect(str(DATABASE_PATH), timeout=10)
+        fails = conn.execute(
+            """SELECT COUNT(*) FROM generation_jobs
+               WHERE action = 'generate_standalone_short' AND channel_id = ?
+                 AND status = 'failed' AND created_at >= ?""",
+            (channel_id, today),
+        ).fetchone()[0]
+        conn.close()
+        if fails < 2:
+            return
+        from api.services.lifecycle_monitor import create_alert
+        from database.db_extended import ExtendedDatabase
+        create_alert(
+            ExtendedDatabase(),
+            entity_type="channel", entity_id=channel_id, channel_id=channel_id,
+            alert_type="standalone_short_failed",
+            severity="warning",
+            title=f"Shorts standalone fallando repetidamente (canal #{channel_id})",
+            message=(
+                f"{fails} shorts standalone fallidos hoy en el canal #{channel_id}. "
+                f"Último motivo: {reason or 'desconocido'}. Revisar carga de CPU/"
+                "timeout de render o configuración del canal."
+            ),
+            metadata={"channel_id": channel_id, "fails_today": fails, "reason": reason},
+        )
+    except Exception as _alert_exc:
+        logger.warning("standalone failed alert error: %s", _alert_exc)
 
 
 def _alert_short_dispatch_failed(slot_id: int, channel_id: int, reason: str) -> None:
@@ -6703,10 +7061,16 @@ def dispatch_standalone_shorts_daily() -> dict:
             conn = __import__("sqlite3").connect(
                 str(__import__("config.settings", fromlist=["DATABASE_PATH"]).DATABASE_PATH), timeout=10
             )
+            # Gate D (sep 2026): los intentos FALLIDOS también cuentan para el
+            # tope diario. Antes solo contaban completed/running/queued, así que
+            # un fallo (p. ej. timeout de render) no consumía el cupo y el
+            # dispatcher reintentaba cada tick (2 h) indefinidamente, quemando
+            # CPU. Incluir failed/retrying/deferred acota los intentos/día.
             today_count = conn.execute(
                 """SELECT COUNT(*) FROM generation_jobs
                    WHERE action = 'generate_standalone_short'
-                     AND status IN ('completed', 'running', 'queued')
+                     AND status IN ('completed', 'running', 'queued',
+                                    'retrying', 'deferred', 'failed')
                      AND created_at >= ?""",
                 (today_dt,),
             ).fetchone()[0]
@@ -6730,9 +7094,28 @@ def dispatch_standalone_shorts_daily() -> dict:
             job_id = db.create_job(channel_id, "generate_standalone_short")
             db.update_job(job_id, status="running", progress=0, phase="standalone")
 
-            # Despacha UN standalone (síncrono, secuencial) y sale.
+            # Despacha UN standalone y sale.
             # Cola unificada: generate_only=True → el short queda en cola y la
             # válvula de goteo lo sube respetando los topes.
+            #
+            # sep 2026: en modo subprocess el WORKER posee el ciclo completo
+            # (genera + finaliza: enlaza/estados/alertas) y sobrevive reinicios
+            # del API; la API solo lanza el proceso. Con el kill-switch off se
+            # usa el camino síncrono legacy.
+            if _shorts_subprocess_enabled():
+                proc = _spawn_short_worker(
+                    short_type="standalone", channel_id=channel_id,
+                    channel_slug=slug, job_id=job_id, generate_only=True,
+                )
+                if proc is not None:
+                    result["dispatched"] += 1
+                    logger.info("[standalone] %s lanzado en worker subprocess pid=%d (%d/%d today)",
+                                slug, proc.pid, today_count + 1, max_per_day)
+                else:
+                    result["errors"] += 1
+                    logger.warning("[standalone] %s: no se pudo lanzar el worker", slug)
+                break  # solo un standalone por tick (anti-ráfaga)
+
             try:
                 from api.services.shorts_scheduler import _dispatch_standalone_short
                 short_id = _dispatch_standalone_short(
