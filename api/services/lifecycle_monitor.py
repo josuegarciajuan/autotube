@@ -394,6 +394,15 @@ def check_all_health(db) -> dict:
     # ── Check 17: Cross-platform publish failures (non-auth) ──
     created += _check_platform_publish_failed(db)
 
+    # ── Check 18: Watchdog del backfill IA (proceso parado) ──
+    try:
+        from api.services.ia_marking_health import check_backfill_running
+        _bf = check_backfill_running(db)
+        created += 1 if _bf.get("alerted") else 0
+        resolved += int(_bf.get("resolved") or 0)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("backfill watchdog check failed: %s", exc)
+
     logger.info(
         "Health check: %d alerts created, %d resolved",
         created, resolved,

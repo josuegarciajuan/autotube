@@ -29,6 +29,7 @@ import os
 import random
 import sqlite3
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -51,6 +52,18 @@ STATE_PENDING = "ia_backfill_pending"
 STATE_LAST_RUN = "ia_backfill_last_run"
 STATE_FINISHED_AT = "ia_backfill_finished_at"
 STATE_LAST_PROGRESS = "ia_backfill_last_progress"
+STATE_HEARTBEAT = "ia_backfill_heartbeat"
+
+# Visibilidades externas (=restringido / no disponible / no marcable) que
+# permiten descartar un ítem sin gastar reintentos. Salen de yt-dlp (0 cuota).
+RESTRICTED_VISIBILITIES = {
+    "age_restricted", "removed", "unavailable", "private", "login_required",
+}
+
+# Motivos de fallo del marcado que sugieren que el ítem NO es marcable (el radio
+# de "contenido alterado" está deshabilitado o ausente). Se comprueba con yt-dlp:
+# si está restringido → skip; si es público → puede ser transitorio.
+UNMARKABLE_REASONS = {"radio_disabled", "radio_not_found"}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -108,7 +121,7 @@ def get_pending(canal: str | None = None) -> list[dict]:
           AND COALESCE(v.manual_altered_content_done, 0) = 0
           AND COALESCE(v.manual_altered_content_skip, 0) = 0
           AND COALESCE(v.status, '') NOT IN ('deleted_on_yt', 'removed')
-          AND COALESCE(v.yt_visibility, '') NOT IN ('removed', 'unavailable')
+          AND COALESCE(v.yt_visibility, '') NOT IN ('removed', 'unavailable', 'age_restricted')
     """
     sq = """
         SELECT s.youtube_id AS yt_id, c.slug AS canal, 'short' AS kind, s.id AS db_id,
@@ -117,7 +130,7 @@ def get_pending(canal: str | None = None) -> list[dict]:
         WHERE s.youtube_id IS NOT NULL AND s.youtube_id != ''
           AND COALESCE(s.manual_altered_content_done, 0) = 0
           AND COALESCE(s.manual_altered_content_skip, 0) = 0
-          AND COALESCE(s.yt_visibility, '') NOT IN ('removed', 'unavailable')
+          AND COALESCE(s.yt_visibility, '') NOT IN ('removed', 'unavailable', 'age_restricted')
     """
     params: list = []
     if canal:
@@ -165,6 +178,88 @@ def mark_unavailable_items() -> int:
     conn.close()
     return total
 
+
+# ── Detección de ítems restringidos / no marcables (yt-dlp, 0 cuota) ──
+
+def classify_restricted(yt_id: str, slug: str | None = None) -> str:
+    """Clasifica la visibilidad externa del ítem (yt-dlp, 0 cuota).
+
+    Delega al agente egress si el canal es gestionado (nunca usa la IP del
+    server para esos canales). Devuelve una visibilidad del reconciler:
+    'public'|'private'|'age_restricted'|'removed'|'unavailable'|
+    'login_required'|'unknown'|'error'.
+    """
+    try:
+        from api.services.yt_state_reconciler import _classify_for_channel
+        return _classify_for_channel(yt_id, slug=slug)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("classify_restricted(%s) failed: %s", yt_id, exc)
+        return "unknown"
+
+
+def persist_visibility(kind: str, db_id: int, vis: str) -> None:
+    """Persiste la visibilidad externa real en la BD (panel/reconciler)."""
+    table = "videos" if kind == "video" else "shorts"
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.execute(f"UPDATE {table} SET yt_visibility=? WHERE id=?", (vis, db_id))
+        conn.commit()
+        conn.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("persist_visibility(%s/%s) failed: %s", table, db_id, exc)
+
+
+def skip_if_restricted(kind: str, db_id: int, yt_id: str, canal: str) -> bool:
+    """Descarta un ítem restringido detectado por yt-dlp. True si se descartó.
+
+    Se usa al primer fallo 'no marcable' (radio deshabilitado/ausente) para no
+    gastar los 3 intentos en contenido que YouTube no permite marcar.
+    """
+    vis = classify_restricted(yt_id, canal)
+    if vis not in ("unknown", "error", "public"):
+        persist_visibility(kind, db_id, vis)
+    if vis in RESTRICTED_VISIBILITIES:
+        mark_skip(kind, db_id, f"yt_{vis}")
+        logger.info("[%s] SKIP %s (clasificado %s por yt-dlp)", canal, yt_id, vis)
+        return True
+    return False
+
+
+def sweep_restricted_pending(limit: int = 60) -> int:
+    """Barrido de arranque: descarta pendientes ya intentados que están restringidos.
+
+    Solo mira ítems con ``manual_altered_content_attempts >= 1`` (conjunto
+    pequeño) para no ralentizar el arranque. Devuelve cuántos descartó.
+    """
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    rows: list[dict] = []
+    for q in (
+        """SELECT v.yt_video_id AS yt_id, c.slug AS canal, 'video' AS kind, v.id AS db_id
+           FROM videos v JOIN channels c ON c.id=v.channel_id
+           WHERE v.yt_video_id IS NOT NULL AND v.yt_video_id!=''
+             AND COALESCE(v.manual_altered_content_done,0)=0
+             AND COALESCE(v.manual_altered_content_skip,0)=0
+             AND COALESCE(v.manual_altered_content_attempts,0)>=1
+             AND COALESCE(v.status,'') NOT IN ('deleted_on_yt','removed')
+             AND COALESCE(v.yt_visibility,'') NOT IN ('removed','unavailable','age_restricted')""",
+        """SELECT s.youtube_id AS yt_id, c.slug AS canal, 'short' AS kind, s.id AS db_id
+           FROM shorts s JOIN channels c ON c.id=s.channel_id
+           WHERE s.youtube_id IS NOT NULL AND s.youtube_id!=''
+             AND COALESCE(s.manual_altered_content_done,0)=0
+             AND COALESCE(s.manual_altered_content_skip,0)=0
+             AND COALESCE(s.manual_altered_content_attempts,0)>=1
+             AND COALESCE(s.yt_visibility,'') NOT IN ('removed','unavailable','age_restricted')""",
+    ):
+        for r in conn.execute(q):
+            rows.append(dict(r))
+    conn.close()
+
+    skipped = 0
+    for r in rows[: max(0, limit)]:
+        if skip_if_restricted(r["kind"], r["db_id"], r["yt_id"], r["canal"]):
+            skipped += 1
+    return skipped
 
 
 def mark_in_db(kind: str, db_id: int, yt_id: str) -> None:
@@ -238,6 +333,26 @@ def set_state(db, key: str, value: str) -> None:
         db.set_system_state(key, value)
     except Exception as exc:  # noqa: BLE001
         logger.warning("set_system_state(%s) failed: %s", key, exc)
+
+
+def _heartbeat_loop(db, interval: int = 60) -> None:
+    while True:
+        set_state(db, STATE_HEARTBEAT, _now_local().isoformat(timespec="seconds"))
+        time.sleep(interval)
+
+
+def start_heartbeat(db) -> threading.Thread:
+    """Arranca el latido del proceso (hilo daemon) para el watchdog del API.
+
+    Escribe ``ia_backfill_heartbeat`` cada 60 s mientras el proceso vive. Si el
+    proceso muere/crashea/hang, el latido se detiene y el API emite la alerta
+    crítica ``ia_backfill_not_running`` dentro de la ventana diurna.
+    """
+    set_state(db, STATE_HEARTBEAT, _now_local().isoformat(timespec="seconds"))
+    t = threading.Thread(target=_heartbeat_loop, args=(db,), daemon=True,
+                         name="ia-backfill-heartbeat")
+    t.start()
+    return t
 
 
 def _channel_id(db, slug: str) -> int | None:
@@ -402,15 +517,21 @@ def process_channel(db, canal: str, args, total_done: int) -> tuple[int, bool]:
                     return total_done, False
             else:
                 consec_technical = 0
-                attempts = bump_attempt(item["kind"], item["db_id"])
-                if attempts >= args.max_attempts:
-                    mark_skip(item["kind"], item["db_id"], reason)
+                if reason in UNMARKABLE_REASONS and skip_if_restricted(
+                        item["kind"], item["db_id"], item["yt_id"], canal):
+                    # Restringido por YouTube (p. ej. por edad): no es marcable.
+                    # Se descarta al primer fallo, sin gastar los 3 intentos.
                     skipped += 1
-                    logger.info("[%s] SKIP %s tras %d intentos (%s)",
-                                canal, item["yt_id"], attempts, reason)
                 else:
-                    logger.info("[%s] reintento %d/%d para %s",
-                                canal, attempts, args.max_attempts, item["yt_id"])
+                    attempts = bump_attempt(item["kind"], item["db_id"])
+                    if attempts >= args.max_attempts:
+                        mark_skip(item["kind"], item["db_id"], reason)
+                        skipped += 1
+                        logger.info("[%s] SKIP %s tras %d intentos (%s)",
+                                    canal, item["yt_id"], attempts, reason)
+                    else:
+                        logger.info("[%s] reintento %d/%d para %s",
+                                    canal, attempts, args.max_attempts, item["yt_id"])
 
         # Pacing human-like
         batch_count += 1
@@ -469,6 +590,9 @@ def main() -> int:
         return 0
     print(f"{'='*60}\n")
 
+    # Latido del proceso para el watchdog del API (alerta si el proceso se para).
+    start_heartbeat(db)
+
     # Descartar ítems que YouTube ya eliminó/no tiene disponibles: no deben
     # bloquear la cola ni abortar la sesión.
     unavailable = mark_unavailable_items()
@@ -476,6 +600,15 @@ def main() -> int:
         logger.info("Descartados %d ítems no disponibles en YouTube (skip)", unavailable)
         pending = get_pending(args.canal)
         total_pending = len(pending)
+
+    # Barrido: descartar pendientes ya intentados que están restringidos por
+    # YouTube (p. ej. por edad) — así no gastan reintentos en la sesión.
+    swept = sweep_restricted_pending()
+    if swept:
+        logger.info("Barrido: %d pendientes restringidos descartados (skip)", swept)
+        pending = get_pending(args.canal)
+        total_pending = len(pending)
+
     set_state(db, STATE_PENDING, str(total_pending))
 
     if total_pending == 0:
