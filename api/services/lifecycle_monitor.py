@@ -281,6 +281,25 @@ def emit_alert(db=None, *,
     return None
 
 
+_ALLOWED_REMINDER_SEVERITIES = frozenset({"critical", "warning", "info"})
+
+
+def reminder_severity(metadata_json) -> str:
+    """Severidad de un recordatorio programado (``scheduled_reminders``).
+
+    Lee ``metadata_json["severity"]`` y la valida contra las severidades que el
+    panel sabe pintar. Default ``warning`` (comportamiento histórico); así se
+    puede programar una alerta **crítica** sin tocar el esquema de la tabla.
+    """
+    import json as _json
+    try:
+        meta = _json.loads(metadata_json) if metadata_json else {}
+    except (TypeError, ValueError):
+        meta = {}
+    sev = str((meta or {}).get("severity", "warning") or "warning").strip().lower()
+    return sev if sev in _ALLOWED_REMINDER_SEVERITIES else "warning"
+
+
 def touch_task_heartbeat(task_name: str) -> None:
     """Record liveness heartbeat for a background loop (api/main.py).
 

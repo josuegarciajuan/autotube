@@ -243,6 +243,39 @@ def main() -> int:
             _line("  ✓ shorts eliminados OK")
             _resolve("shorts_deleted", "sin eliminaciones en 24h")
 
+        # ── Experimento de recuperación: watcher de KPIs leading ──
+        # Si tras >=10 días NINGÚN canal mejora CTR/impresiones-por-vídeo, alerta
+        # CRÍTICA (visible y pulsante en el panel). Se auto-resuelve al mejorar.
+        try:
+            from api.services.experiment_report import (
+                build_report, evaluate_experiment_progress,
+            )
+            rep = build_report(db)
+            ev = evaluate_experiment_progress(rep, min_days=10)
+            estado = "ESTANCADO" if ev["stagnant"] else "progresando"
+            _line(f"\n[6] Experimento: {ev['days']}d — {estado} ({ev['reason']})")
+            for c in ev.get("channels", []):
+                _line(f"    {c['slug']}: CTR {c['ctr_now']}% (pre {c['ctr_pre']}%) · "
+                      f"impr/vídeo {c['impr_per_video_now']} (pre {c['impr_per_video_pre']})"
+                      f"{' ✅' if c['improving'] else ''}")
+            if ev["stagnant"]:
+                resumen = " · ".join(
+                    f"{c['slug']} CTR {c['ctr_now']}% (pre {c['ctr_pre']}%)"
+                    for c in ev.get("channels", [])
+                )
+                _alert(
+                    "experiment_no_progress", "critical",
+                    "Experimento de recuperación sin progreso",
+                    (f"{ev['days']} días sin mejora de KPIs leading (CTR / "
+                     f"impresiones-por-vídeo long-form). {resumen}. "
+                     f"Revisar: python3 scripts/experiment_report.py"),
+                )
+            else:
+                _line("  ✓ experimento: KPIs leading mejorando o aún sin ventana fiable")
+                _resolve("experiment_no_progress", "KPIs leading mejorando")
+        except Exception as e:
+            _line(f"\n[6] ERROR experimento: {e}")
+
     except Exception as e:
         _line(f"  ERROR creando alertas: {e}")
 
