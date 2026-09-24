@@ -326,3 +326,98 @@ def check_ia_marking_health(db, grace_hours: int = DEFAULT_GRACE_HOURS) -> dict:
         except Exception as exc:  # noqa: BLE001
             logger.debug("resolve ia marking alerts failed: %s", exc)
     return status
+
+
+# ── Watchdog del proceso de backfill ────────────────────────────────
+BACKFILL_ALERT_TYPE = "ia_backfill_not_running"
+BACKFILL_WATCHDOG_MIN = 15      # minutos sin heartbeat antes de alertar
+BACKFILL_WINDOW_START = 9       # ventana diurna Madrid [start, end)
+BACKFILL_WINDOW_END = 23
+
+
+def _madrid_now():
+    try:
+        from zoneinfo import ZoneInfo
+        from datetime import datetime
+        return datetime.now(ZoneInfo("Europe/Madrid"))
+    except Exception:
+        from datetime import datetime
+        return datetime.now()
+
+
+def check_backfill_running(db, now=None) -> dict:
+    """Watchdog: alerta crítica si el backfill está parado cuando debería correr.
+
+    Durante la ventana diurna (09-23 Madrid), con pendientes vivos, si el
+    heartbeat del proceso (``ia_backfill_heartbeat``) está ausente o supera
+    ``BACKFILL_WATCHDOG_MIN`` minutos → emite ``ia_backfill_not_running``
+    (crítico). Fuera de ventana, con heartbeat fresco o sin pendientes → lo
+    auto-resuelve. Fail-open: nunca lanza.
+    """
+    from datetime import datetime, timedelta
+
+    result = {"in_window": False, "stale": True, "pending": 0,
+              "alerted": False, "resolved": 0}
+    try:
+        now = now or _madrid_now()
+        in_window = BACKFILL_WINDOW_START <= now.hour < BACKFILL_WINDOW_END
+        result["in_window"] = in_window
+
+        status = collect_ia_marking_status(db)
+        pending = int(status.get("backfill_pending") or 0)
+        result["pending"] = pending
+
+        hb = db.get_system_state("ia_backfill_heartbeat")
+        stale = True
+        if hb:
+            try:
+                dt = datetime.fromisoformat(str(hb))
+                ref = now
+                if dt.tzinfo is not None and ref.tzinfo is None:
+                    dt = dt.replace(tzinfo=None)
+                elif dt.tzinfo is None and ref.tzinfo is not None:
+                    ref = ref.replace(tzinfo=None)
+                stale = (ref - dt) > timedelta(minutes=BACKFILL_WATCHDOG_MIN)
+            except Exception:
+                stale = True
+        result["stale"] = stale
+
+        should_alert = in_window and pending > 0 and stale
+        if should_alert:
+            try:
+                from api.services.lifecycle_monitor import emit_alert
+                if emit_alert(
+                    db, entity_type="system", entity_id=0,
+                    alert_type=BACKFILL_ALERT_TYPE, severity="critical",
+                    title=f"🛑 Backfill IA parado ({pending} pendientes)",
+                    message=(
+                        f"El proceso de backfill del marcado IA lleva >"
+                        f"{BACKFILL_WATCHDOG_MIN} min sin latir dentro de la "
+                        f"ventana diurna, con {pending} pendientes. "
+                        f"Último heartbeat: {hb or 'nunca'}. Revisar/reanudar: "
+                        f"systemctl status autotube-ia-backfill.service "
+                        f"(journalctl -u autotube-ia-backfill.service)."
+                    ),
+                    metadata={"pending": pending, "last_heartbeat": hb},
+                ):
+                    result["alerted"] = True
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("backfill watchdog emit failed: %s", exc)
+        else:
+            try:
+                with db._connect() as conn:
+                    cur = conn.execute(
+                        """UPDATE pipeline_alerts
+                           SET resolved=1, resolved_at=datetime('now'), acknowledged=1,
+                               message=COALESCE(message, '') ||
+                               ' [Auto-resuelto: backfill activo]'
+                           WHERE alert_type=? AND resolved=0""",
+                        (BACKFILL_ALERT_TYPE,),
+                    )
+                    conn.commit()
+                result["resolved"] = int(cur.rowcount or 0)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("backfill watchdog resolve failed: %s", exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("check_backfill_running failed: %s", exc)
+    return result

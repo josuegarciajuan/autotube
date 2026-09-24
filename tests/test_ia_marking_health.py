@@ -228,6 +228,69 @@ def test_reconcile_noop_when_nothing_pending(monkeypatch):
     assert result == {"attempted": 0, "marked": 0, "failed": 0, "session_expired": False}
 
 
+def test_watchdog_alerts_when_stale_in_window(monkeypatch):
+    db = FakeDB()  # tiene pendientes vivos (V_NEW_A, V_OLD, S_NEW)
+    db.conn.execute("INSERT INTO system_state (key,value) VALUES ('ia_backfill_heartbeat',?)",
+                    ("2020-01-01T00:00:00",))
+    db.conn.commit()
+    calls = _capture(monkeypatch)
+
+    res = h.check_backfill_running(db, now=datetime(2026, 9, 24, 12, 0, 0))
+
+    assert res["in_window"] is True
+    assert res["alerted"] is True
+    assert any(c.get("alert_type") == "ia_backfill_not_running" for c in calls)
+
+
+def test_watchdog_resolves_when_heartbeat_fresh(monkeypatch):
+    db = FakeDB()
+    db.conn.execute("INSERT INTO system_state (key,value) VALUES ('ia_backfill_heartbeat',?)",
+                    (datetime(2026, 9, 24, 11, 55, 0).isoformat(),))
+    db.conn.execute(
+        "INSERT INTO pipeline_alerts(id, entity_type, entity_id, alert_type, severity, title, resolved) "
+        "VALUES (9, 'system', 0, 'ia_backfill_not_running', 'critical', 'parado', 0)")
+    db.conn.commit()
+    _capture(monkeypatch)
+
+    res = h.check_backfill_running(db, now=datetime(2026, 9, 24, 12, 0, 0))
+
+    assert res["alerted"] is False
+    assert res["resolved"] >= 1
+    row = db.conn.execute(
+        "SELECT resolved FROM pipeline_alerts WHERE alert_type='ia_backfill_not_running'"
+    ).fetchone()
+    assert row["resolved"] == 1
+
+
+def test_watchdog_no_alert_outside_window(monkeypatch):
+    db = FakeDB()
+    db.conn.execute("INSERT INTO system_state (key,value) VALUES ('ia_backfill_heartbeat',?)",
+                    ("2020-01-01T00:00:00",))
+    db.conn.commit()
+    calls = _capture(monkeypatch)
+
+    res = h.check_backfill_running(db, now=datetime(2026, 9, 24, 3, 0, 0))
+
+    assert res["in_window"] is False
+    assert res["alerted"] is False
+    assert not any(c.get("alert_type") == "ia_backfill_not_running" for c in calls)
+
+
+def test_watchdog_no_alert_without_pending(monkeypatch):
+    db = FakeDB()
+    db.conn.execute("UPDATE videos SET manual_altered_content_done=1")
+    db.conn.execute("UPDATE shorts SET manual_altered_content_done=1")
+    db.conn.execute("INSERT INTO system_state (key,value) VALUES ('ia_backfill_heartbeat',?)",
+                    ("2020-01-01T00:00:00",))
+    db.conn.commit()
+    calls = _capture(monkeypatch)
+
+    res = h.check_backfill_running(db, now=datetime(2026, 9, 24, 12, 0, 0))
+
+    assert res["pending"] == 0
+    assert res["alerted"] is False
+
+
 def test_backfill_stalled_check():
     assert h.backfill_stalled_check(None) is True
     assert h.backfill_stalled_check("2020-01-01T00:00:00") is True

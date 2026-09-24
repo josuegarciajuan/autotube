@@ -245,6 +245,114 @@ def test_technical_reasons_include_session_expired():
     assert "session_expired" in m.TECHNICAL_REASONS
 
 
+def _patch_classify(monkeypatch, vis_by_id: dict[str, str]):
+    monkeypatch.setattr(
+        m, "classify_restricted",
+        lambda yt_id, slug=None: vis_by_id.get(yt_id, "unknown"),
+    )
+
+
+def test_process_channel_skips_restricted_on_first_failure(tmp_path, monkeypatch):
+    """radio_disabled + yt-dlp dice restringido → skip al primer intento."""
+    db_path = tmp_path / "r.db"
+    _make_db(db_path)
+    monkeypatch.setattr(m, "DB_PATH", db_path)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("DELETE FROM shorts")
+    conn.execute("INSERT INTO videos (id,channel_id,yt_video_id,uploaded_at)"
+                 " VALUES (20,3,'AGE','2026-09-15 10:00:00')")
+    conn.execute("INSERT INTO videos (id,channel_id,yt_video_id,uploaded_at)"
+                 " VALUES (21,3,'OK','2026-09-15 09:00:00')")
+    conn.commit()
+    conn.close()
+
+    fake = _FakeBrowser({"AGE": "radio_disabled", "OK": "ok"})
+    _patch_browser(monkeypatch, fake)
+    _patch_classify(monkeypatch, {"AGE": "age_restricted"})
+
+    done, finished = m.process_channel(object(), "canal2", _args(), 0)
+    assert finished is True
+    assert done == 1  # OK marcado
+
+    conn = sqlite3.connect(str(db_path))
+    row = conn.execute("SELECT manual_altered_content_skip,"
+                       " manual_altered_content_skip_reason,"
+                       " manual_altered_content_attempts, yt_visibility"
+                       " FROM videos WHERE yt_video_id='AGE'").fetchone()
+    conn.close()
+    assert row[0] == 1                        # descartado
+    assert row[1] == "yt_age_restricted"      # motivo con la visibilidad real
+    assert row[2] == 0                        # sin gastar intentos
+    assert row[3] == "age_restricted"         # visibilidad persistida
+
+
+def test_process_channel_keeps_attempts_when_public(tmp_path, monkeypatch):
+    """radio_disabled pero yt-dlp dice público → se cuentan intentos (transitorio)."""
+    db_path = tmp_path / "p.db"
+    _make_db(db_path)
+    monkeypatch.setattr(m, "DB_PATH", db_path)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("DELETE FROM shorts")
+    conn.execute("INSERT INTO videos (id,channel_id,yt_video_id,uploaded_at)"
+                 " VALUES (20,3,'PUB','2026-09-15 10:00:00')")
+    conn.commit()
+    conn.close()
+
+    fake = _FakeBrowser({"PUB": "radio_disabled"})
+    _patch_browser(monkeypatch, fake)
+    _patch_classify(monkeypatch, {"PUB": "public"})
+
+    m.process_channel(object(), "canal2", _args(max_attempts=3), 0)
+
+    conn = sqlite3.connect(str(db_path))
+    row = conn.execute("SELECT manual_altered_content_skip,"
+                       " manual_altered_content_attempts"
+                       " FROM videos WHERE yt_video_id='PUB'").fetchone()
+    conn.close()
+    assert row[0] == 0   # no descartado
+    assert row[1] == 1   # intento contabilizado
+
+
+def test_sweep_restricted_pending(tmp_path, monkeypatch):
+    db_path = tmp_path / "sw.db"
+    _make_db(db_path)
+    monkeypatch.setattr(m, "DB_PATH", db_path)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("DELETE FROM shorts")
+    conn.execute("INSERT INTO videos (id,channel_id,yt_video_id,uploaded_at,"
+                 "manual_altered_content_attempts) VALUES (20,3,'AGE2','2026-09-15 10:00:00',2)")
+    conn.execute("INSERT INTO videos (id,channel_id,yt_video_id,uploaded_at,"
+                 "manual_altered_content_attempts) VALUES (21,3,'NEWONE','2026-09-15 11:00:00',0)")
+    conn.commit()
+    conn.close()
+    _patch_classify(monkeypatch, {"AGE2": "age_restricted"})
+
+    n = m.sweep_restricted_pending()
+    assert n == 1  # solo AGE2 (con attempts>=1 y restringido)
+    conn = sqlite3.connect(str(db_path))
+    assert conn.execute("SELECT manual_altered_content_skip FROM videos"
+                        " WHERE yt_video_id='AGE2'").fetchone()[0] == 1
+    assert conn.execute("SELECT manual_altered_content_skip FROM videos"
+                        " WHERE yt_video_id='NEWONE'").fetchone()[0] == 0
+    conn.close()
+
+
+def test_start_heartbeat_writes_state(monkeypatch):
+    calls = []
+    monkeypatch.setattr(m, "set_state", lambda db, k, v: calls.append((k, v)))
+
+    class _FakeThread:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(m.threading, "Thread", _FakeThread)
+    m.start_heartbeat(object())
+    assert calls and calls[0][0] == m.STATE_HEARTBEAT
+
+
 def test_process_channel_aborts_on_consecutive_technical_failures(tmp_path, monkeypatch):
     db_path = tmp_path / "m.db"
     _make_db(db_path)
