@@ -1049,7 +1049,7 @@ async def _reminder_loop():
     while True:
         try:
             from api.services.lifecycle_monitor import touch_task_heartbeat as _tth
-            from api.services.lifecycle_monitor import emit_alert
+            from api.services.lifecycle_monitor import emit_alert, reminder_severity
             _tth("reminders")
             db = get_db()
             due = await asyncio.to_thread(db.get_due_scheduled_reminders)
@@ -1058,7 +1058,9 @@ async def _reminder_loop():
                     db, entity_type="system",
                     entity_id=r["id"],          # estable, nunca NULL → dedup OK
                     alert_type=r.get("alert_type") or "scheduled_reminder_due",
-                    severity="warning",
+                    # Severidad desde el metadata del recordatorio (default warning);
+                    # permite recordatorios críticos (p.ej. checkpoints del experimento).
+                    severity=reminder_severity(r.get("metadata_json")),
                     title=r["title"],
                     message=r["message"],
                     metadata={"reminder_id": r["id"], "due_at": r["due_at"]},

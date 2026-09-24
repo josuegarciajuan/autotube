@@ -207,20 +207,23 @@ def test_checkpoint_due_dates():
     assert _checkpoint_due_at("2026-09-17T15:00:00", 21) == "2026-10-08T09:00:00"
 
 
-def test_schedule_checkpoints_creates_three():
+def test_schedule_checkpoints_creates_all():
     db = FakeDB()
     _seed(db)
     scheduled = schedule_checkpoints(db, "2026-09-17")
-    assert len(scheduled) == len(CHECKPOINT_DAYS) == 3
+    assert len(scheduled) == len(CHECKPOINT_DAYS) == 4
     assert all(s["reminder_id"] is not None for s in scheduled)  # nada bloqueado por unicidad
     reminders = db.list_scheduled_reminders(status="pending")
-    assert len(reminders) == 3
+    assert len(reminders) == 4
     assert all(r["alert_type"] == "experiment_checkpoint" for r in reminders)
     # entity_id único por checkpoint (índice único entity_type/entity_id)
-    assert sorted(r["entity_id"] for r in reminders) == [7, 21, 45]
+    assert sorted(r["entity_id"] for r in reminders) == [7, 14, 21, 45]
     assert all(r["entity_type"] == "experiment" for r in reminders)
     dates = sorted(r["due_at"] for r in reminders)
-    assert dates == ["2026-09-24T09:00:00", "2026-10-08T09:00:00", "2026-11-01T09:00:00"]
+    assert dates == [
+        "2026-09-24T09:00:00", "2026-10-01T09:00:00",
+        "2026-10-08T09:00:00", "2026-11-01T09:00:00",
+    ]
     state = json.loads(db.get_system_state(CHECKPOINTS_KEY))
     assert state["start"] == "2026-09-17"
 
@@ -230,9 +233,9 @@ def test_schedule_checkpoints_idempotent_and_reschedules():
     _seed(db)
     schedule_checkpoints(db, "2026-09-17")
     schedule_checkpoints(db, "2026-09-17")  # no duplica
-    assert len(db.list_scheduled_reminders(status="pending")) == 3
+    assert len(db.list_scheduled_reminders(status="pending")) == 4
 
     schedule_checkpoints(db, "2026-09-20")  # reprograma sin crear nuevos
     reminders = db.list_scheduled_reminders(status="pending")
-    assert len(reminders) == 3
+    assert len(reminders) == 4
     assert min(r["due_at"] for r in reminders) == "2026-09-27T09:00:00"

@@ -214,6 +214,56 @@ def build_report(db=None, days_now: int = 14) -> dict:
     }
 
 
+def evaluate_experiment_progress(report: dict, min_days: int = 10) -> dict:
+    """Decide si el experimento está estancado (base del watcher crítico).
+
+    Estancado = han pasado >= ``min_days`` desde el inicio Y **ningún** canal
+    mejora algún KPI leading (CTR o impresiones/vídeo long-form) respecto al pre.
+    Si ``days < min_days`` devuelve ``stagnant=False`` (aún sin datos fiables;
+    el Reporting API tiene latencia de hasta 48 h).
+    """
+    from datetime import datetime as _dt, timezone as _tz
+
+    try:
+        started = _dt.fromisoformat(str(report.get("experiment_started_at"))[:19])
+        days = (_dt.now(_tz.utc).date() - started.date()).days
+    except (ValueError, TypeError):
+        days = 0
+
+    channels: list[dict] = []
+    any_improving = False
+    for ch in (report.get("channels", []) or []):
+        ld = ch.get("leading", {}) or {}
+        ctr_d = ld.get("longform_ctr_pct_delta")
+        ipv_d = ld.get("longform_impr_per_video_delta")
+        improving = bool((ctr_d or 0) > 0 or (ipv_d or 0) > 0)
+        any_improving = any_improving or improving
+        channels.append({
+            "slug": ch.get("slug"),
+            "ctr_now": ld.get("longform_ctr_pct_now"),
+            "ctr_pre": ld.get("longform_ctr_pct_pre"),
+            "ctr_delta": ctr_d,
+            "impr_per_video_now": ld.get("longform_impr_per_video_now"),
+            "impr_per_video_pre": ld.get("longform_impr_per_video_pre"),
+            "retention_now": ld.get("longform_retention_now"),
+            "improving": improving,
+        })
+
+    if days < int(min_days):
+        return {
+            "stagnant": False, "days": days, "min_days": int(min_days),
+            "channels": channels, "reason": f"solo {days}d (< {min_days})",
+        }
+
+    stagnant = not any_improving
+    return {
+        "stagnant": stagnant, "days": days, "min_days": int(min_days),
+        "channels": channels,
+        "reason": ("ningún KPI leading mejora" if stagnant
+                   else "algún KPI leading mejora"),
+    }
+
+
 def log_intervention(text: str, db=None, when: str | None = None) -> list:
     """Añade una intervención a la bitácora estructurada (system_state)."""
     if db is None:

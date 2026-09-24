@@ -38,8 +38,11 @@ BASELINE_KEY = "experiment_baseline"
 STARTED_KEY = "experiment_started_at"
 CHECKPOINTS_KEY = "experiment_checkpoints"
 
-CHECKPOINT_DAYS = (7, 21, 45)
+CHECKPOINT_DAYS = (7, 14, 21, 45)
 CHECKPOINT_HOUR_UTC = 9  # 09:00 UTC
+
+# Los checkpoints salen como ALERTA CRÍTICA en el panel (no pasan desapercibidos).
+CHECKPOINT_SEVERITY = "critical"
 
 # Qué mirar en cada checkpoint (va en el mensaje de la alerta).
 CHECKPOINT_BRIEFS = {
@@ -47,6 +50,12 @@ CHECKPOINT_BRIEFS = {
         "Señal temprana: ¿hay avisos de política nuevos? ¿el alcance Shorts a 7 d "
         "del formato nuevo supera el baseline? ¿algún long-form con distribución "
         "(browse/suggested) y retención > baseline?"
+    ),
+    14: (
+        "Revisión intermedia: ¿mejoran los KPIs leading (CTR e impresiones por "
+        "vídeo long-form) tras la Fase 1 de packaging? Ejecuta "
+        "'python3 scripts/experiment_report.py' y decide continuar, refinar o "
+        "revertir según la matriz del spec §6."
     ),
     21: (
         "Análisis principal: retención long-form (objetivo >40 %), subs NETOS por "
@@ -245,6 +254,8 @@ def schedule_checkpoints(db, start_iso: str) -> list[dict]:
             "checkpoint_days": days,
             "start": start_iso,
             "review": "specs/experimento-recuperacion-alcance.md",
+            # El loop de reminders lee esto para emitir la alerta como crítica.
+            "severity": CHECKPOINT_SEVERITY,
         }
 
         cur = existing.get(title)

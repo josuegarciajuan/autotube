@@ -210,3 +210,15 @@ El Reporting API tiene latencia de hasta 48 h: los últimos 1-2 días pueden fal
 Aplicar la matriz de §6 con los KPIs leading: si en 2-4 semanas CTR/impresiones-por-vídeo
 suben, continuar y propagar; si están planos, refinar packaging/temas; si aparecen avisos,
 revertir el cambio señalado.
+
+### 11.6 Alertas críticas (para que no pasen desapercibidas)
+- **Checkpoints como alerta crítica:** T+7 / **T+14** / T+21 / T+45 se emiten como
+  alerta `critical` en el panel (campana pulsante en `AlertsPanel` + banner rojo en
+  `Monitor`). El loop de `reminders` lee `metadata_json["severity"]` (default
+  `warning`), así que la severidad se fija sin cambiar el esquema de la tabla.
+- **Watcher condicional** (`scripts/daily_health_report.py`, diario 08:30): si tras
+  **≥10 días** ningún canal mejora CTR o impresiones-por-vídeo long-form, emite la
+  alerta crítica `experiment_no_progress` (una sola de sistema, con desglose por
+  canal). Se **auto-resuelve** en cuanto algún KPI leading mejora.
+- Objetivo: el operador recibe un aviso prioritario tanto por fecha (T+14/21/45) como
+  si el experimento se estanca; nunca depende de la memoria.
