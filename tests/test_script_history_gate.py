@@ -88,6 +88,18 @@ def test_own_script_is_excluded_from_history():
     assert excluded.similarity == 0.0
 
 
+def test_later_script_is_not_prior_history():
+    """Un guion insertado DESPUÉS del candidato (id mayor) no cuenta como
+    historial: compararlo bloqueaba guiones válidos por sim=1.00 (sequía canal3)."""
+    candidate = " ".join(f"tema{i}" for i in range(60))
+    near_dup = candidate.replace("tema5", "otro5")
+    # Fila #1 = candidato (ya persistido). Fila #2 = guion posterior casi-idéntico.
+    db = FakeDB([candidate, near_dup])
+    res = check_script_novelty(candidate, "canal3", db, exclude_id=1)
+    assert res.novel is True
+    assert res.similarity == 0.0
+
+
 def test_missing_table_fails_open():
     db = FakeDB([])
     db.conn.execute("DROP TABLE scripts")
