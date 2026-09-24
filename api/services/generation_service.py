@@ -611,7 +611,7 @@ def _probe_worker_process(job_id: int, worker_pid: int | None = None) -> tuple[i
             pass
     try:
         result = subprocess.run(
-            ["pgrep", "-f", f"full_pipeline_worker.*--job-id {job_id}"],
+            ["pgrep", "-f", f"(full_pipeline_worker|shorts_worker).*--job-id {job_id}"],
             capture_output=True, text=True, timeout=5, check=False,
         )
         pids = [p for p in result.stdout.strip().split() if p.isdigit()]
@@ -3582,10 +3582,11 @@ async def auto_recover_on_startup():
     # indefinitely. Previously it was marked 'failed' permanently — every
     # restart silently killed in-flight shorts and they never got retried
     # (failed slots are invisible to the dispatcher and the recovery planner).
-    # Shorts run in-process (asyncio.to_thread), so ANY API restart kills them;
-    # the correct behaviour is to re-queue the slot as 'pending' (job_id=NULL)
-    # so the dispatcher retries it on the next tick, exactly like
-    # _sync_running_shorts_slots does for running slots found later.
+    # Since sep 2026 shorts run in a DETACHED subprocess worker that survives
+    # the API restart, so only slots whose job actually DIED ('failed') are
+    # re-queued here; a surviving worker finalizes its own slot. Before, shorts
+    # ran in-process (asyncio.to_thread) and ANY restart killed them, so every
+    # running slot had to be re-queued as 'pending' (job_id=NULL).
     orphaned_slots = conn.execute(
         """UPDATE shorts_planned_slots
            SET status = 'pending',
@@ -4241,6 +4242,35 @@ async def reconnect_active_workers():
         if not running_jobs:
             return
 
+        # Lightweight wrapper so a worker that survived the restart can be
+        # tracked like a Popen (poll/wait). terminate/kill are no-ops: never
+        # kill a re-attached worker.
+        class _ExistingProcess:
+            def __init__(self, pid):
+                self.pid = pid
+                self.returncode = None
+
+            def poll(self):
+                try:
+                    os.kill(self.pid, 0)
+                    return None
+                except (ProcessLookupError, PermissionError):
+                    self.returncode = -1
+                    return -1
+
+            def wait(self, timeout=None):
+                import time as _t
+                for _ in range(int(timeout or 10)):
+                    if self.poll() is not None:
+                        return
+                    _t.sleep(1)
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
         # Check if there's an actual worker process for each running job
         for job in running_jobs:
             # ── Skip reassembly jobs ─────────────────────────────────
@@ -4253,6 +4283,34 @@ async def reconnect_active_workers():
                 continue
 
             job_id = job["id"]
+
+            # ── Shorts subprocess workers own their finalization ──
+            # They write statuses/retries/alerts themselves, so we must NOT run
+            # the long-form _monitor_worker_progress (it expects a video row).
+            if job.get("action") in (
+                "generate_native_short", "generate_clip_short", "generate_standalone_short",
+            ):
+                worker_pid, probe_failed = _probe_worker_process(job_id, job.get("worker_pid"))
+                if worker_pid is not None:
+                    logger.info(
+                        "Shorts worker alive for job #%d (pid=%d) — it owns finalization",
+                        job_id, worker_pid,
+                    )
+                    _active_workers[job_id] = _ExistingProcess(worker_pid)
+                elif probe_failed:
+                    logger.warning(
+                        "Shorts worker probe inconclusive for job #%d — preserving running state",
+                        job_id,
+                    )
+                else:
+                    logger.warning(
+                        "Shorts job #%d running but no live worker — marking failed "
+                        "(slot will be re-queued)", job_id,
+                    )
+                    db.update_job(job_id, status="failed",
+                                  error_msg="Shorts worker not found after API restart")
+                continue
+
             video_id = job.get("video_id") or 0
 
             # Look for a running worker process associated with this job

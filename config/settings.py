@@ -96,6 +96,16 @@ PIPELINE_START_DATE = os.getenv("PIPELINE_START_DATE", "")
 # False = generation runs in-process (legacy behavior, dies with API)
 USE_SUBPROCESS_WORKER = os.getenv("USE_SUBPROCESS_WORKER", "true").lower() in ("1", "true", "yes")
 
+# Shorts (native/clip/standalone) run in a detached subprocess worker
+# (api/services/shorts_worker.py) so API restarts don't kill the render, the
+# render doesn't compete with the event loop, and the deploy gate
+# (scripts/deploy_safety.py) doesn't abort while a short is rendering.
+# Kill-switch: set SHORTS_USE_SUBPROCESS_WORKER=false to fall back to the
+# legacy in-process (asyncio.to_thread) path.
+SHORTS_USE_SUBPROCESS_WORKER = os.getenv(
+    "SHORTS_USE_SUBPROCESS_WORKER", "true"
+).lower() in ("1", "true", "yes")
+
 # ── Fábrica continua long-form (Fase 1, ago 2026) ─────────────
 # False por defecto (se valida en canal piloto antes de activar). Cuando True
 # (o system_state["continuous_generation"]="true"), la generación long-form NO

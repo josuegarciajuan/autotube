@@ -1409,6 +1409,9 @@ def migrate_v2(db_path: str = None):
     # ── v60: embudo de alcance (Reporting API reach reports) ──
     _migrate_v60(conn, logger)
 
+    # ── v61: result_short_id en generation_jobs (shorts en worker subprocess) ──
+    _migrate_v61(conn, logger)
+
     conn.commit()
     conn.close()
     
@@ -3613,6 +3616,33 @@ def _migrate_v60(conn, logger):
     logger.info("Migration v60: video_reach_daily + reach_reports_seen ensured")
 
 
+def _migrate_v61(conn, logger):
+    """Idempotent v61: columnas para shorts generados en worker subprocess.
+
+    ``generation_jobs.result_short_id`` guarda el ``shorts.id`` producido por el
+    worker de shorts (que corre en proceso independiente y no puede devolverlo
+    por valor de retorno). Sirve para observabilidad y para enlazar el slot si
+    hiciera falta; la finalización la hace el propio worker.
+    """
+    added = 0
+    try:
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(generation_jobs)")}
+    except sqlite3.OperationalError:
+        logger.debug("Migration v61: generation_jobs table does not exist yet — skipping")
+        return
+    if "result_short_id" not in existing:
+        try:
+            conn.execute("ALTER TABLE generation_jobs ADD COLUMN result_short_id INTEGER")
+            added += 1
+        except sqlite3.OperationalError as exc:
+            logger.debug("Migration v61: could not add result_short_id (%s)", exc)
+    if added:
+        conn.commit()
+        logger.info("Migration v61: added result_short_id to generation_jobs")
+    else:
+        logger.debug("Migration v61: result_short_id already present")
+
+
 def _migrate_v10(conn, logger):
     """Idempotent v10 migration: optimal_publish_slots for data-driven peak hour calculation.
 
@@ -4520,7 +4550,7 @@ class ExtendedDatabase(Database):
     def update_job(self, job_id: int, **kwargs) -> bool:
         allowed = ["status", "progress", "phase", "error_msg", "video_id",
                    "pipeline_phase", "last_heartbeat_at", "retry_count", "worker_pid",
-                   "started_at"]
+                   "started_at", "result_short_id"]
         fields, values = [], []
         for k, v in kwargs.items():
             if k in allowed and v is not None:
@@ -8632,7 +8662,8 @@ class ExtendedDatabase(Database):
             row = conn.execute(
                 "SELECT COUNT(*) as cnt FROM generation_jobs "
                 "WHERE status IN ('running', 'queued') "
-                "AND action NOT IN ('generate_native_short', 'generate_clip_short', 'upload_only')"
+                "AND action NOT IN ('generate_native_short', 'generate_clip_short', "
+                "'generate_standalone_short', 'upload_only')"
             ).fetchone()
         return row["cnt"] if row else 0
     
@@ -8647,7 +8678,8 @@ class ExtendedDatabase(Database):
             row = conn.execute(
                 "SELECT COUNT(*) as cnt FROM generation_jobs "
                 "WHERE status = 'running' "
-                "AND action NOT IN ('generate_native_short', 'generate_clip_short', 'upload_only')"
+                "AND action NOT IN ('generate_native_short', 'generate_clip_short', "
+                "'generate_standalone_short', 'upload_only')"
             ).fetchone()
         return row["cnt"] if row else 0
     
@@ -8665,7 +8697,8 @@ class ExtendedDatabase(Database):
                 "SELECT COUNT(*) as cnt FROM generation_jobs "
                 "WHERE status IN ('running', 'queued') "
                 "AND pipeline_phase = 'render' "
-                "AND action NOT IN ('generate_native_short', 'generate_clip_short', 'upload_only')"
+                "AND action NOT IN ('generate_native_short', 'generate_clip_short', "
+                "'generate_standalone_short', 'upload_only')"
             ).fetchone()
         return row["cnt"] if row else 0
     
@@ -8676,6 +8709,23 @@ class ExtendedDatabase(Database):
                 "SELECT COUNT(*) as cnt FROM generation_jobs "
                 "WHERE status IN ('running', 'queued') "
                 "AND action = 'upload_only'"
+            ).fetchone()
+        return row["cnt"] if row else 0
+
+    def count_active_shorts_jobs(self) -> int:
+        """Count short-generation jobs (native/clip/standalone) running or queued.
+
+        Mirrors ``count_active_longform_jobs`` for the shorts side of the
+        2-column dispatch model. Shorts are excluded from the long-form
+        concurrency guard, so they need their own counter (e.g. for spawn
+        guards and monitoring). Standalone/native/clip only — NOT upload_only.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM generation_jobs "
+                "WHERE status IN ('running', 'queued') "
+                "AND action IN ('generate_native_short', 'generate_clip_short', "
+                "'generate_standalone_short')"
             ).fetchone()
         return row["cnt"] if row else 0
 

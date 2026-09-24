@@ -369,6 +369,10 @@ def test_native_slot_dispatches_generate_only(tmp_path, monkeypatch):
         captured.update(kwargs)
         return 1
 
+    # Force the legacy in-process path to validate its scheduling kwargs.
+    # The subprocess path (default since sep 2026) is covered in
+    # tests/test_shorts_subprocess_worker.py.
+    monkeypatch.setattr(ss, "_shorts_subprocess_enabled", lambda: False)
     monkeypatch.setattr(ss, "_dispatch_short_async", _spy_dispatch)
     monkeypatch.setattr(ss, "_upload_queued_shorts", lambda *a, **kw: 0)
     monkeypatch.setattr(ss, "_youtube_quota_blocked", lambda *a, **kw: False)
