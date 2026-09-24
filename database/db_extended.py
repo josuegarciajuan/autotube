@@ -10024,7 +10024,11 @@ class ExtendedDatabase(Database):
             rows = conn.execute(q, params).fetchall()
         return [dict(r) for r in rows]
 
-    def get_next_pending_shorts_slot(self, exclude_slot_ids: list[int] | None = None) -> dict | None:
+    def get_next_pending_shorts_slot(
+        self,
+        exclude_slot_ids: list[int] | None = None,
+        exclude_channel_ids: list[int] | None = None,
+    ) -> dict | None:
         """Get the next pending short slot that is due (scheduled_at <= now + 10min),
         ordered by target_upload_at ASC (nearest upload date first). Returns
         None if none.
@@ -10047,6 +10051,10 @@ class ExtendedDatabase(Database):
         Args:
             exclude_slot_ids: Optional list of slot IDs to skip. Used by the
                 dispatch loop to skip past channels blocked by cooldown.
+            exclude_channel_ids: Optional list of channel IDs to skip. Used by
+                the short-drain mode to suppress generation only for channels
+                whose native queue is already at/above the drain floor, while
+                letting dry channels keep generating.
         """
         with self._connect() as conn:
             query = """SELECT sps.*, c.name as channel_name, c.slug as channel_slug, c.active as channel_active
@@ -10062,6 +10070,10 @@ class ExtendedDatabase(Database):
                 placeholders = ",".join("?" for _ in exclude_slot_ids)
                 query += f" AND sps.id NOT IN ({placeholders})"
                 params.extend(exclude_slot_ids)
+            if exclude_channel_ids:
+                placeholders = ",".join("?" for _ in exclude_channel_ids)
+                query += f" AND sps.channel_id NOT IN ({placeholders})"
+                params.extend(exclude_channel_ids)
             query += " ORDER BY COALESCE(sps.target_upload_at, sps.scheduled_at) ASC LIMIT 1"
             row = conn.execute(query, params).fetchone()
         return dict(row) if row else None

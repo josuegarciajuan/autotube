@@ -307,9 +307,9 @@ def _shorts_paused(db=None) -> bool:
 # ── Modo drenaje (short_drain_mode) ───────────────────────────────
 # Cuando hay un backlog de shorts nativos generados y aún sin subir, el
 # operador puede activar un MODO DRENAJE: se PAUSA la generación de nuevos
-# nativos (slots due + relleno de cola) pero la válvula de goteo SIGUE subiendo
-# la cola FIFO a su ritmo normal. Así la reserva (~179) se vacía en lugar de
-# mantenerse en equilibrio cerca del tope MAX_QUEUED (=60).
+# nativos SOLO en los canales que ya superan el piso (POR CANAL, no global) y
+# la válvula de goteo SIGUE subiendo la cola FIFO a su ritmo normal. Así la
+# reserva se vacía sin dejar secos a los canales que no tienen backlog.
 #
 # Persistencia: system_state["short_drain_mode"] == "true". Auto-resume: cuando
 # TODOS los canales activos bajan de SHORT_DRAIN_FLOOR_PER_CHANNEL nativos en
@@ -398,6 +398,28 @@ def _short_drain_auto_resume(db=None):
     except Exception as exc:
         logger.warning("short_drain auto-resume falló: %s", exc)
         return False
+
+
+def _drain_suppressed_channel_ids(db=None) -> set:
+    """Canales cuya generación de nativos queda suprimida por el drenaje.
+
+    El modo drenaje ya NO es un corte global: solo se suprimen los canales que
+    YA tienen cola >= piso (``SHORT_DRAIN_FLOOR_PER_CHANNEL``). Los canales
+    secos (< piso) siguen generando, de modo que un backlog concentrado en un
+    canal (p.ej. canal5 con 44) no deja sin shorts a los demás (canal2/canal3).
+
+    Devuelve un conjunto vacío si el drenaje está apagado.
+    """
+    if not _short_drain_enabled(db):
+        return set()
+    try:
+        backlog = short_drain_backlog(db)
+    except Exception:
+        return set()
+    return {
+        cid for cid, n in backlog.items()
+        if int(n or 0) >= SHORT_DRAIN_FLOOR_PER_CHANNEL
+    }
 
 
 # Tope global duro de shorts/día (todos los canales sumados). Evita el volumen
@@ -2208,14 +2230,14 @@ def _fill_native_short_queue(db=None, loop=None) -> dict | None:
     if _shorts_paused(db):
         return None
 
-    # ── Modo drenaje: no rellenar más la cola hasta que baje del piso. La
-    # subida la gobierna la válvula (no pasa por aquí). Auto-resume aquí para
+    # ── Modo drenaje POR CANAL: solo se suprime la generación de los canales
+    # que YA tienen cola >= piso; los canales secos (< piso) siguen generando.
+    # Así un backlog concentrado en un canal no deja sin shorts a los demás.
+    # La subida la gobierna la válvula (no pasa por aquí). Auto-resume aquí para
     # las llamadas directas a este helper fuera del dispatch.
     if _short_drain_auto_resume(db):
         logger.info("Fill cola nativos: drenaje completado — reanudando")
-    if _short_drain_enabled(db):
-        logger.debug("Fill cola nativos: modo drenaje activo — no relleno")
-        return None
+    _drain_suppressed = _drain_suppressed_channel_ids(db)
 
     # Gobernador de fábrica (Fase 4): disco bajo o créditos LLM → no generar.
     try:
@@ -2257,6 +2279,9 @@ def _fill_native_short_queue(db=None, loop=None) -> dict | None:
         cid = int(ch.get("id", 0) or 0)
         slug = ch.get("slug", "")
         if not cid:
+            continue
+        # Drenaje por canal: no rellenar canales ya por encima del piso.
+        if cid in _drain_suppressed:
             continue
         try:
             sc_rows = db.get_shorts_planning_config(cid)
@@ -2512,26 +2537,28 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
     except Exception as exc:
         logger.warning("Shorts dispatch: queued upload pasada falló: %s", exc)
 
-    # ── Modo drenaje: la válvula YA subió arriba (nunca se frena). Si está
-    # activo, se corta TODA la generación de nativos (slots due + fill) hasta
-    # que el backlog baje del piso; entonces auto-resume y se sigue normal.
-    # El return aquí es intencionado: impide tanto el fill de las ramas de
-    # cuota/tope global como la generación por slots due del bloque de abajo.
+    # ── Modo drenaje POR CANAL: la válvula YA subió arriba (nunca se frena).
+    # Ya NO se corta TODA la generación: solo se suprimen los slots de canales
+    # con cola >= piso (vía _drain_suppressed_ids, aplicado en las consultas de
+    # slots y en el relleno). Los canales secos (< piso) siguen generando, de
+    # modo que un backlog concentrado no deja secos a los demás. El auto-resume
+    # sigue apagando el flag cuando TODOS los canales bajan del piso.
     if _short_drain_auto_resume(db):
         logger.info("Shorts dispatch: drenaje completado — fábrica reanudada")
-    if _short_drain_enabled(db):
+    _drain_suppressed_ids = _drain_suppressed_channel_ids(db)
+    if _drain_suppressed_ids:
         global _LAST_DRAIN_LOG_AT
         _now_dl = time.time()
         if _now_dl - _LAST_DRAIN_LOG_AT > 600:
             _LAST_DRAIN_LOG_AT = _now_dl
             _backlog = short_drain_backlog(db)
             logger.info(
-                "Shorts dispatch: MODO DRENAJE — pausada generación de nativos "
-                "hasta bajar de %d/canal (cola actual: %s)",
+                "Shorts dispatch: MODO DRENAJE — generación suprimida en %s "
+                "(cola >= %d/canal); el resto sigue generando (cola actual: %s)",
+                {cid: _backlog.get(cid, 0) for cid in sorted(_drain_suppressed_ids)},
                 SHORT_DRAIN_FLOOR_PER_CHANNEL,
                 {cid: n for cid, n in sorted(_backlog.items())},
             )
-        return None
 
     # Cuota agotada: no hay dispatch inmediato; la fábrica sigue generando a cola.
     if _youtube_quota_blocked(db):
@@ -2655,7 +2682,10 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
     while _retry_count < _MAX_CLIP_RETRIES:
         # 6. Get next pending short slot that is due (skip cooldown-blocked slots)
         exclude_list = list(_skipped_slot_ids) if _skipped_slot_ids else None
-        next_slot = db.get_next_pending_shorts_slot(exclude_slot_ids=exclude_list)
+        next_slot = db.get_next_pending_shorts_slot(
+            exclude_slot_ids=exclude_list,
+            exclude_channel_ids=list(_drain_suppressed_ids) or None,
+        )
         if not next_slot:
             if _skipped_slot_ids:
                 logger.warning(
@@ -2680,7 +2710,8 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                     if _force_retry > 0:
                         _time.sleep(2)  # back off between retries to reduce log spam
                     force_slot = db.get_next_pending_shorts_slot(
-                        exclude_slot_ids=list(_failed_force_ids) if _failed_force_ids else None
+                        exclude_slot_ids=list(_failed_force_ids) if _failed_force_ids else None,
+                        exclude_channel_ids=list(_drain_suppressed_ids) or None,
                     )
                     if not force_slot:
                         # ── Escalation: all slots tried, escalate to bypass mode ──

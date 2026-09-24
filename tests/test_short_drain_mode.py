@@ -8,7 +8,10 @@ Verifica:
   3. `_short_drain_done` es True solo cuando TODOS los canales activos bajan
      del piso (SHORT_DRAIN_FLOOR_PER_CHANNEL).
   4. `_short_drain_auto_resume` apaga el flag solo cuando se alcanza el piso.
-  5. `_fill_native_short_queue` NO rellena (devuelve None) con drenaje activo.
+  5. El drenaje es POR CANAL: solo suprime la generación de los canales con
+     cola >= piso; los canales secos siguen generando (fix de inanición).
+  6. `get_next_pending_shorts_slot(exclude_channel_ids=...)` respeta la
+     exclusión de canales.
 """
 
 import sqlite3
@@ -57,6 +60,22 @@ def _mkdb(tmp_path, queued_by_channel: dict):
                 youtube_id TEXT, youtube_url TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS shorts_planned_slots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id INTEGER NOT NULL,
+                date_key TEXT NOT NULL,
+                scheduled_at TIMESTAMP NOT NULL,
+                target_upload_at TIMESTAMP,
+                status TEXT NOT NULL DEFAULT 'pending',
+                short_type TEXT NOT NULL DEFAULT 'native',
+                slot_position INTEGER DEFAULT 0,
+                long_slot_position INTEGER,
+                source_video_id INTEGER,
+                short_id INTEGER,
+                job_id INTEGER,
+                retry_count INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
         for cid, (slug, n) in queued_by_channel.items():
@@ -172,11 +191,61 @@ def test_auto_resume_solo_al_alcanzar_piso(tmp_path, _point_db_path):
     assert ss._short_drain_enabled(db) is False
 
 
-def test_fill_bloqueado_con_drenaje_activo(tmp_path, _point_db_path):
-    """Con drenaje activo, _fill_native_short_queue no rellena (None)."""
+def test_fill_bloqueado_con_todos_los_canales_sobre_piso(tmp_path, _point_db_path):
+    """Con drenaje activo y TODOS los canales sobre el piso, no se rellena."""
     _mkdb(tmp_path, {1: ("canal2", 40), 2: ("canal3", 40)})
     db = ExtendedDatabase(str(tmp_path / "drain.db"))
     db.set_system_state("short_drain_mode", "true")
     assert ss._short_drain_enabled(db) is True
-    # El guard de drenaje corta antes de llegar a generar.
+    # Ambos canales sobre el piso => suprimidos => nada que rellenar.
+    assert ss._drain_suppressed_channel_ids(db) == {1, 2}
     assert ss._fill_native_short_queue(db=db, loop=None) is None
+
+
+def test_drenaje_suprime_solo_canales_sobre_piso(tmp_path, _point_db_path):
+    """El drenaje POR CANAL solo suprime los canales con cola >= piso.
+
+    Reproduce el bug de inanición: canal2 con backlog alto no debe impedir que
+    canal3 (seco) siga generando.
+    """
+    _mkdb(tmp_path, {1: ("canal2", 44), 2: ("canal3", 0)})
+    db = ExtendedDatabase(str(tmp_path / "drain.db"))
+    # Drenaje apagado => sin supresión.
+    assert ss._drain_suppressed_channel_ids(db) == set()
+    # Drenaje activo => solo canal2 (44 >= 3) queda suprimido; canal3 (0) sigue libre.
+    db.set_system_state("short_drain_mode", "true")
+    suppressed = ss._drain_suppressed_channel_ids(db)
+    assert suppressed == {1}
+    assert 2 not in suppressed
+
+
+def test_drenaje_se_apaga_cuando_todos_bajan_del_piso(tmp_path, _point_db_path):
+    """Con un canal seco y otro sobre piso, el flag NO se apaga (drena el lleno)."""
+    _mkdb(tmp_path, {1: ("canal2", 44), 2: ("canal3", 0)})
+    db = ExtendedDatabase(str(tmp_path / "drain.db"))
+    db.set_system_state("short_drain_mode", "true")
+    assert ss._short_drain_auto_resume(db) is False
+    assert ss._short_drain_enabled(db) is True
+
+
+def test_get_next_pending_shorts_slot_excluye_canales(tmp_path, _point_db_path):
+    """La consulta de slots respeta exclude_channel_ids (mecanismo del drenaje)."""
+    _mkdb(tmp_path, {1: ("canal2", 0), 2: ("canal3", 0)})
+    path = str(tmp_path / "drain.db")
+    import datetime as _dt
+    now = _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    with sqlite3.connect(path) as conn:
+        for cid in (1, 2):
+            conn.execute(
+                "INSERT INTO shorts_planned_slots "
+                "(channel_id, date_key, scheduled_at, target_upload_at, status, short_type) "
+                "VALUES (?, ?, ?, ?, 'pending', 'native')",
+                (cid, now[:10], now, now),
+            )
+    db = ExtendedDatabase(path)
+    # Sin exclusión: devuelve el primer slot pendiente (canal1, menor target).
+    assert db.get_next_pending_shorts_slot()["channel_id"] == 1
+    # Excluyendo canal1: salta al de canal2.
+    assert db.get_next_pending_shorts_slot(exclude_channel_ids=[1])["channel_id"] == 2
+    # Excluyendo ambos: no hay slot.
+    assert db.get_next_pending_shorts_slot(exclude_channel_ids=[1, 2]) is None
