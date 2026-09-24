@@ -14,6 +14,101 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import pipeline.youtube_browser as yb  # noqa: E402
 
 
+class _FakePlaywright:
+    def __init__(self, name="pw"):
+        self.name = name
+        self.stopped = False
+        self.chromium = SimpleNamespace(
+            launch_persistent_context=lambda **kw: SimpleNamespace(
+                browser=SimpleNamespace(is_connected=lambda: True)))
+
+    def stop(self):
+        self.stopped = True
+
+
+def test_stop_playwright_marks_instance():
+    pw = _FakePlaywright()
+    yb._stop_playwright(pw)
+    assert pw.stopped is True
+    assert getattr(pw, "_autotube_stopped", False) is True
+
+
+def test_reset_context_clears_thread_local_playwright(monkeypatch):
+    """Tras reciclar el navegador, el thread-local no debe apuntar al Playwright parado."""
+    b = object.__new__(yb.YouTubeBrowser)
+    b.account = "acct"
+    b._context = SimpleNamespace(close=lambda: None)
+    b._owning_thread_id = threading.get_native_id()
+    pw = _FakePlaywright()
+    b._playwright = pw
+    monkeypatch.setattr(yb._thread_local, "playwright", pw, raising=False)
+
+    b._reset_context()
+
+    assert pw.stopped is True
+    assert getattr(yb._thread_local, "playwright", None) is None
+    assert b._playwright is None
+
+
+def test_get_or_create_playwright_discards_stopped_instance(monkeypatch):
+    """Una instancia detenida en el thread-local se descarta (no se reutiliza)."""
+    stopped = _FakePlaywright("old")
+    stopped._autotube_stopped = True
+    monkeypatch.setattr(yb._thread_local, "playwright", stopped, raising=False)
+
+    fresh = _FakePlaywright("fresh")
+
+    class _Sync:
+        def start(self):
+            return fresh
+
+    monkeypatch.setattr(yb, "_ensure_xvfb", lambda: None)
+    monkeypatch.setattr(yb, "sync_playwright", lambda: _Sync())
+    monkeypatch.setattr(yb, "_register_playwright", lambda pw: None)
+
+    got = yb._get_or_create_playwright()
+    assert got is fresh
+    assert yb._thread_local.playwright is fresh
+    # limpieza para no contaminar otros tests
+    monkeypatch.setattr(yb._thread_local, "playwright", None, raising=False)
+
+
+def test_ensure_browser_clears_thread_local_on_dead_context(monkeypatch):
+    """Regresión: contexto muerto en el MISMO hilo → no reutilizar Playwright parado."""
+    b = object.__new__(yb.YouTubeBrowser)
+    b.account = "acct"
+    b.fingerprint = {}
+    b.proxy = None
+    b.user_data_dir = Path("/tmp/x-profile")
+    b._owning_thread_id = threading.get_native_id()
+    b._context = SimpleNamespace(
+        browser=SimpleNamespace(is_connected=lambda: False),
+        close=lambda: None,
+    )
+    old = _FakePlaywright("old")
+    b._playwright = old
+    monkeypatch.setattr(yb._thread_local, "playwright", old, raising=False)
+
+    fresh = _FakePlaywright("fresh")
+
+    class _Sync:
+        def start(self):
+            return fresh
+
+    monkeypatch.setattr(yb, "_ensure_xvfb", lambda: None)
+    monkeypatch.setattr(yb, "sync_playwright", lambda: _Sync())
+    monkeypatch.setattr(yb, "_register_playwright", lambda pw: None)
+    monkeypatch.setattr(yb.YouTubeBrowser, "_cleanup_stale_locks", lambda self: None)
+    monkeypatch.setattr(yb.time, "sleep", lambda *_: None)
+
+    b._ensure_browser()
+
+    assert old.stopped is True
+    assert b._playwright is fresh           # se reconstruyó, no se reutilizó la parada
+    assert yb._thread_local.playwright is fresh
+    monkeypatch.setattr(yb._thread_local, "playwright", None, raising=False)
+
+
 def test_is_dead_context_error_matches_playwright_messages():
     assert yb._is_dead_context_error(
         Exception("BrowserContext.new_page: Target page, context or browser has been closed"))
