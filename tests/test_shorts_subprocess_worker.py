@@ -130,11 +130,12 @@ def test_finalize_standalone_success_sets_result_short_id(tmp_path, monkeypatch)
 
     conn = s.connect(db)
     row = conn.execute(
-        "SELECT status, result_short_id FROM generation_jobs WHERE id = 11072"
+        "SELECT status, result_short_id, finished_at FROM generation_jobs WHERE id = 11072"
     ).fetchone()
     conn.close()
     assert row[0] == "completed"
     assert row[1] == 555
+    assert row[2] is not None, "finished_at must be set on terminal status"
 
 
 def test_finalize_standalone_failure_marks_failed(tmp_path, monkeypatch):

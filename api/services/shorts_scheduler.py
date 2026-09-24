@@ -3459,7 +3459,7 @@ def _finalize_short_dispatch(slot_id, job_id, channel_id, short_id=None,
                 )
             conn.execute(
                 "UPDATE generation_jobs SET status = 'completed', "
-                "result_short_id = ? WHERE id = ?",
+                "result_short_id = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (int(short_id), job_id),
             )
             conn.commit()
@@ -3484,7 +3484,8 @@ def _finalize_short_dispatch(slot_id, job_id, channel_id, short_id=None,
                     "updated_at=CURRENT_TIMESTAMP WHERE id = ?", (slot_id,),
                 )
             conn.execute(
-                "UPDATE generation_jobs SET status='failed', error_msg=? WHERE id = ?",
+                "UPDATE generation_jobs SET status='failed', error_msg=?, "
+                "finished_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (f"SpamRemovalError: {str(exc)[:300]}", job_id),
             )
             conn.commit()
@@ -3519,7 +3520,8 @@ def _finalize_short_dispatch(slot_id, job_id, channel_id, short_id=None,
         conn = _connect_db()
         try:
             conn.execute(
-                "UPDATE generation_jobs SET status='failed', error_msg=? WHERE id = ?",
+                "UPDATE generation_jobs SET status='failed', error_msg=?, "
+                "finished_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (_exc_reason or "No short_id returned (standalone)", job_id),
             )
             conn.commit()
@@ -3598,7 +3600,8 @@ def _finalize_short_dispatch(slot_id, job_id, channel_id, short_id=None,
         )
         conn.execute(
             "UPDATE generation_jobs SET status = 'failed', "
-            "error_msg = COALESCE(error_msg, 'No short_id returned (exhausted retries)') "
+            "error_msg = COALESCE(error_msg, 'No short_id returned (exhausted retries)'), "
+            "finished_at = CURRENT_TIMESTAMP "
             "WHERE id = ?", (job_id,),
         )
         conn.commit()
