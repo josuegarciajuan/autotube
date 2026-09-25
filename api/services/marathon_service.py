@@ -2,12 +2,19 @@
 Marathon mode: long-form ~1-hour video generation for a round-robin selected channel.
 
 Triggered when the accumulated pipeline queue across all channels exceeds the threshold:
-    backlog = awaiting_upload + uploaded_private (across ALL active channels)
-    threshold = MARATHON_BACKLOG_PER_CHANNEL × número de canales activos
+    backlog = awaiting_upload NO-MARATÓN (pendientes de subir; excluye maratones
+              y excluye uploaded_private/warming)
+    threshold = MARATHON_BACKLOG_PER_CHANNEL × canales con MARATHON_ENABLED=True
 
-Cooldown: un canal que acaba de maratonear (MARATHON_COOLDOWN_HOURS, default 24h)
-no vuelve a ser elegible hasta que pasa ese tiempo — la rotación round-robin
-simplemente lo salta (select_marathon_channel).
+Excluir los maratones del backlog rompe el bucle de realimentación (un maratón
+generado contaba como backlog y justificaba generar el siguiente).
+
+Separación por canal: el intervalo efectivo es
+    max(MARATHON_COOLDOWN_HOURS(canal), MARATHON_MIN_CHANNEL_INTERVAL_HOURS=48h)
+de modo que existe un suelo duro de ~1 maratón por canal cada 48h aunque el
+cooldown por canal sea 0. La rotación round-robin salta los canales bloqueados
+(select_marathon_channel). El reloj arranca al terminar/fallar el maratón
+(record_marathon se reescribe a "completed"/"failed").
 
 Selects an eligible channel (MARATHON_ENABLED=True), creates a queued generation_jobs
 record, and lets the normal _queue_consumer dispatch it when the worker is available.
@@ -48,15 +55,38 @@ def _marathon_cooldown_hours(cfg: dict) -> float:
         return max(0.0, float(_DEFAULT_COOLDOWN_H))
 
 
-def _channel_in_marathon_cooldown(db, channel_id: int, cfg: dict, now: datetime | None = None) -> bool:
-    """True si el canal maratoneó hace menos de MARATHON_COOLDOWN_HOURS horas.
+def _marathon_min_interval_hours(cfg: dict) -> float:
+    """Suelo duro de separación entre maratones del mismo canal (horas).
 
-    Con ``MARATHON_COOLDOWN_HOURS = 0`` (modo rueda) NUNCA hay cooldown: los
-    canales se eligen solo por backlog + round-robin, sin separación entre
-    maratones (se permite repetir canal si le toca la rueda).
+    Se lee de ``MARATHON_MIN_CHANNEL_INTERVAL_HOURS`` del config_json con fallback
+    al default (48h). ``0`` es válido (= sin suelo) para tests/override manual.
     """
     try:
-        cooldown_h = _marathon_cooldown_hours(cfg)
+        from config.defaults import MARATHON_MIN_CHANNEL_INTERVAL_HOURS as _DEFAULT_MIN_H
+    except ImportError:
+        _DEFAULT_MIN_H = 48
+    try:
+        raw = cfg.get("MARATHON_MIN_CHANNEL_INTERVAL_HOURS", _DEFAULT_MIN_H)
+        if raw is None or str(raw).strip() == "":
+            raw = _DEFAULT_MIN_H
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return max(0.0, float(_DEFAULT_MIN_H))
+
+
+def _channel_in_marathon_cooldown(db, channel_id: int, cfg: dict, now: datetime | None = None) -> bool:
+    """True si el canal maratoneó hace menos que su intervalo mínimo efectivo.
+
+    Intervalo efectivo = ``max(MARATHON_COOLDOWN_HOURS, MARATHON_MIN_CHANNEL_INTERVAL_HOURS)``.
+    El suelo de 48h (default) se aplica SIEMPRE: con ``MARATHON_COOLDOWN_HOURS=0``
+    un canal que acaba de maratonear sigue bloqueado ~48h, de modo que la cadencia
+    real es como máximo ~1 maratón por canal cada 2 días.
+    """
+    try:
+        cooldown_h = max(
+            _marathon_cooldown_hours(cfg),
+            _marathon_min_interval_hours(cfg),
+        )
         if cooldown_h <= 0:
             return False
         last = db.get_last_marathon(channel_id)
@@ -70,12 +100,36 @@ def _channel_in_marathon_cooldown(db, channel_id: int, cfg: dict, now: datetime 
         pass
     return False
 
+
+def _eligible_channels(db) -> list[tuple[str, int, dict]]:
+    """Canales activos con MARATHON_ENABLED=True → [(slug, channel_id, cfg)].
+
+    Fuente única de elegibilidad para el umbral de backlog y la rotación.
+    """
+    channels = db.get_channels(active_only=True)
+    if not channels:
+        return []
+    eligible: list[tuple[str, int, dict]] = []
+    for ch in channels:
+        ch_id = ch.id if hasattr(ch, 'id') else ch.get("id", 0)
+        slug = ch.slug if hasattr(ch, 'slug') else ch.get("slug", "?")
+        cfg_raw = ch.config_json if hasattr(ch, 'config_json') else ch.get("config_json", "{}")
+        try:
+            cfg = json.loads(cfg_raw) if isinstance(cfg_raw, str) else (cfg_raw or {})
+        except (json.JSONDecodeError, TypeError):
+            cfg = {}
+        if not cfg.get("MARATHON_ENABLED", False):
+            logger.debug("Marathon: %s disabled (MARATHON_ENABLED=False)", slug)
+            continue
+        eligible.append((slug, ch_id, cfg))
+    return eligible
+
+
 def _marathon_backlog_per_channel(db=None) -> int:
     """Umbral de backlog por canal (para disparar maratones) desde el perfil de pacing.
 
-    Fase 3 (fábrica continua): con cola profunda los maratones se disparan solos.
-    El perfil central gobierna el umbral (strike=4, recovery=3, normal=2) — al
-    relajar los strikes, más maratones (más watch-time por video).
+    El umbral se mantiene conservador (=4) en los tres perfiles: los maratones ya
+    no se amplifican al relajar los strikes (evita sobre-generación).
     """
     try:
         from api.services.pacing_profile import get_pacing_value
@@ -114,19 +168,22 @@ def _marathon_publish_target(slug: str, channel_id: int, cfg: dict, db=None) -> 
 
 
 def marathon_backlog_deep(db=None, active_channels: int | None = None) -> bool:
-    """True si el backlog acumulado supera el umbral del perfil de pacing.
+    """True si el backlog REAL supera el umbral del perfil de pacing.
 
-    backlog = awaiting_upload + uploaded_private (todas las canales)
-    umbral  = marathon_backlog_per_channel(perfil) × canales activos
+    backlog = no-maratones en awaiting_upload (pendientes de subir)
+    umbral  = marathon_backlog_per_channel(perfil) × canales con MARATHON_ENABLED
+
+    El parámetro ``active_channels`` se mantiene por compatibilidad (tests); si
+    es ``None`` se cuentan internamente solo los canales elegibles de maratón.
     """
     if db is None:
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
     if active_channels is None:
         try:
-            active_channels = len(db.get_channels(active_only=True) or [])
+            active_channels = len(_eligible_channels(db))
         except Exception:
-            active_channels = 1
+            active_channels = 0
     per_ch = _marathon_backlog_per_channel(db)
     return active_channels > 0 and calculate_backlog(db) >= per_ch * active_channels
 
@@ -153,65 +210,42 @@ def _queued_marathon_dispatchable(db) -> bool:
 
 
 def calculate_backlog(db) -> int:
-    """Calculate total backlog: awaiting_upload + uploaded_private across all channels.
+    """Backlog REAL que dispara maratones: no-maratones en ``awaiting_upload``.
 
-    These are videos that have been generated (scripts + TTS + media done) but
-    haven't been published yet — they're sitting in the pipeline queue waiting
-    for upload windows or warmup completion.
+    Excluye:
+      - maratones (``is_marathon=1``): rompe el bucle de realimentación en el que
+        un maratón generado contaba como backlog y justificaba generar el siguiente.
+      - ``uploaded_private`` (warming): ya están subidos, solo esperan publicarse;
+        no son presión de generación.
 
-    past_due planned_slots are NOT included — they measure scheduling delay, not
-    pipeline accumulation. A video that finishes generating on time but waits for
-    its upload window shows as awaiting_upload, not past_due.
+    past_due planned_slots tampoco cuentan — miden retraso de planificación, no
+    acumulación del pipeline.
     """
     try:
-        awaiting = db.count_all_awaiting_upload()
+        return int(db.count_non_marathon_awaiting_upload())
     except Exception:
-        awaiting = 0
-
-    try:
-        warming = db.count_all_warming()
-    except Exception:
-        warming = 0
-
-    return awaiting + warming
+        try:
+            return int(db.count_all_awaiting_upload())
+        except Exception:
+            return 0
 
 
 def select_marathon_channel(db) -> tuple[str, int, dict] | None:
     """Select the next channel for a marathon video.
 
     Uses a deterministic rotation that gets shuffled on each new iteration.
-    Channels are eligible if MARATHON_ENABLED=True. v40: los canales en
-    cooldown (maratoneados hace < MARATHON_COOLDOWN_HOURS) se saltan — la
-    rotación round-robin los omite sin romper el orden.
+    Channels are eligible if MARATHON_ENABLED=True. Los canales dentro de su
+    intervalo mínimo efectivo (``max(cooldown, MARATHON_MIN_CHANNEL_INTERVAL_HOURS)``,
+    suelo 48h) se saltan — la rotación round-robin los omite sin romper el orden.
 
     Returns:
         (slug, channel_id, config_json) or None if no channel eligible.
     """
-    channels = db.get_channels(active_only=True)
-    if not channels:
+    all_eligible = _eligible_channels(db)
+    if not all_eligible:
         return None
 
-    # Filter: only channels with MARATHON_ENABLED=True
-    eligible = []
-
-    for ch in channels:
-        ch_id = ch.id if hasattr(ch, 'id') else ch.get("id", 0)
-        slug = ch.slug if hasattr(ch, 'slug') else ch.get("slug", "?")
-
-        cfg_raw = ch.config_json if hasattr(ch, 'config_json') else ch.get("config_json", "{}")
-        try:
-            cfg = json.loads(cfg_raw) if isinstance(cfg_raw, str) else (cfg_raw or {})
-        except (json.JSONDecodeError, TypeError):
-            cfg = {}
-
-        if not cfg.get("MARATHON_ENABLED", False):
-            logger.debug("Marathon: %s disabled (MARATHON_ENABLED=False)", slug)
-            continue
-
-        eligible.append((slug, ch_id, cfg))
-
-    # ── v40: cooldown filter — skip channels that marathoned recently ──
-    all_eligible = eligible
+    # ── Filtro de separación por canal (cooldown + suelo duro 48h) ──
     eligible = [
         item for item in all_eligible
         if not _channel_in_marathon_cooldown(db, item[1], item[2])
@@ -219,13 +253,13 @@ def select_marathon_channel(db) -> tuple[str, int, dict] | None:
     skipped_cooldown = len(all_eligible) - len(eligible)
     if skipped_cooldown:
         logger.debug(
-            "Marathon: %d channel(s) skipped (cooldown), %d eligible",
+            "Marathon: %d channel(s) skipped (cooldown/min-interval), %d eligible",
             skipped_cooldown, len(eligible),
         )
 
     if not eligible:
-        logger.debug("Marathon: no eligible channels (%d active, %d in cooldown)",
-                     len(channels), skipped_cooldown)
+        logger.debug("Marathon: no eligible channels (%d enabled, %d blocked)",
+                     len(all_eligible), skipped_cooldown)
         return None
 
     # ── Rotation: shuffle order on first run, persist for restarts ──
@@ -276,8 +310,11 @@ def select_marathon_channel(db) -> tuple[str, int, dict] | None:
 def check_and_dispatch_marathon(db) -> dict | None:
     """Main entry point: check backlog and enqueue a marathon if conditions are met.
 
-    Condition: (awaiting_upload + uploaded_private) across ALL channels
-               >= marathon_backlog_per_channel(perfil) × canales activos.
+    Condition: no-maratones en awaiting_upload (backlog real, pendientes de subir)
+               >= marathon_backlog_per_channel(perfil) × canales con MARATHON_ENABLED.
+
+    Los maratones y las subidas en warming (uploaded_private) NO cuentan: evita
+    el bucle de realimentación que disparaba maratones en cadena.
 
     Called by the schedule checker loop every ~60 minutes.
     Does NOT create planned_slots or fire subprocesses directly.
@@ -293,38 +330,23 @@ def check_and_dispatch_marathon(db) -> dict | None:
         logger.info("Marathon: remediation mode active — generation is held until backlog preflight")
         return None
 
-    # 1. Check backlog (awaiting + warming only — pipeline accumulation signal)
-    awaiting = 0
-    warming = 0
-    try:
-        awaiting = db.count_all_awaiting_upload()
-    except Exception:
-        pass
-    try:
-        warming = db.count_all_warming()
-    except Exception:
-        pass
-    backlog = awaiting + warming
+    # 1. Backlog REAL: solo no-maratones pendientes de subir.
+    backlog = calculate_backlog(db)
 
-    # 2. Dynamic threshold: per-channel value × active channels
-    #    (Fase 3: el umbral por canal viene del perfil de pacing — al relajar
-    #    los strikes, el umbral baja y los maratones se disparan más).
-    active_channels = db.get_channels(active_only=True)
-    active_count = len(active_channels) if active_channels else 1
-    min_backlog = _marathon_backlog_per_channel(db) * active_count
+    # 2. Umbral: per-channel × canales con MARATHON_ENABLED=True.
+    eligible_count = len(_eligible_channels(db))
+    min_backlog = _marathon_backlog_per_channel(db) * eligible_count
 
-    if backlog < min_backlog:
+    if eligible_count == 0 or backlog < min_backlog:
         logger.debug(
-            "Marathon: awaiting=%d + warming=%d = %d < %d (per_ch=%d × ch=%d), skipping",
-            awaiting, warming, backlog, min_backlog,
-            _marathon_backlog_per_channel(db), active_count,
+            "Marathon: backlog=%d < %d (per_ch=%d × canales_elegibles=%d), skipping",
+            backlog, min_backlog, _marathon_backlog_per_channel(db), eligible_count,
         )
         return None
 
     logger.info(
-        "Marathon: awaiting=%d + warming=%d = %d >= %d (per_ch=%d × ch=%d) — evaluating candidates",
-        awaiting, warming, backlog, min_backlog,
-        _marathon_backlog_per_channel(db), active_count,
+        "Marathon: backlog=%d >= %d (per_ch=%d × canales_elegibles=%d) — evaluating candidates",
+        backlog, min_backlog, _marathon_backlog_per_channel(db), eligible_count,
     )
 
     # 2. Guard: don't enqueue if there's already a queued or running marathon job

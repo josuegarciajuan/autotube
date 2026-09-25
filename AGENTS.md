@@ -531,12 +531,20 @@ la subida libera).
 - **"Reprogramar Ahora"** = `POST /api/planning/full-replan/authoritative`
   (`authoritative_replan`): borra la programación pendiente, reasigna pendientes
   y calentando, fuerza `publishAt` y regenera el plan. Idempotente.
-- **Maratones = "rueda" sin cooldown** (`MARATHON_COOLDOWN_HOURS=0`): mientras el
-  backlog (`awaiting_upload + warming`) supere el umbral, se encola **un maratón a
-  la vez** siguiendo el round-robin de canales; al terminar, si la condición
-  sigue cumpliéndose, se pasa al siguiente canal; tras dar la vuelta a los 4,
-  vuelve a empezar. **No hay separación** entre maratones (se permite repetir
-  canal si le toca). El check corre cada 10 min (`api/main.py`) para encadenar.
+- **Maratones = "rueda" con separación mínima de 48h/canal**: mientras el
+  backlog **real** supere el umbral, se encola **un maratón a la vez** siguiendo
+  el round-robin de canales. El check corre cada 10 min (`api/main.py`).
+  - **Backlog real** = solo **no-maratones en `awaiting_upload`** (pendientes de
+    subir). Se excluyen los maratones (rompe el bucle maratón→backlog→maratón) y
+    `uploaded_private`/warming (ya subidos, solo esperan publicarse). Lo calcula
+    `marathon_service.calculate_backlog` vía `count_non_marathon_awaiting_upload`.
+  - **Umbral** = `marathon_backlog_per_channel` (perfil de pacing, =4) × canales
+    con `MARATHON_ENABLED=True` (canal3 no cuenta). Hoy: 4×3 = 12.
+  - **Separación por canal**: intervalo efectivo =
+    `max(MARATHON_COOLDOWN_HOURS, MARATHON_MIN_CHANNEL_INTERVAL_HOURS)`, con
+    `MARATHON_MIN_CHANNEL_INTERVAL_HOURS=48` como **suelo duro** siempre activo
+    (no evitable con `MARATHON_COOLDOWN_HOURS=0`). Máximo ~1 maratón por canal cada
+    48h. El reloj corre desde que el maratón termina/falla (`record_marathon`).
 
 ## 🍃 Frescura en publicación (fábrica continua)
 Vídeos con > `FRESHNESS_REFRESH_DAYS` (7) en `awaiting_upload` se consideran

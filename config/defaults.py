@@ -718,17 +718,24 @@ MARATHON_LLM_MAX_BATCHES = 150
 MARATHON_LLM_MAX_EMPTY_STRIKES = 20
 MARATHON_PUBLISH_MODE = "scheduled"
 
-# Mín backlog por canal (awaiting_upload + uploaded_private) para disparar marathon.
-# Umbral total = MARATHON_BACKLOG_PER_CHANNEL × canales_activos.
+# Mín backlog REAL por canal (solo no-maratones en awaiting_upload, es decir
+# pendientes de subir) para disparar marathon. Los maratones ya generados y las
+# subidas en warming (uploaded_private) NO cuentan: evita el bucle de
+# realimentación en el que un maratón justifica generar el siguiente.
+# Umbral total = MARATHON_BACKLOG_PER_CHANNEL × canales con MARATHON_ENABLED=True.
 MARATHON_BACKLOG_PER_CHANNEL = 4
 
-# Cooldown entre marathons del MISMO canal (horas). 0 = SIN cooldown: los
-# maratones funcionan como "rueda" gobernada solo por el backlog (umbral) y el
-# round-robin por canal, un maratón a la vez. Cuando la generación de uno
-# termina y la condición sigue cumpliéndose, se encola el siguiente canal de la
-# rueda sin esperar separación alguna (se permite repetir canal si le toca).
-# Se lee del config_json del canal (MARATHON_COOLDOWN_HOURS) con fallback a este.
+# Cooldown entre marathons del MISMO canal (horas). 0 = SIN cooldown explícito:
+# el canal solo queda limitado por MARATHON_MIN_CHANNEL_INTERVAL_HOURS (suelo
+# duro). Se lee del config_json del canal (MARATHON_COOLDOWN_HOURS) con fallback.
 MARATHON_COOLDOWN_HOURS = 0
+
+# Suelo duro de separación entre maratones del MISMO canal (horas). Se aplica
+# SIEMPRE (no es evitable con MARATHON_COOLDOWN_HOURS=0): el intervalo efectivo
+# es max(MARATHON_COOLDOWN_HOURS, MARATHON_MIN_CHANNEL_INTERVAL_HOURS). Fija la
+# cadencia máxima real a ~1 maratón por canal cada 48h. Se reescribe al terminar
+# o fallar el maratón (record_marathon), así el reloj cuenta desde la finalización.
+MARATHON_MIN_CHANNEL_INTERVAL_HOURS = 48
 
 # ── MARATHON TITLE STRATEGY ──
 

@@ -31,8 +31,12 @@ CHANNELS = [
 ]
 
 
-def _set_marathon_cooldown(db, hours: int) -> None:
-    """Fija MARATHON_COOLDOWN_HOURS explícito en el config_json de los canales."""
+def _set_marathon_cooldown(db, hours: int, min_interval_hours: int | None = None) -> None:
+    """Fija MARATHON_COOLDOWN_HOURS (y opcionalmente el suelo duro) en config_json.
+
+    ``min_interval_hours=None`` deja el default del módulo (48h). Pasar 0 aísla
+    el test del suelo para validar solo el mecanismo de cooldown.
+    """
     with db._connect() as conn:
         for ch_id, _n, _s, _p, _a in CHANNELS:
             row = conn.execute(
@@ -40,6 +44,8 @@ def _set_marathon_cooldown(db, hours: int) -> None:
             ).fetchone()
             cfg = json.loads((row["config_json"] if row else "{}") or "{}")
             cfg["MARATHON_COOLDOWN_HOURS"] = hours
+            if min_interval_hours is not None:
+                cfg["MARATHON_MIN_CHANNEL_INTERVAL_HOURS"] = min_interval_hours
             conn.execute(
                 "UPDATE channels SET config_json = ? WHERE id = ?",
                 (json.dumps(cfg), ch_id),
@@ -275,30 +281,42 @@ class TestMarathonCooldown:
 
         assert select_marathon_channel(db) is None
 
-    def test_cooldown_zero_is_wheel_without_separation(self, db):
-        """Con cooldown=0 (default) un maratón reciente NO descarta al canal:
-        la rueda puede repetir canal, no hay separación entre maratones."""
+    def test_cooldown_zero_and_no_floor_is_wheel(self, db):
+        """Con cooldown=0 Y suelo explícito=0, un maratón reciente no descarta:
+        la rueda pura permite repetir canal (comportamiento legado)."""
         from api.services.marathon_service import select_marathon_channel
 
-        _set_marathon_cooldown(db, 0)
+        _set_marathon_cooldown(db, 0, min_interval_hours=0)
         for ch_id, _n, _s, _p, _a in CHANNELS:
             db.record_marathon(ch_id, "running")
 
         selected = select_marathon_channel(db)
-        assert selected is not None, "sin cooldown siempre hay canal elegible"
+        assert selected is not None, "sin cooldown ni suelo siempre hay canal elegible"
+
+    def test_default_floor_48h_blocks_even_with_cooldown_zero(self, db):
+        """Sin override, el suelo por defecto (48h) bloquea un maratón reciente
+        aunque MARATHON_COOLDOWN_HOURS=0."""
+        from api.services.marathon_service import select_marathon_channel
+
+        _set_marathon_cooldown(db, 0)  # min_interval sin tocar → default 48h
+        for ch_id, _n, _s, _p, _a in CHANNELS:
+            db.record_marathon(ch_id, "running")
+
+        assert select_marathon_channel(db) is None
 
     def test_cooldown_expired_allows_channel_again(self, db):
         """Marathon de hace > MARATHON_COOLDOWN_HOURS → canal elegible de nuevo."""
         from api.services.marathon_service import select_marathon_channel
 
         # Aislar: solo el canal 3 (id 3) tiene marathon habilitado (los demás, no).
-        # Fijamos MARATHON_COOLDOWN_HOURS=24 explícito para que el record de 25h
-        # (> 24h) quede fuera de cooldown, sin depender del default del módulo.
+        # Fijamos MARATHON_COOLDOWN_HOURS=24 y suelo=0 explícitos para que el record
+        # de 25h (> 24h) quede fuera de cooldown, sin depender del default del módulo.
         with db._connect() as conn:
             for ch_id, _n, _s, _p, _a in CHANNELS:
                 cfg = {"videos_per_day": 1, "planning_enabled": True}
                 cfg["MARATHON_ENABLED"] = (ch_id == 3)
                 cfg["MARATHON_COOLDOWN_HOURS"] = 24
+                cfg["MARATHON_MIN_CHANNEL_INTERVAL_HOURS"] = 0
                 conn.execute(
                     "UPDATE channels SET config_json = ? WHERE id = ?",
                     (json.dumps(cfg), ch_id),
