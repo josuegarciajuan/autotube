@@ -11917,6 +11917,19 @@ class ExtendedDatabase(Database):
             ).fetchone()
         return row["cnt"] if row else 0
 
+    def count_non_marathon_awaiting_upload(self) -> int:
+        """Backlog REAL para disparar maratones: solo no-maratones pendientes de subir.
+
+        Excluye maratones (rompe el bucle de realimentación maratón→backlog→maratón)
+        y excluye ``uploaded_private`` (ya subidos, solo esperan publicarse).
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM videos "
+                "WHERE status='awaiting_upload' AND COALESCE(is_marathon, 0)=0"
+            ).fetchone()
+        return row["cnt"] if row else 0
+
     def get_last_marathon(self, channel_id: int) -> dict | None:
         """Get the last marathon record for a channel.
 
