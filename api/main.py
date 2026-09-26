@@ -518,6 +518,19 @@ async def lifespan(app: FastAPI):
     # caducó, emite la alerta crítica browser_session_expired.
     ia_mark_reconcile_task = _supervised_loop("ia_mark_reconcile", _ia_mark_reconcile_loop)
 
+    # ── Reaper de drivers Playwright huérfanos (sep 2026) ──
+    # Mata SOLO drivers Node `run-driver` hijos de este proceso con antigüedad
+    # > TTL (1h). Nunca toca drivers recientes ni de otros PIDs (ver
+    # specs/playwright-driver-leak.md). Kill-switch: PLAYWRIGHT_REAPER_ENABLED.
+    # Si está deshabilitado, se lanza sin supervisión (salir es intencional y no
+    # debe contar como fallo/reinicio acotado, como upload_health_checker).
+    from pipeline.playwright_reaper import is_enabled as _pw_reaper_enabled
+    playwright_reaper_task = (
+        _supervised_loop("playwright_reaper", _playwright_reaper_loop)
+        if _pw_reaper_enabled()
+        else asyncio.create_task(_playwright_reaper_loop())
+    )
+
     yield
     
     # Shutdown
@@ -538,6 +551,7 @@ async def lifespan(app: FastAPI):
         replan_bg_task,
         editorial_reviews_task,
         ia_mark_reconcile_task,
+        playwright_reaper_task,
     ]
     if _startup_tasks is not None:
         _shutdown_tasks.append(_startup_tasks)
@@ -902,6 +916,59 @@ async def _ia_mark_reconcile_loop():
             logger.warning("IA mark reconcile error: %s", exc)
 
         await asyncio.sleep(1800)  # Every 30 minutes
+
+
+async def _playwright_reaper_loop():
+    """Background loop: mata drivers Node de Playwright huérfanos.
+
+    Red de seguridad del ciclo de vida de Playwright (ver
+    ``specs/playwright-driver-leak.md``). Un hilo daemon por job crea un driver
+    Node que puede sobrevivir si su hilo propietario muere o si ``pw.stop()`` se
+    intenta desde otro hilo. Este loop (cada ~10 min) mata SOLO hijos
+    ``run-driver`` de ESTE proceso con antigüedad > TTL (1h por defecto) más las
+    entradas del registry cuyo hilo propietario ya no existe. Nunca toca drivers
+    recientes ni de otros PIDs (no rompe la invariante de una generación a la
+    vez). Kill-switch: PLAYWRIGHT_REAPER_ENABLED=false.
+    """
+    import asyncio, logging, os
+    logger = logging.getLogger("autotube.playwright_reaper")
+
+    try:
+        from pipeline.playwright_reaper import interval_seconds, is_enabled, reap_if_enabled
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Playwright reaper unavailable: %s", exc)
+        return
+
+    if not is_enabled():
+        logger.info("Playwright reaper DISABLED (PLAYWRIGHT_REAPER_ENABLED=false)")
+        return
+
+    period = interval_seconds()
+    logger.info("Playwright reaper started (interval=%.0fs)", period)
+    await asyncio.sleep(120)  # deja estabilizar el resto de loops tras el arranque
+
+    while True:
+        try:
+            stats = await asyncio.to_thread(reap_if_enabled)
+            if stats.get("killed"):
+                logger.warning(
+                    "Playwright reaper killed %d orphaned driver(s): %s",
+                    stats.get("killed"), stats.get("killed_pids"),
+                )
+            elif stats.get("orphaned_registry"):
+                logger.debug(
+                    "Playwright reaper: %d registry orphan(s), none past grace yet",
+                    stats.get("orphaned_registry"),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Playwright reaper loop error: %s", exc)
+
+        try:
+            await asyncio.sleep(period)
+        except asyncio.CancelledError:
+            raise
 
 
 async def _packaging_recovery_loop():
