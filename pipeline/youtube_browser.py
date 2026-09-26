@@ -110,55 +110,154 @@ _playwright_lock = threading.Lock()
 
 # ── Global Playwright registry (fix: prevent driver process leaks) ──
 # Every sync_playwright().start() spawns a Node.js driver child process.
-# Without explicit .stop(), the driver survives parent thread/process exit.
-# This registry tracks ALL created instances so they can be cleaned up.
-_playwright_registry: set = set()
+# The sync API's greenlet is BOUND to the thread that called start(): calling
+# ``pw.stop()`` from any other thread raises "cannot switch to a different
+# thread" and leaves the Node driver alive.
+#
+# Therefore we cannot keep a plain ``set`` of instances and blindly stop them.
+# We track per-instance metadata (owner thread, driver PID, lifecycle flags)
+# and ONLY the owner thread is allowed to stop an instance. Instances whose
+# owner thread is gone/foreign are marked ``orphaned`` and left to the reaper
+# (``pipeline.playwright_reaper``), which SIGKILLs the Node driver by PID.
+#
+# The previous implementation silently swallowed the cross-thread stop error
+# AND then discarded the registry entry, so the still-live driver became
+# invisible to atexit/close_all → unbounded leak (~55 drivers / ~4.2 GB RSS).
+_PLAYWRIGHT_STOPPED_ATTR = "_autotube_stopped"
+_playwright_registry: dict = {}  # id(pw) -> metadata dict
 _registry_lock = threading.Lock()
 
 
-def _register_playwright(pw):
-    """Track a Playwright instance for eventual cleanup."""
+def _pw_key(pw) -> int:
+    return id(pw)
+
+
+def _register_playwright(pw, driver_pid: int | None = None):
+    """Track a Playwright instance (with owner-thread metadata) for cleanup."""
+    if pw is None:
+        return
+    meta = {
+        "pw": pw,
+        "owner_native_id": threading.get_native_id(),
+        "owner_ident": threading.get_ident(),
+        "owner_name": threading.current_thread().name,
+        "pid": os.getpid(),
+        "started_at": time.time(),
+        "driver_pid": driver_pid,
+        "stop_requested": False,
+        "orphaned": False,
+        "orphaned_at": None,
+        "orphan_reason": "",
+    }
     with _registry_lock:
-        _playwright_registry.add(pw)
+        _playwright_registry[_pw_key(pw)] = meta
 
 
 def _unregister_playwright(pw):
-    """Remove a Playwright instance from the registry (after it was stopped)."""
-    with _registry_lock:
-        _playwright_registry.discard(pw)
-
-
-def _stop_playwright(pw) -> None:
-    """Stop a Playwright instance and mark it so it is NEVER reused.
-
-    ``Playwright`` no expone su estado; si un thread-local se queda apuntando a
-    una instancia ya detenida, reutilizarla lanza "Event loop is closed! Is
-    Playwright already stopped?". Marcamos la instancia al pararla y
-    ``_get_or_create_playwright`` la descarta en vez de devolverla.
-    """
+    """Remove a Playwright instance from the registry (only after it stopped)."""
     if pw is None:
         return
-    try:
-        pw.stop()
-    except Exception:
-        pass
-    try:
-        setattr(pw, "_autotube_stopped", True)
-    except Exception:
-        pass
-    _unregister_playwright(pw)
+    with _registry_lock:
+        _playwright_registry.pop(_pw_key(pw), None)
 
 
-def _cleanup_all_playwrights():
-    """Stop ALL known Playwright instances and clear the registry.
+def _get_registry_meta(pw) -> dict | None:
+    if pw is None:
+        return None
+    with _registry_lock:
+        return _playwright_registry.get(_pw_key(pw))
 
-    Called by atexit and by close_all_browsers(). Safe to call multiple times.
+
+def get_playwright_registry_snapshot() -> list:
+    """Return a copy of the registry metadata (no live Playwright objects).
+
+    Used by the reaper to find drivers whose owning thread is gone. ``pw`` is
+    intentionally excluded so callers cannot attempt cross-thread stops.
     """
     with _registry_lock:
-        instances = list(_playwright_registry)
-        _playwright_registry.clear()
-    for pw in instances:
-        _stop_playwright(pw)
+        return [
+            {k: v for k, v in meta.items() if k != "pw"}
+            for meta in _playwright_registry.values()
+        ]
+
+
+def _mark_orphaned(pw, reason: str) -> None:
+    """Mark an instance whose driver must be reaped by PID.
+
+    The Node driver is left running and the registry entry is KEPT (dropping it
+    is exactly what made the leak invisible). ``_stop_playwright`` from the
+    owner thread can still recover it if it runs later.
+    """
+    meta = _get_registry_meta(pw)
+    if meta is None:
+        return
+    with _registry_lock:
+        meta["stop_requested"] = True
+        meta["orphaned"] = True
+        meta["orphaned_at"] = meta.get("orphaned_at") or time.time()
+        meta["orphan_reason"] = reason
+    logger.warning(
+        "Playwright instance owned by thread %s marked orphaned (%s); "
+        "driver_pid=%s pending reap",
+        str(meta.get("owner_native_id"))[-6:], reason, meta.get("driver_pid"),
+    )
+
+
+def _stop_playwright(pw) -> bool:
+    """Stop a Playwright instance from its OWNER thread only.
+
+    Returns ``True`` when the instance was really stopped and deregistered.
+    Never calls ``pw.stop()`` from another thread (impossible with the sync
+    API) and NEVER deregisters a driver that is still alive — a live driver
+    left in the registry is what allows the reaper to kill it.
+    """
+    if pw is None:
+        return False
+    meta = _get_registry_meta(pw)
+    owner = meta.get("owner_native_id") if meta else threading.get_native_id()
+    current = threading.get_native_id()
+    if owner != current:
+        _mark_orphaned(pw, f"stop-from-foreign-thread(cur={current},owner={owner})")
+        return False
+
+    stopped = False
+    try:
+        pw.stop()
+        stopped = True
+    except Exception as exc:
+        logger.warning("Playwright.stop() failed for thread %s: %s",
+                       str(current)[-6:], exc)
+    if stopped:
+        try:
+            setattr(pw, _PLAYWRIGHT_STOPPED_ATTR, True)
+        except Exception:
+            pass
+        _unregister_playwright(pw)
+        return True
+    # Keep the entry so the reaper can kill the still-live Node driver.
+    _mark_orphaned(pw, "stop-raised")
+    return False
+
+
+def _cleanup_all_playwrights(force: bool = False):
+    """Stop known Playwright instances.
+
+    By default only instances owned by the CURRENT thread can be stopped;
+    foreign/dead-thread instances are marked for the reaper. ``force=True``
+    (atexit) attempts every instance and then relies on the OS-level
+    ``kill_all_driver_children`` sweep.
+    """
+    with _registry_lock:
+        entries = list(_playwright_registry.values())
+    current = threading.get_native_id()
+    for meta in entries:
+        pw = meta.get("pw")
+        if pw is None:
+            continue
+        if force or meta.get("owner_native_id") == current:
+            _stop_playwright(pw)
+        else:
+            _mark_orphaned(pw, "close-all-from-foreign-thread")
 
 
 def _cleanup_current_thread_playwright():
@@ -174,8 +273,28 @@ def _cleanup_current_thread_playwright():
         _thread_local.playwright = None
 
 
+def _atexit_cleanup():
+    """Best-effort cleanup at process exit.
+
+    ``pw.stop()`` may fail from the atexit thread for instances owned by other
+    threads, so we also SIGKILL any surviving ``run-driver`` children of this
+    process (they are reparented to init and would otherwise leak forever).
+    """
+    try:
+        _cleanup_all_playwrights(force=True)
+    except Exception:
+        pass
+    try:
+        from pipeline.playwright_reaper import kill_all_driver_children
+        killed = kill_all_driver_children()
+        if killed:
+            logger.warning("atexit: killed %d orphaned Playwright driver(s)", len(killed))
+    except Exception:
+        pass
+
+
 # ── Register cleanup on normal process exit ──
-atexit.register(_cleanup_all_playwrights)
+atexit.register(_atexit_cleanup)
 
 
 def _get_or_create_playwright():
@@ -199,8 +318,34 @@ def _get_or_create_playwright():
         if pw is not None and not getattr(pw, "_autotube_stopped", False):
             return pw
         _ensure_xvfb()
+        # Snapshot existing driver children so we can record the PID of the one
+        # this start() spawns (used by the reaper to kill orphaned drivers).
+        before_pids: set = set()
+        driver_pid = None
+        try:
+            from pipeline.playwright_reaper import list_driver_children
+            before_pids = {c["pid"] for c in list_driver_children()}
+        except Exception:
+            pass
         pw = sync_playwright().start()
-        _register_playwright(pw)  # track for global cleanup
+        if not before_pids:
+            # Snapshot failed: still try to identify the new driver.
+            try:
+                from pipeline.playwright_reaper import list_driver_children
+                new = [c["pid"] for c in list_driver_children()]
+                driver_pid = new[0] if len(new) == 1 else None
+            except Exception:
+                driver_pid = None
+        else:
+            try:
+                from pipeline.playwright_reaper import list_driver_children
+                for c in list_driver_children():
+                    if c["pid"] not in before_pids:
+                        driver_pid = c["pid"]
+                        break
+            except Exception:
+                driver_pid = None
+        _register_playwright(pw, driver_pid=driver_pid)  # track owner + driver PID
         _thread_local.playwright = pw
         logger.debug("Playwright instance started for thread %s", str(threading.get_ident())[-6:])
         return pw
@@ -328,25 +473,40 @@ class YouTubeBrowser:
         # cierre inesperado): sin el chequeo de vida, reusar el contexto muerto
         # hace que todo ``new_page()`` falle para siempre. Se recrea aquí.
         same_thread = (self._owning_thread_id == current_thread)
+        teardown = False
         if self._context is not None:
-            try:
-                self._context.close()
-            except Exception:
-                pass
+            teardown = True
+            if same_thread:
+                try:
+                    self._context.close()
+                except Exception:
+                    pass
+            else:
+                # El contexto pertenece a OTRO hilo: cerrarlo desde aquí lanza
+                # "cannot switch to a different thread". Se abandona; el driver
+                # Node (y su Chromium) lo limpia el reaper / _cleanup_stale_locks.
+                logger.debug(
+                    "Abandoning browser context owned by thread %s (current %s)",
+                    self._owning_thread_id, current_thread,
+                )
             self._context = None
             self._owning_thread_id = None
+        # Reconciliar la instancia de Playwright, independientemente del contexto.
+        if self._playwright is not None:
             if same_thread:
-                # La instancia de Playwright pertenece a ESTE hilo: hay que
-                # pararla Y limpiar el thread-local. Si no, _get_or_create_playwright()
-                # devuelve la instancia detenida → "Event loop is closed".
+                # La instancia pertenece a ESTE hilo: se puede (y debe) parar.
+                # Limpiar el thread-local evita reutilizar una instancia parada.
                 _cleanup_current_thread_playwright()
-            elif self._playwright is not None:
-                # Hilo distinto: parar la instancia del hilo anterior (para no
-                # filtrar procesos driver). El thread-local del hilo actual no
-                # se toca — aún no existe o es propio de este hilo.
-                _stop_playwright(self._playwright)
+                if not getattr(self._playwright, _PLAYWRIGHT_STOPPED_ATTR, False):
+                    _stop_playwright(self._playwright)
+            else:
+                # Hilo distinto: NO se puede parar desde aquí. Se marca huérfano
+                # para que el reaper mate el proceso Node por PID. NUNCA se
+                # desregistra a ciegas (eso fue la fuga original).
+                _mark_orphaned(self._playwright, "thread-changed")
             self._playwright = None
-            time.sleep(1.5)  # let Singletons-lock fully release
+        if teardown:
+            time.sleep(1.5)  # let SingletonLock fully release
 
         # ── Get a Playwright instance owned by THIS thread ──
         self._playwright = _get_or_create_playwright()
@@ -441,7 +601,7 @@ class YouTubeBrowser:
         # y falla con "Event loop is closed! Is Playwright already stopped?".
         pw = self._playwright
         _cleanup_current_thread_playwright()
-        if pw is not None and not getattr(pw, "_autotube_stopped", False):
+        if pw is not None and not getattr(pw, _PLAYWRIGHT_STOPPED_ATTR, False):
             _stop_playwright(pw)
         self._playwright = None
         time.sleep(1.5)
@@ -857,21 +1017,31 @@ class YouTubeBrowser:
         return True
 
     def close(self):
+        """Close this account's context and Playwright driver if OWNED by this thread.
+
+        ``pw.stop()`` cannot be called from a foreign thread; in that case the
+        instance is marked orphaned so the reaper kills its Node driver by PID.
+        """
         with self._lock:
-            try:
-                if self._context:
-                    self._context.close()
-            except Exception:
-                pass
+            if self._context is not None:
+                if self._owning_thread_id == threading.get_native_id():
+                    try:
+                        self._context.close()
+                    except Exception:
+                        pass
+                else:
+                    logger.debug(
+                        "close(): context owned by thread %s — abandoned (reaper)",
+                        self._owning_thread_id,
+                    )
             self._context = None
             self._owning_thread_id = None
-            if self._playwright is not None:
-                try:
-                    self._playwright.stop()
-                except Exception:
-                    pass
-                _unregister_playwright(self._playwright)
-                self._playwright = None
+            pw = self._playwright
+            self._playwright = None
+            if pw is not None:
+                # Owner-aware: stops now if this thread owns it, otherwise marks
+                # it orphaned (never deregisters a live driver).
+                _stop_playwright(pw)
 
     def mark_altered_content(self, youtube_video_id: str,
                              max_attempts: int = 3) -> bool:
@@ -2462,6 +2632,8 @@ async def check_session_valid(account: str, cache_seconds: int = 300,
 
     status = "error"
     detail = ""
+    pw = None
+    ctx = None
     try:
         _ensure_xvfb()
         from playwright.async_api import async_playwright as _async_pw
@@ -2487,25 +2659,19 @@ async def check_session_valid(account: str, cache_seconds: int = 300,
         if proxy:
             launch_kwargs["proxy"] = proxy
         ctx = await pw.chromium.launch_persistent_context(**launch_kwargs)
-        try:
-            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-            await page.goto("https://studio.youtube.com", wait_until="domcontentloaded", timeout=30000)
-            import asyncio as _asyncio
-            await _asyncio.sleep(3)
-            current_url = page.url
-            if "studio.youtube.com" in current_url and "accounts.google.com" not in current_url:
-                status = "valid"
-                detail = "Session is authenticated"
-                logger.debug("Session valid for %s (url: %s)", account, current_url[:80])
-            else:
-                status = "expired"
-                detail = "Redirected to login — re-authentication required"
-                logger.warning("Session EXPIRED for %s (redirected to: %s)", account, current_url[:120])
-        finally:
-            try: await ctx.close()
-            except Exception: pass
-            try: await pw.stop()
-            except Exception: pass
+        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        await page.goto("https://studio.youtube.com", wait_until="domcontentloaded", timeout=30000)
+        import asyncio as _asyncio
+        await _asyncio.sleep(3)
+        current_url = page.url
+        if "studio.youtube.com" in current_url and "accounts.google.com" not in current_url:
+            status = "valid"
+            detail = "Session is authenticated"
+            logger.debug("Session valid for %s (url: %s)", account, current_url[:80])
+        else:
+            status = "expired"
+            detail = "Redirected to login — re-authentication required"
+            logger.warning("Session EXPIRED for %s (redirected to: %s)", account, current_url[:120])
     except Exception as e:
         error_msg = str(e)
         # Detect profile-in-use by Chromium's error message (fallback if SingletonLock check missed it)
@@ -2520,6 +2686,21 @@ async def check_session_valid(account: str, cache_seconds: int = 300,
             logger.debug("check_session_valid for %s: profile in use (expected)", account)
         else:
             logger.warning("check_session_valid error for %s: %s", account, e)
+    finally:
+        # El finally cubre DESDE ANTES del launch: si ``start()`` tuvo éxito pero
+        # ``launch_persistent_context``/``new_page``/``goto`` fallan (o llega
+        # ``asyncio.CancelledError``), el driver async se para igualmente. Antes
+        # el try/finally empezaba tras el launch → driver Node huérfano.
+        if ctx is not None:
+            try:
+                await ctx.close()
+            except Exception:
+                pass
+        if pw is not None:
+            try:
+                await pw.stop()
+            except Exception:
+                pass
 
     result = {"status": status, "detail": detail}
     _session_check_cache[account] = (now, result)

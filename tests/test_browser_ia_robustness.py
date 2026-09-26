@@ -64,7 +64,7 @@ def test_get_or_create_playwright_discards_stopped_instance(monkeypatch):
 
     monkeypatch.setattr(yb, "_ensure_xvfb", lambda: None)
     monkeypatch.setattr(yb, "sync_playwright", lambda: _Sync())
-    monkeypatch.setattr(yb, "_register_playwright", lambda pw: None)
+    monkeypatch.setattr(yb, "_register_playwright", lambda pw, driver_pid=None: None)
 
     got = yb._get_or_create_playwright()
     assert got is fresh
@@ -97,7 +97,7 @@ def test_ensure_browser_clears_thread_local_on_dead_context(monkeypatch):
 
     monkeypatch.setattr(yb, "_ensure_xvfb", lambda: None)
     monkeypatch.setattr(yb, "sync_playwright", lambda: _Sync())
-    monkeypatch.setattr(yb, "_register_playwright", lambda pw: None)
+    monkeypatch.setattr(yb, "_register_playwright", lambda pw, driver_pid=None: None)
     monkeypatch.setattr(yb.YouTubeBrowser, "_cleanup_stale_locks", lambda self: None)
     monkeypatch.setattr(yb.time, "sleep", lambda *_: None)
 

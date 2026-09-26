@@ -588,6 +588,22 @@ PROXY_CHANNELS=canal2         # vacío = todos los canales
 - **Onboarding de un canal gestionado** (crear cuenta primero en el entorno visual
   del VPS con la IP residencial, luego darlo de alta): ver `specs/onboarding-canal-egress.md`.
 
+## 🧹 Ciclo de vida de Playwright (anti-fuga de drivers Node)
+> **Spec completo:** `specs/playwright-driver-leak.md`. Invariantes duras:
+- **Nunca** llamar `pw.stop()` desde un hilo distinto al que hizo
+  `sync_playwright().start()` (la API sync está atada al hilo propietario). En
+  cambio de hilo la instancia se marca `orphaned` y la mata el reaper; **jamás**
+  se desregistra un driver vivo.
+- Todo `async_playwright().start()` va en un `try` cuyo `finally` cierra contexto
+  y Playwright (cubre fallo de launch y `CancelledError`).
+- **Reaper:** `pipeline/playwright_reaper.py` + loop `playwright_reaper` en
+  `api/main.py`. Mata solo hijos `run-driver` **de este proceso** con edad >
+  `PLAYWRIGHT_DRIVER_TTL_SECONDS` (default 3600 s); nunca drivers recientes
+  (~20 min de job en curso) ni de otros PIDs. Kill-switch:
+  `PLAYWRIGHT_REAPER_ENABLED=false`. Métricas: `GET /api/system/playwright-drivers`.
+- Limpieza manual: `python3 scripts/verify_playwright_reaper.py --count` y, solo
+  con `etimes > 3600`, seguir el runbook del spec.
+
 ## Campos subibles vs manuales (YouTube API)
 | Dato | API | Manual |
 |------|-----|--------|

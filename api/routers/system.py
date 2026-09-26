@@ -966,3 +966,19 @@ def _schedule_restart():
         logger.info("API restart scheduled — will execute in 2 seconds")
     except Exception as exc:
         logger.error("Failed to schedule API restart: %s", exc)
+
+
+@router.get("/system/playwright-drivers")
+def get_playwright_drivers():
+    """Métricas del reaper de drivers Playwright + drivers vivos actuales.
+
+    Ver ``specs/playwright-driver-leak.md``. Solo enumera hijos de ESTE
+    proceso; no toca ni reporta procesos de otros PIDs.
+    """
+    try:
+        from pipeline.playwright_reaper import get_reaper_stats
+        return get_reaper_stats()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("playwright-drivers endpoint failed: %s", exc)
+        return {"error": str(exc)}
+
