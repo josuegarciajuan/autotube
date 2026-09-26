@@ -62,7 +62,13 @@ class BrowserSessionManager:
     # ── lifecycle ──────────────────────────────────────────
 
     async def start(self):
-        """Launch browser and create a context."""
+        """Launch browser and create a context atomically.
+
+        If ANY step after ``async_playwright().start()`` fails (launch, context,
+        init script), everything created so far is closed and the exception is
+        re-raised. Without this, a started Playwright/Node driver leaks: when
+        ``__aenter__`` raises, ``__aexit__`` never runs.
+        """
         if self._browser is not None:
             return
 
@@ -76,34 +82,69 @@ class BrowserSessionManager:
 
         launch_opts = {**_LAUNCH_OPTIONS_BASE, "headless": self._headless}
         self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.launch(**launch_opts)
-        self._context = await self._browser.new_context(
-            viewport={"width": 1280, "height": 900},
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-            ),
-        )
-        # Anti-detection script
-        await self._context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-            Object.defineProperty(navigator, 'languages', {get: () => ['es-ES', 'es', 'en-US', 'en']});
-        """)
+        try:
+            self._browser = await self._playwright.chromium.launch(**launch_opts)
+            self._context = await self._browser.new_context(
+                viewport={"width": 1280, "height": 900},
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+                ),
+            )
+            # Anti-detection script
+            await self._context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+                Object.defineProperty(navigator, 'languages', {get: () => ['es-ES', 'es', 'en-US', 'en']});
+            """)
+        except BaseException:
+            # BaseException incluye asyncio.CancelledError y KeyboardInterrupt:
+            # cualquier fallo intermedio debe limpiar lo ya creado.
+            await self.stop()
+            raise
         logger.debug("Browser session started")
 
     async def stop(self):
-        """Close browser and cleanup."""
-        if self._context:
-            await self._context.close()
-        if self._browser:
-            await self._browser.close()
-        if self._playwright:
-            await self._playwright.stop()
-        self._browser = None
+        """Close browser + context + Playwright, tolerant to errors.
+
+        References are cleared FIRST so a partially failed stop can never be
+        mistaken for a live session. Each close is wrapped in ``asyncio.shield``
+        so a cancellation of the caller does not abort the teardown; a pending
+        CancelledError is re-raised only after every step was attempted.
+        """
+        ctx, browser, pw = self._context, self._browser, self._playwright
         self._context = None
+        self._browser = None
         self._playwright = None
+
+        pending_cancel = None
+        for obj, method in ((ctx, "close"), (browser, "close"), (pw, "stop")):
+            if obj is None:
+                continue
+            try:
+                await asyncio.shield(getattr(obj, method)())
+            except asyncio.CancelledError as exc:  # noqa: PERF203
+                # Teardown keeps running in the background thanks to shield.
+                pending_cancel = exc
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("social_browser stop %s failed: %s", method, exc)
+
         logger.debug("Browser session stopped")
+        if pending_cancel is not None:
+            raise pending_cancel
+
+    def __del__(self):
+        # Best-effort safety note: async resources cannot be awaited here. If
+        # this fires with a live driver, the reaper (pipeline.playwright_reaper)
+        # will collect it; never silently swallow the fact that it leaked.
+        try:
+            if getattr(self, "_playwright", None) is not None:
+                logger.warning(
+                    "BrowserSessionManager GC'd with an unclosed Playwright "
+                    "session — rely on the reaper to clean its driver"
+                )
+        except Exception:
+            pass
 
     async def __aenter__(self):
         await self.start()

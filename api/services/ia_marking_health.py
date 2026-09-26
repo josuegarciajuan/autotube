@@ -188,39 +188,50 @@ def reconcile_recent_ia_marks(db, grace_hours: int = DEFAULT_GRACE_HOURS,
         return result
 
     browsers: dict = {}
-    for r in rows:
-        result["attempted"] += 1
-        try:
-            canal = r["canal"]
-            account = get_account_for_channel(canal)
-            _egress = egress_client_for(canal)
-            if _egress is not None:
-                resp = _egress.browser_action(
-                    "mark_altered", account=account or "",
-                    params={"video_id": r["yt_id"]})
-                ok, reason = bool(resp.get("ok")), "egress"
-            else:
-                if not account:
+    try:
+        for r in rows:
+            result["attempted"] += 1
+            try:
+                canal = r["canal"]
+                account = get_account_for_channel(canal)
+                _egress = egress_client_for(canal)
+                if _egress is not None:
+                    resp = _egress.browser_action(
+                        "mark_altered", account=account or "",
+                        params={"video_id": r["yt_id"]})
+                    ok, reason = bool(resp.get("ok")), "egress"
+                else:
+                    if not account:
+                        result["failed"] += 1
+                        continue
+                    browser = browsers.get(account)
+                    if browser is None:
+                        browser = get_browser(account)
+                        browsers[account] = browser
+                    ok = mark_altered_content_robust(browser, r["yt_id"], attempts=3)
+                    reason = getattr(browser, "last_mark_reason", "") or ""
+                if ok:
+                    _mark_done(db, r["kind"], r["db_id"])
+                    result["marked"] += 1
+                    logger.info("Reconciliación IA: %s %s (%s) marcado",
+                                r["kind"], r["yt_id"], canal)
+                else:
                     result["failed"] += 1
-                    continue
-                browser = browsers.get(account)
-                if browser is None:
-                    browser = get_browser(account)
-                    browsers[account] = browser
-                ok = mark_altered_content_robust(browser, r["yt_id"], attempts=3)
-                reason = getattr(browser, "last_mark_reason", "") or ""
-            if ok:
-                _mark_done(db, r["kind"], r["db_id"])
-                result["marked"] += 1
-                logger.info("Reconciliación IA: %s %s (%s) marcado",
-                            r["kind"], r["yt_id"], canal)
-            else:
+                    if reason == "session_expired":
+                        result["session_expired"] = True
+            except Exception as exc:  # noqa: BLE001
                 result["failed"] += 1
-                if reason == "session_expired":
-                    result["session_expired"] = True
-        except Exception as exc:  # noqa: BLE001
-            result["failed"] += 1
-            logger.warning("Reconciliación IA falló para %s: %s", r.get("yt_id"), exc)
+                logger.warning("Reconciliación IA falló para %s: %s", r.get("yt_id"), exc)
+    finally:
+        # El navegador local se ejecuta en el hilo del ThreadPool de
+        # ``asyncio.to_thread`` (persistente). Sin este cleanup, cada ejecución
+        # dejaba vivo el driver Playwright de ese hilo (fuga de drivers Node).
+        if browsers:
+            try:
+                from pipeline.youtube_browser import cleanup_browser_thread
+                cleanup_browser_thread()
+            except Exception:
+                pass
     return result
 
 
