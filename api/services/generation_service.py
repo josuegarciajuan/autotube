@@ -2217,21 +2217,22 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
                 except Exception as lifecycle_exc:
                     logger.warning(f"[{canal}] Lifecycle scheduling failed (non-critical): {lifecycle_exc}")
             
-                video_path = video_data.get("video_path", "")
-                if video_path and Path(video_path).exists():
-                    try:
-                        Path(video_path).unlink()
-                        logger.info(f"Deleted local mp4: {video_path}")
-                        db.update_video(video_id, video_path="")
-                    except Exception as e:
-                        logger.warning(f"Could not delete mp4 {video_path}: {e}")
-
-                # ── Clean up residual files (v9): audio + scene assets ──
+                # ── v64: Retención 0 días — purga central tras subida correcta ──
                 try:
-                    from pipeline.cleanup_utils import cleanup_video_residuals
-                    cleanup_video_residuals(db, video_id, audio_data=audio_data, log=logger)
-                except Exception as e:
-                    logger.warning(f"Residual cleanup failed (non-critical): {e}")
+                    from pipeline.media_retention import purge_entity_media
+                    _purge_report = purge_entity_media(
+                        db, "video", video_id, reason="upload_success", log=logger,
+                    )
+                    if _purge_report.get("errors"):
+                        logger.warning(
+                            "[%s] Purga de material con errores para video %d: %s",
+                            canal, video_id, _purge_report["errors"][:3],
+                        )
+                except Exception as _purge_err:
+                    logger.warning(
+                        "[%s] Purga de material falló para video %d: %s",
+                        canal, video_id, _purge_err,
+                    )
             
                 await _broadcast_progress(job_id, 98, "upload",
                     "Subida completada. Finalizando...",
@@ -2721,22 +2722,22 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
             except Exception as e:
                 logger.warning("[%s] Failed to trigger auto-mark IA: %s", canal, e)
 
-            # ── Clean up local mp4 ──
-            vp = video_data.get("video_path", "")
-            if vp and Path(vp).exists():
-                try:
-                    Path(vp).unlink()
-                    db.update_video(video_id, video_path="")
-                    logger.info("[%s] Deleted local mp4 after scheduled upload: %s", canal, vp)
-                except Exception:
-                    pass
-
-            # ── Clean up residual files (v9): audio + scene assets ──
+            # ── v64: Retención 0 días — purga central tras subida correcta ──
             try:
-                from pipeline.cleanup_utils import cleanup_video_residuals
-                cleanup_video_residuals(db, video_id, audio_data=None, log=logger)
-            except Exception:
-                pass
+                from pipeline.media_retention import purge_entity_media
+                _purge_report = purge_entity_media(
+                    db, "video", video_id, reason="upload_success", log=logger,
+                )
+                if _purge_report.get("errors"):
+                    logger.warning(
+                        "[%s] Purga de material con errores para video %d: %s",
+                        canal, video_id, _purge_report["errors"][:3],
+                    )
+            except Exception as _purge_err:
+                logger.warning(
+                    "[%s] Purga de material falló para video %d: %s",
+                    canal, video_id, _purge_err,
+                )
 
             # ── Schedule lifecycle actions (F3: go_public + playlists + comments) ──
             try:
@@ -3246,6 +3247,17 @@ async def _do_reassembly(job_id: int, video_id: int):
         else:
             # Mark reassembly job as completed after upload succeeds
             db.update_job(job_id, status="completed", progress=100, phase="done")
+            # ── v64: purga explícita del material (el path de reassemble es una
+            # fuga histórica: 28 mp4 residuales). No depender de start_upload_job.
+            try:
+                from pipeline.media_retention import purge_entity_media
+                purge_entity_media(db, "video", video_id,
+                                   reason="reassemble_upload_success", log=logger)
+            except Exception as _purge_err:
+                logger.warning(
+                    "Purga de material falló tras reassemble del video %d: %s",
+                    video_id, _purge_err,
+                )
         # ── Save reassembly timing ──────────────────────────
         try:
             _reassembly_duration_ms = int((time.time() - reassembly_start) * 1000)
