@@ -369,6 +369,9 @@ export const api = {
     request<any>(`/channels/${channelId}/analytics/content?sort=${sort}&limit=${limit}`),
   getThumbnailStyleCtr: (channelId: number) =>
     request<any>(`/channels/${channelId}/analytics/thumbnail-styles`),
+  // W7: CTR por dimensión de packaging (variant_strategy | layout | color_key | emphasis)
+  getThumbnailCtr: (channelId: number, dimension = 'variant_strategy', minImpressions = 200) =>
+    request<any>(`/channels/${channelId}/analytics/thumbnail-ctr?dimension=${dimension}&min_impressions=${minImpressions}`),
   getVideoAnalytics: (videoId: number) =>
     request<any>(`/videos/${videoId}/analytics`),
   getChannelsComparison: () =>
