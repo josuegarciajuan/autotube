@@ -34,7 +34,7 @@ CREATE TABLE video_scenes (
     audio_path TEXT, purged_at TEXT
 );
 CREATE TABLE video_asset_history (
-    id INTEGER PRIMARY KEY, video_id INTEGER, file_path TEXT,
+    id INTEGER PRIMARY KEY, video_id INTEGER, file_path TEXT UNIQUE,
     asset_url TEXT, purged_at TEXT
 );
 CREATE TABLE shorts (
@@ -44,7 +44,7 @@ CREATE TABLE shorts (
 );
 CREATE TABLE short_asset_history (
     id INTEGER PRIMARY KEY, short_id INTEGER, channel_id INTEGER,
-    file_path TEXT, asset_url TEXT, purged_at TEXT
+    file_path TEXT UNIQUE, asset_url TEXT, purged_at TEXT
 );
 """
 
@@ -225,6 +225,33 @@ def test_asset_history_files_are_deleted(tmp_path, db):
 
     mr.purge_entity_media(db, "video", 20)
     assert not asset.exists()
+
+
+def test_asset_history_unique_paths_mark_without_clearing(tmp_path, db):
+    """Regresión: la tabla tiene UNIQUE(file_path); purgar no debe vaciar la
+    ruta (violaría el constraint) sino solo sellar purged_at."""
+    a1 = _write(tmp_path / "output" / "images" / "u1.jpg")
+    a2 = _write(tmp_path / "output" / "images" / "u2.jpg")
+    db._connect().executescript(f"""
+        INSERT INTO videos (id, yt_video_id, status) VALUES (25, 'YT25', 'published');
+        INSERT INTO video_asset_history (video_id, file_path) VALUES
+            (25, '{a1}'), (25, '{a2}');
+    """)
+    db._connect().commit()
+
+    report = mr.purge_entity_media(db, "video", 25)
+    assert not report["errors"], report["errors"]
+    rows = db._connect().execute(
+        "SELECT file_path, purged_at FROM video_asset_history WHERE video_id=25"
+    ).fetchall()
+    assert len(rows) == 2
+    assert all(r["purged_at"] for r in rows)
+    assert all(r["file_path"] for r in rows), "file_path debe conservarse"
+    assert not a1.exists() and not a2.exists()
+
+    # Los refs purgados ya no cuentan como referencia viva.
+    refs = mr.build_reference_index(db)
+    assert "u1.jpg" not in refs["uploaded_refs"]
 
 
 # ── purga de shorts ──────────────────────────────────────────────
