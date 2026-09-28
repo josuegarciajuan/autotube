@@ -5475,11 +5475,60 @@ class ExtendedDatabase(Database):
                      AND v.yt_video_id IS NOT NULL
                      AND v.thumbnail_style IS NOT NULL
                      AND v.thumbnail_style != ''
-                   GROUP BY v.thumbnail_style
+                    GROUP BY v.thumbnail_style
                    ORDER BY avg_ctr DESC""",
                 (channel_id,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    _THUMB_CTR_DIMENSIONS = {
+        "style": "thumbnail_style",
+        "layout": "thumbnail_layout",
+        "color_key": "thumbnail_color_key",
+        "variant_strategy": "thumbnail_variant_strategy",
+        "emphasis": "thumbnail_emphasis",
+    }
+
+    def get_thumbnail_ctr_by(self, channel_id: int, dimension: str = "style",
+                             min_impressions: int = 500) -> list[dict]:
+        """CTR promedio por dimensión de packaging (W7, cierra el bucle A/B).
+
+        ``dimension`` ∈ {style, layout, color_key, variant_strategy, emphasis}.
+        Solo agrega grupos con impresiones suficientes para no concluir sobre
+        muestras ruidosas. 0 coste (solo DB).
+        """
+        column = self._THUMB_CTR_DIMENSIONS.get(str(dimension))
+        if not column or not channel_id:
+            return []
+        try:
+            with self._connect() as conn:
+                conn.row_factory = sqlite3.Row
+                cols = {row[1] for row in conn.execute("PRAGMA table_info(videos)")}
+                if column not in cols:
+                    return []
+                rows = conn.execute(
+                    f"""SELECT v.{column} AS value,
+                               COUNT(*) AS videos,
+                               ROUND(AVG(vsh.ctr), 2) AS avg_ctr,
+                               SUM(vsh.impressions) AS total_impressions,
+                               SUM(vsh.views) AS total_views
+                        FROM videos v
+                        JOIN video_stats_history vsh ON vsh.id = (
+                            SELECT MAX(vsh2.id) FROM video_stats_history vsh2
+                            WHERE vsh2.video_id = v.id AND vsh2.views > 0
+                        )
+                        WHERE v.channel_id = ?
+                          AND v.yt_video_id IS NOT NULL
+                          AND v.{column} IS NOT NULL
+                          AND v.{column} != ''
+                        GROUP BY v.{column}
+                        HAVING SUM(vsh.impressions) >= ?
+                        ORDER BY avg_ctr DESC""",
+                    (channel_id, int(min_impressions)),
+                ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
 
     def insert_video_stats(self, video_id: int, yt_video_id: str, stats: dict) -> int | None:
         """Insert a snapshot of YouTube video statistics."""
