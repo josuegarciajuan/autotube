@@ -224,6 +224,16 @@ class EgressAgent:
                     except Exception:  # noqa: BLE001
                         pass
 
+    def cleanup(self, staged_path: str) -> dict:
+        """v64: pide al agente que borre el staged remoto tras una subida correcta.
+
+        Fail-open: el llamador debe envolverlo en try/except (un agente antiguo
+        sin endpoint ``/cleanup`` no debe romper la subida).
+        """
+        if not staged_path:
+            return {"ok": True, "skipped": "no_staged_path"}
+        return self._post("/cleanup", {"staged_path": staged_path})
+
     def oauth_url(self) -> str:
         data = self._post("/auth/oauth-url", {"account": self.slug})
         return data.get("auth_url", "")

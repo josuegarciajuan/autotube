@@ -110,7 +110,7 @@ def _recent_shorts(db, lookback_hours: int = RECONCILE_LOOKBACK_HOURS) -> list[d
     with db._connect() as conn:
         rows = conn.execute(
             """SELECT id, channel_id, youtube_id, status, publish_at, published_at,
-                      yt_visibility, yt_checked_at
+                      yt_visibility, yt_checked_at, media_purged_at
                FROM shorts
                WHERE youtube_id IS NOT NULL AND youtube_id != ''
                  AND status IN ('published', 'scheduled')
@@ -284,6 +284,16 @@ def reconcile_recent_shorts(db=None) -> dict:
             except Exception as exc:
                 logger.warning("Reconciler: failed to update short #%d: %s", short_id, exc)
                 summary["errors"] += 1
+
+            # ── v64: al confirmar la publicación, purgar material aún no purgado
+            # (belt-and-suspenders para rutas de subida que no limpiaron). ──
+            if vis == "public" and not s.get("media_purged_at"):
+                try:
+                    from pipeline.media_retention import purge_entity_media
+                    purge_entity_media(db, "short", short_id,
+                                       reason="reconciler_public", log=logger)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Reconciler: purge failed for short #%d: %s", short_id, exc)
 
             key = vis if vis in summary else ("errors" if vis == "error" else "unknown")
             summary[key] = summary.get(key, 0) + 1

@@ -1418,6 +1418,9 @@ def migrate_v2(db_path: str = None):
     # ── v63: atribución de estrategia A/B de miniatura (W6) ──
     _migrate_v63(conn, logger)
 
+    # ── v64: purga de material (retención 0 días) — sellos purged_at ──
+    _migrate_v64(conn, logger)
+
     conn.commit()
     conn.close()
     
@@ -3691,6 +3694,42 @@ def _migrate_v63(conn, logger):
             logger.info("Migration v63: added thumbnail_variant_strategies to video_ab_tests")
         except sqlite3.OperationalError as exc:
             logger.debug("Migration v63: could not add thumbnail_variant_strategies (%s)", exc)
+
+
+def _migrate_v64(conn, logger):
+    """Idempotent v64: sellos de purga de material (retención 0 días).
+
+    Añade ``purged_at`` a las tablas que referencian assets en disco y
+    ``media_purged_at`` a las entidades (videos/shorts). Al purgar el material
+    de una entidad ya subida se sella la fecha y se vacían las columnas de
+    ruta para no dejar referencias colgantes (las filas se conservan; los
+    ``asset_url`` quedan intactos para el dedup cross-video).
+    """
+    specs = [
+        ("video_scenes", ["purged_at"]),
+        ("video_asset_history", ["purged_at"]),
+        ("short_asset_history", ["purged_at"]),
+        ("videos", ["media_purged_at"]),
+        ("shorts", ["media_purged_at"]),
+    ]
+    for table, columns in specs:
+        try:
+            existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        except sqlite3.OperationalError:
+            logger.debug("Migration v64: table %s does not exist yet — skipping", table)
+            continue
+        if not existing:
+            logger.debug("Migration v64: table %s has no columns yet — skipping", table)
+            continue
+        for column in columns:
+            if column in existing:
+                continue
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
+                logger.info("Migration v64: added %s.%s", table, column)
+            except sqlite3.OperationalError as exc:
+                logger.debug("Migration v64: could not add %s.%s (%s)", table, column, exc)
+    conn.commit()
 
 
 def _migrate_v10(conn, logger):

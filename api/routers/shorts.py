@@ -23,6 +23,23 @@ from api.services.shorts_scheduler import _auto_link_longform_for_short
 
 logger = logging.getLogger(__name__)
 
+
+def _purge_short_after_upload(short_id: int, slug: str = "") -> None:
+    """v64: purga el material de un short ya subido (retención 0 días)."""
+    if not short_id:
+        return
+    try:
+        from config.settings import DATABASE_PATH
+        from database.db_extended import ExtendedDatabase
+        from pipeline.media_retention import purge_entity_media
+        purge_entity_media(
+            ExtendedDatabase(str(DATABASE_PATH)), "short", short_id,
+            reason="short_upload_success", log=logger,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[%s] Purga del short #%s falló: %s", slug, short_id, exc)
+
+
 router = APIRouter(prefix="/api/shorts", tags=["Shorts"])
 
 
@@ -401,6 +418,7 @@ async def publish_short(short_id: int):
             result.get("url", ""),
             short.get("file_path", ""),
         )
+        _purge_short_after_upload(short_id, ch["slug"])
         # ── Post-publish cross-promotion ──────────────
         run_post_publish_promotion(
             channel_slug=ch["slug"],
@@ -859,6 +877,7 @@ async def extract_and_publish(video_id: int):
             raise HTTPException(500, "Upload failed — no video ID returned")
 
         scheduler.mark_published(short_id, yt_id, result.get("url", ""), str(output_path))
+        _purge_short_after_upload(short_id, channel_slug)
 
         run_post_publish_promotion(
             channel_slug=channel_slug,
@@ -1195,6 +1214,8 @@ RESPONDE SOLO CON EL JSON. NADA MÁS."""
     short_id = cursor.lastrowid
     conn.commit()
     conn.close()
+
+    _purge_short_after_upload(short_id, channel_slug)
 
     # ── Anti-repetición (v58): marcar tema consumido ──
     try:

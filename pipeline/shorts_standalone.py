@@ -323,6 +323,15 @@ def run_standalone_short(
         if result and result.get("short_id"):
             logger.info("[standalone] ✅ Short published: %s → %s",
                         title[:40], result.get("url", ""))
+            # ── v64: Retención 0 días — purgar el material del short subido ──
+            try:
+                from database.db_extended import ExtendedDatabase as _EDB_pg
+                from config.settings import DATABASE_PATH as _DBP_pg
+                from pipeline.media_retention import purge_entity_media as _purge_pg
+                _purge_pg(_EDB_pg(str(_DBP_pg)), "short", result["short_id"],
+                          reason="standalone_upload_success", log=logger)
+            except Exception as _purge_so:
+                logger.warning("[standalone] purga del short falló: %s", _purge_so)
             # ── Anti-repetición (v58): marcar tema consumido ──
             try:
                 from database.db_extended import ExtendedDatabase as _EDB_up

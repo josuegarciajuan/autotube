@@ -4603,6 +4603,15 @@ def _generate_and_publish_native_short(channel_id: int, channel_slug: str, db=No
         conn.commit()
         conn.close()
 
+        # ── v64: Retención 0 días — purgar el material del short subido ──
+        try:
+            from pipeline.media_retention import purge_entity_media
+            purge_entity_media(dbx, "short", short_id,
+                               reason="short_upload_success", log=logger)
+        except Exception as _purge_err:
+            logger.warning("[%s] Purga del short #%d falló: %s",
+                           channel_slug, short_id, _purge_err)
+
         # ── Anti-repetición (v58): marcar tema consumido ──
         try:
             dbx.mark_topic_consumed(channel_id, (topic or title), "native_short", short_id)

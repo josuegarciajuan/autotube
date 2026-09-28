@@ -155,6 +155,27 @@ def main() -> int:
         shorts_deleted = 0
         _line(f"\n[5] ERROR: {e}")
 
+    # ── 5b. Espacio en disco ───────────────────────────────────
+    disk_free_gb = -1.0
+    output_gb = 0.0
+    try:
+        import shutil as _shutil
+        _du = _shutil.disk_usage(str(PROJECT_ROOT))
+        disk_free_gb = _du.free / (1024 ** 3)
+        _total_gb = _du.total / (1024 ** 3)
+        _line(f"\n[5b] Disco /: {disk_free_gb:.1f} GB libres de {_total_gb:.1f} GB "
+              f"({disk_free_gb / _total_gb * 100:.0f}% libre)")
+        try:
+            _out = PROJECT_ROOT / "output"
+            output_gb = sum(
+                f.stat().st_size for f in _out.rglob("*") if f.is_file()
+            ) / (1024 ** 3)
+            _line(f"     output/: {output_gb:.1f} GB")
+        except Exception:
+            pass
+    except Exception as e:
+        _line(f"\n[5b] ERROR disco: {e}")
+
     # ── 6. Crear alertas críticas ──────────────────────────────
     _line("\n" + "-" * 70)
     _line("ALERTAS")
@@ -200,6 +221,21 @@ def main() -> int:
                    "Proyecto(s): " + ", ".join(quota_warn_projects))
         else:
             _line("  ✓ cuota por proyecto bajo control")
+
+        # Disco bajo (v64)
+        try:
+            from config.settings import DISK_FREE_WARN_GB as _disk_warn
+        except Exception:
+            _disk_warn = 30
+        if 0 <= disk_free_gb < _disk_warn:
+            _alert("disk_space_low", "critical",
+                   f"Disco bajo: {disk_free_gb:.1f} GB libres",
+                   f"/ con {disk_free_gb:.1f} GB libres (< {_disk_warn} GB). "
+                   f"output/ = {output_gb:.1f} GB. Revisar "
+                   f"scripts/cleanup_residuals_batch.py (dry-run) y purgar huérfanos.")
+        elif disk_free_gb >= 0:
+            _resolve("disk_space_low", "espacio recuperado")
+            _line(f"  ✓ disco ok ({disk_free_gb:.1f} GB libres)")
 
         # Upload stalled
         # No es un estancamiento real si aún quedan vídeos awaiting_upload

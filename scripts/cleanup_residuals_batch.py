@@ -1,41 +1,44 @@
 #!/usr/bin/env python3
-"""Batch cleanup: delete residual files from already-uploaded videos.
+"""Batch media reclamation — retención 0 días + barrido retroactivo.
 
-Deletes for every uploaded/published video:
-  - MP3 narration + CTA audio + derived CTA files (timestamps, subtitles)
-  - All scene assets (images, video clips, AI scenes) referenced in video_scenes
-  - MP4 video files still lingering on disk
+Dos modos, combinables:
 
-Preserves:
-  - Main narration SRT subtitles + timestamps JSON (SEO value, analysis)
-  - Thumbnails (panel display)
+1. **Purga de entidades subidas** (``--entity-videos`` / ``--entity-shorts``):
+   borra el material pesado de cada vídeo/short confirmado como subido
+   (mp4, audio/CTA, escenas + .pollo.json, assets de short_asset_history).
+   Preserva thumbnails y el SRT/timestamps principal.
 
-Usage:
-  python3 scripts/cleanup_residuals_batch.py              # Dry-run (preview only)
-  python3 scripts/cleanup_residuals_batch.py --execute    # Execute deletion
-  python3 scripts/cleanup_residuals_batch.py --execute --populate-history  # Also fill history table
-  python3 scripts/cleanup_residuals_batch.py --canal canal2   # Single channel only
+2. **Barrido de huérfanos** (``--orphans``): borra archivos que no referencia
+   ninguna entidad, no están bloqueados por un job activo y superan
+   ``--min-age-hours``.
+
+Seguridad:
+  * nunca borra material de vídeos/shorts NO subidos,
+  * nunca borra assets compartidos que otra entidad pendiente referencia,
+  * nunca borra archivos en ``media_file_locks`` ni de vídeos en ``error``
+    recientes (reensamblado),
+  * nunca borra thumbnails ni SRT/timestamps principal.
+
+Uso:
+  python3 scripts/cleanup_residuals_batch.py                  # dry-run de todo
+  python3 scripts/cleanup_residuals_batch.py --orphans        # dry-run huérfanos
+  python3 scripts/cleanup_residuals_batch.py --entity-videos  # dry-run long-forms
+  python3 scripts/cleanup_residuals_batch.py --execute --orphans --category audio
+  python3 scripts/cleanup_residuals_batch.py --execute --json-out /tmp/manifest.json
 """
 
 import argparse
 import json
-import os
-import re
 import sys
 from pathlib import Path
 
-# Ensure autotube root is on the path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from database.db_extended import ExtendedDatabase
-from pipeline.cleanup_utils import (
-    cleanup_video_residuals,
-    _extract_paths_from_image_path,
-)
+from database.db_extended import ExtendedDatabase  # noqa: E402
+from pipeline import media_retention as mr  # noqa: E402
 
 
-def format_size(bytes_val: int) -> str:
-    """Human-readable size."""
+def format_size(bytes_val: float) -> str:
     for unit in ["B", "KB", "MB", "GB"]:
         if abs(bytes_val) < 1024.0:
             return f"{bytes_val:.1f} {unit}"
@@ -43,255 +46,161 @@ def format_size(bytes_val: int) -> str:
     return f"{bytes_val:.1f} TB"
 
 
-def count_existing_videos(db) -> int:
-    """Count videos that have been uploaded to YouTube."""
-    videos = db._connect().execute(
-        """SELECT COUNT(*) as cnt FROM videos
-           WHERE yt_video_id IS NOT NULL
-             AND status IN ('uploaded', 'uploaded_private', 'published')"""
-    ).fetchone()
-    return videos["cnt"] if videos else 0
+def _uploaded_videos(db, canal=None):
+    q = ("SELECT v.id FROM videos v LEFT JOIN channels c ON v.channel_id=c.id "
+         "WHERE v.yt_video_id IS NOT NULL AND v.yt_video_id != ''")
+    params = ()
+    if canal:
+        q += " AND c.slug = ?"
+        params = (canal,)
+    return [r["id"] for r in db._connect().execute(q, params).fetchall()]
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Batch cleanup of residual files from uploaded videos"
-    )
-    parser.add_argument(
-        "--execute", action="store_true",
-        help="Execute deletion (default: dry-run preview only)",
-    )
-    parser.add_argument(
-        "--populate-history", action="store_true",
-        help="Also populate video_asset_history from video_scenes data",
-    )
-    parser.add_argument(
-        "--canal", type=str, default=None,
-        help="Limit to a single channel slug (e.g., canal2)",
-    )
-    parser.add_argument(
-        "--skip-mp3", action="store_true",
-        help="Skip MP3/CTA audio deletion",
-    )
-    args = parser.parse_args()
+def _uploaded_shorts(db, canal=None):
+    q = ("SELECT s.id FROM shorts s LEFT JOIN channels c ON s.channel_id=c.id "
+         "WHERE s.youtube_id IS NOT NULL AND s.youtube_id != ''")
+    params = ()
+    if canal:
+        q += " AND c.slug = ?"
+        params = (canal,)
+    return [r["id"] for r in db._connect().execute(q, params).fetchall()]
+
+
+def _purge_entities(db, kind, ids, dry_run, refs, locked):
+    report = {"kind": kind, "count": len(ids), "freed_bytes": 0,
+              "files": 0, "errors": 0, "skipped_protected": 0}
+    paths = set()
+    for entity_id in ids:
+        r = mr.purge_entity_media(
+            db, kind, entity_id, reason="retro_batch",
+            dry_run=dry_run, refs=refs, locked=locked,
+        )
+        report["freed_bytes"] += r.get("freed_bytes", 0)
+        file_list = (r.get("deleted") or []) if not dry_run else (r.get("would_delete") or [])
+        report["files"] += len(file_list)
+        paths.update(file_list)
+        report["errors"] += len(r.get("errors", []))
+        report["skipped_protected"] += len(r.get("skipped_protected", []))
+    return report, paths
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Media reclamation (retención 0 días)")
+    ap.add_argument("--execute", action="store_true",
+                    help="Borrar de verdad (por defecto: dry-run)")
+    ap.add_argument("--entity-videos", action="store_true",
+                    help="Purgar material de vídeos subidos")
+    ap.add_argument("--entity-shorts", action="store_true",
+                    help="Purgar material de shorts subidos")
+    ap.add_argument("--orphans", action="store_true",
+                    help="Barrer archivos huérfanos")
+    ap.add_argument("--canal", type=str, default=None,
+                    help="Limitar a un canal (slug)")
+    ap.add_argument("--category", action="append", default=None,
+                    help="Categoría de huérfanos (repetible). Def: todas")
+    ap.add_argument("--min-age-hours", type=float, default=24.0,
+                    help="Guard de antigüedad para huérfanos (def: 24h)")
+    ap.add_argument("--json-out", type=str, default=None,
+                    help="Escribir manifiesto JSON")
+    args = ap.parse_args()
+
+    # Si no se elige modo, hacer todo.
+    if not (args.entity_videos or args.entity_shorts or args.orphans):
+        args.entity_videos = args.entity_shorts = args.orphans = True
 
     dry_run = not args.execute
     db = ExtendedDatabase()
 
-    if dry_run:
-        print("=" * 60)
-        print("  DRY RUN — no files will be deleted")
-        print("  Add --execute to actually delete files")
-        print("=" * 60)
+    print("=" * 64)
+    print(f"  MEDIA RECLAMATION — {'DRY RUN (sin borrar)' if dry_run else 'EXECUTE'}")
+    print("=" * 64)
 
-    # ── Find uploaded videos ─────────────────────────────────
-    conn = db._connect()
-    query = """SELECT v.id, v.yt_video_id, v.audio_path, v.video_path,
-                      v.titulo_final, v.status, v.checkpoint_data,
-                      c.slug as canal_slug
-               FROM videos v
-               LEFT JOIN channels c ON v.channel_id = c.id
-               WHERE v.yt_video_id IS NOT NULL
-                 AND v.status IN ('uploaded', 'uploaded_private', 'published')"""
-    params = ()
-    if args.canal:
-        query += " AND c.slug = ?"
-        params = (args.canal,)
-    query += " ORDER BY v.id"
+    refs = mr.build_reference_index(db)
+    locked = mr._locked_basenames(db)
+    print(f"Referencias: {len(refs['all_refs'])} | "
+          f"protegidas (entidades pendientes): {len(refs['protected_refs'])} | "
+          f"bloqueadas: {len(locked)}")
+    print()
 
-    rows = conn.execute(query, params).fetchall()
-
-    if not rows:
-        print("No uploaded videos found.")
-        return
-
-    print(f"\nFound {len(rows)} uploaded videos.\n")
+    manifest = {"dry_run": dry_run, "refs": {
+        "all": len(refs["all_refs"]),
+        "protected": len(refs["protected_refs"]),
+        "locked": len(locked),
+    }}
 
     total_freed = 0
-    total_files_deleted = 0
-    total_history_inserted = 0
-    videos_processed = 0
-    errors = 0
+    entity_paths: set = set()
+    sweep_paths: dict = {}
 
-    for row in rows:
-        video_id = row["id"]
-        canal = row["canal_slug"] or "?"
-        yt_id = row["yt_video_id"] or "?"
-        title = (row["titulo_final"] or "?")[:50]
+    if args.entity_videos:
+        ids = _uploaded_videos(db, args.canal)
+        print(f"── Vídeos subidos a purgar: {len(ids)}")
+        vrep, vpaths = _purge_entities(db, "video", ids, dry_run, refs, locked)
+        entity_paths |= vpaths
+        total_freed += vrep["freed_bytes"]
+        print(f"   {format_size(vrep['freed_bytes'])} en {vrep['files']} archivos "
+              f"(protegidos: {vrep['skipped_protected']}, errores: {vrep['errors']})")
+        manifest["videos"] = vrep
 
-        try:
-            if not dry_run or not args.skip_mp3:
-                # Check audio_path from DB
-                audio_path = row["audio_path"] or ""
+    if args.entity_shorts:
+        ids = _uploaded_shorts(db, args.canal)
+        print(f"── Shorts subidos a purgar: {len(ids)}")
+        srep, spaths = _purge_entities(db, "short", ids, dry_run, refs, locked)
+        entity_paths |= spaths
+        total_freed += srep["freed_bytes"]
+        print(f"   {format_size(srep['freed_bytes'])} en {srep['files']} archivos "
+              f"(protegidos: {srep['skipped_protected']}, errores: {srep['errors']})")
+        manifest["shorts"] = srep
 
-                # Extract checkpoint CTA
-                cp_raw = row["checkpoint_data"] or "{}"
-                cta_path = ""
-                try:
-                    cp = json.loads(cp_raw) if isinstance(cp_raw, str) else cp_raw
-                    cta_path = cp.get("tts", {}).get("cta_audio_path", "")
-                except (json.JSONDecodeError, TypeError):
-                    pass
+    if args.orphans:
+        print(f"── Huérfanos (min-age {args.min_age_hours}h, categorías: "
+              f"{args.category or 'todas'})")
+        plan = mr.classify_reclaim(db, args.category, args.min_age_hours)
+        for cat, info in plan["categories"].items():
+            print(f"   {cat:24s} total={format_size(info['bytes']):>10s} "
+                  f"reclaim={format_size(info['reclaim_bytes']):>10s} "
+                  f"({info['reclaim_files']}/{info['files']} files)")
+        manifest["orphans_classify"] = plan
+        if dry_run:
+            sweep_paths = mr.plan_reclaim_paths(db, args.category, args.min_age_hours)
+            manifest["orphans_planned"] = {
+                "files": len(sweep_paths),
+                "bytes": sum(sweep_paths.values()),
+            }
+        else:
+            orep = mr.purge_orphans(db, args.category, args.min_age_hours, dry_run=False)
+            total_freed += orep["freed_bytes"]
+            manifest["orphans"] = orep
+            print(f"   Liberado: {format_size(orep['freed_bytes'])}")
 
-                audio_data = {"audio_path": audio_path, "cta_audio_path": cta_path}
-
-            if dry_run:
-                # Estimate
-                freed = _estimate_freed(db, video_id, row)
-                total_freed += freed
-                print(f"  [#{video_id}] {canal} | {yt_id[:11]}... | {title}")
-                if freed > 0:
-                    print(f"          ~{format_size(freed)} to free")
-                else:
-                    print(f"          (nothing to clean)")
-            else:
-                freed = cleanup_video_residuals(
-                    db, video_id,
-                    audio_data=audio_data if not args.skip_mp3 else None,
-                )
-                total_freed += freed
-                videos_processed += 1
-                print(f"  [#{video_id}] {canal} | {yt_id[:11]}... | {title}")
-                print(f"          Freed {format_size(freed)}")
-
-            # ── Populate history table ──────────────────────────
-            if args.populate_history and not dry_run:
-                inserted = _populate_history_from_scenes(db, video_id)
-                total_history_inserted += inserted
-
-        except Exception as exc:
-            errors += 1
-            print(f"  [#{video_id}] ERROR: {exc}")
-
-    # ── Summary ──────────────────────────────────────────────
-    print()
-    print("=" * 60)
     if dry_run:
-        print(f"  DRY RUN SUMMARY")
-        print(f"  Videos with residuals: {videos_processed} of {len(rows)}")
-        print(f"  Estimated space to free: {format_size(total_freed)}")
-    else:
-        print(f"  CLEANUP COMPLETE")
-        print(f"  Videos processed: {videos_processed}")
-        print(f"  Errors: {errors}")
-        print(f"  Total space freed: {format_size(total_freed)}")
-        if args.populate_history:
-            print(f"  History records inserted: {total_history_inserted}")
-    print("=" * 60)
-
-
-def _estimate_freed(db, video_id: int, row) -> int:
-    """Estimate space that would be freed (for dry-run reporting)."""
-    freed = 0
-    project_root = Path(__file__).resolve().parent.parent
-
-    # MP3 audio
-    ap = row["audio_path"] or ""
-    if ap:
-        p = project_root / ap
-        if p.exists():
-            freed += p.stat().st_size
-
-    # CTA audio from checkpoint
-    cp_raw = row["checkpoint_data"] or "{}"
-    try:
-        cp = json.loads(cp_raw) if isinstance(cp_raw, str) else cp_raw
-        cta = cp.get("tts", {}).get("cta_audio_path", "")
-        if cta:
-            p = project_root / cta
-            if p.exists():
-                freed += p.stat().st_size
-    except Exception:
-        pass
-
-    # MP4 if still lingering
-    vp = row["video_path"] or ""
-    if vp:
-        p = project_root / vp
-        if p.exists():
-            freed += p.stat().st_size
-
-    # Scene assets
-    try:
-        scenes = db.get_scenes(video_id)
-        for scene in scenes:
-            image_path = scene.get("image_path", "")
-            paths = _extract_paths_from_image_path(image_path)
-            for fp in paths:
-                p = project_root / fp
-                if p.exists():
-                    freed += p.stat().st_size
-    except Exception:
-        pass
-
-    return freed
-
-
-def _populate_history_from_scenes(db, video_id: int) -> int:
-    """Populate video_asset_history from video_scenes data.
-
-    Parses image_path to extract source and relative path, then
-    inserts records that were missed by the new cross-video dedup system.
-    """
-    inserted = 0
-    try:
-        scenes = db.get_scenes(video_id)
-        project_root = Path(__file__).resolve().parent.parent
-
-        for scene in scenes:
-            image_path = scene.get("image_path", "")
-            paths = _extract_paths_from_image_path(image_path)
-            for fp in paths:
-                # Parse source from filename
-                # e.g., output/images/pixabay_photo_123456.jpg → pixabay_photo
-                # or output/video_clips/pexels_abc123.mp4 → pexels_video
-                p = Path(fp)
-                stem = p.stem
-                # Determine source type from directory and filename pattern
-                if "video_clips" in fp:
-                    # Filename: pexels_abc123.mp4 → source = pexels_video
-                    parts = stem.split("_", 1)
-                    source = f"{parts[0]}_video" if parts else "unknown_video"
-                elif "ai_scenes" in fp:
-                    source = "pollo_ai"
-                elif "images" in fp:
-                    # Filename: pixabay_photo_123456.jpg
-                    # or unsplash_123456.jpg
-                    if stem.startswith("pixabay_photo_"):
-                        source = "pixabay_photo"
-                    elif stem.startswith("pexels_photo_"):
-                        source = "pexels_photo"
-                    elif stem.startswith("unsplash_"):
-                        source = "unsplash"
-                    else:
-                        source = "unknown_image"
-                else:
-                    source = "unknown"
-
-                # Normalize path to relative
-                if p.is_absolute():
-                    try:
-                        rel = p.relative_to(project_root).as_posix()
-                    except ValueError:
-                        rel = str(p)
-                else:
-                    rel = str(p)
-
+        # Manifiesto honesto: unión de material de entidades + barrido, sin
+        # doble conteo. El total único es lo que se liberaría ejecutando ambos.
+        union: dict[str, int] = dict(sweep_paths)
+        for p in entity_paths:
+            union.setdefault(p, 0)
+        # sizes for entity-only paths
+        for p in entity_paths:
+            if union.get(p, 0) == 0:
                 try:
-                    db.insert_asset_history(
-                        video_id=video_id,
-                        file_path=rel,
-                        source=source,
-                        asset_url="",
-                    )
-                    inserted += 1
-                except Exception:
-                    pass
-    except Exception:
-        pass
+                    union[p] = Path(p).stat().st_size
+                except OSError:
+                    union[p] = 0
+        unique_bytes = sum(union.values())
+        manifest["unique_reclaim"] = {"files": len(union), "bytes": unique_bytes}
+        total_freed = unique_bytes
 
-    return inserted
+    print()
+    print("=" * 64)
+    print(f"  Total {'a liberar (único)' if dry_run else 'liberado'}: {format_size(total_freed)}")
+    print("=" * 64)
+
+    if args.json_out:
+        Path(args.json_out).write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
+        print(f"Manifiesto: {args.json_out}")
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

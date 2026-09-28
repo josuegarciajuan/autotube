@@ -536,6 +536,16 @@ async def lifespan(app: FastAPI):
         else asyncio.create_task(_playwright_reaper_loop())
     )
 
+    # ── Retención de material (v64): barrido periódico de huérfanos ──
+    # Complementa la purga post-subida. 0 cuota, no toca jobs activos ni
+    # material pendiente. Kill-switch: MEDIA_RETENTION_SWEEP_ENABLED=false.
+    from config import settings as _settings_mr
+    media_retention_task = (
+        _supervised_loop("media_retention", _media_retention_loop)
+        if getattr(_settings_mr, "MEDIA_RETENTION_SWEEP_ENABLED", True)
+        else asyncio.create_task(_media_retention_loop())
+    )
+
     yield
     
     # Shutdown
@@ -557,6 +567,7 @@ async def lifespan(app: FastAPI):
         editorial_reviews_task,
         ia_mark_reconcile_task,
         playwright_reaper_task,
+        media_retention_task,
     ]
     if _startup_tasks is not None:
         _shutdown_tasks.append(_startup_tasks)
@@ -918,6 +929,51 @@ async def _yt_state_reconcile_loop():
             logger.warning("YT state reconcile error: %s", exc)
 
         await asyncio.sleep(300)  # Every 5 minutes
+
+
+async def _media_retention_loop():
+    """Background loop (v64): barrido periódico de material huérfano.
+
+    Complementa la purga post-subida (retención 0 días). Borra solo archivos
+    que ninguna entidad referencia (ni subida ni pendiente), no bloqueados y
+    con antigüedad > MEDIA_RETENTION_MIN_AGE_HOURS. Kill-switch:
+    MEDIA_RETENTION_SWEEP_ENABLED=false.
+    """
+    import asyncio, logging
+    logger = logging.getLogger("autotube.media_retention")
+    from config import settings as _settings
+
+    await asyncio.sleep(300)  # Let API + other loops stabilize first
+
+    # Kill-switch resuelto en arranque (requiere reinicio para cambiar).
+    if not getattr(_settings, "MEDIA_RETENTION_SWEEP_ENABLED", True):
+        logger.info("Media retention sweep disabled (MEDIA_RETENTION_SWEEP_ENABLED=false)")
+        return
+
+    while True:
+        try:
+            from api.services.lifecycle_monitor import touch_task_heartbeat as _tth
+            _tth("media_retention")
+            from database.db_extended import ExtendedDatabase
+            from pipeline.media_retention import purge_orphans
+            min_age = getattr(_settings, "MEDIA_RETENTION_MIN_AGE_HOURS", 6)
+            # Hard cap 600s < 900s del watchdog; el sweep es idempotente.
+            report = await asyncio.wait_for(
+                asyncio.to_thread(
+                    purge_orphans, ExtendedDatabase(), None, min_age, False,
+                ),
+                timeout=600,
+            )
+            if report.get("freed_bytes", 0) > 0:
+                logger.info(
+                    "Media retention sweep freed %.2f GB (%s)",
+                    report["freed_bytes"] / (1024 ** 3),
+                    report.get("categories"),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Media retention sweep error: %s", exc)
+
+        await asyncio.sleep(getattr(_settings, "MEDIA_RETENTION_SWEEP_INTERVAL_S", 21600))
 
 
 async def _ia_mark_reconcile_loop():

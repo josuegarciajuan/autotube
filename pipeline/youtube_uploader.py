@@ -1095,6 +1095,12 @@ class YouTubeUploader:
                 if not agent_res.get("ok"):
                     raise RuntimeError(agent_res.get("error", "subida vía agente falló"))
                 self._update_egress_transfer_state(video_path, "done")
+                # ── v64: borrar el staged remoto tras subida correcta (fail-open) ──
+                try:
+                    _egress_client.cleanup(_staged_path)
+                except Exception as _cl_exc:  # noqa: BLE001
+                    logger.debug("[%s] egress staged cleanup skipped: %s",
+                                 self.channel_slug, _cl_exc)
                 response = {
                     "id": agent_res["video_id"],
                     "status": {"uploadStatus": "processed",

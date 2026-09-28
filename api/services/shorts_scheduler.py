@@ -5348,11 +5348,21 @@ def _upload_queued_short(short_record: dict, db=None, force_immediate: bool = Fa
                 ).start()
         except Exception as e_link:
             logger.warning("[%s] Failed to trigger longform link: %s", slug, e_link)
-        try:
-            Path(file_path).unlink(missing_ok=True)
-            logger.info("Deleted queued clip MP4 after upload: %s", file_path)
-        except Exception:
-            pass
+    # ── v64: Retención 0 días — purga del material del short (native y clip) ──
+    # Borra el MP4 del short + assets de short_asset_history (preserva thumbnail).
+    try:
+        from pipeline.media_retention import purge_entity_media
+        _purge_report = purge_entity_media(
+            db, "short", short_id, reason="short_upload_success", log=logger,
+        )
+        if _purge_report.get("errors"):
+            logger.warning(
+                "[%s] Purga del short #%d con errores: %s",
+                slug, short_id, _purge_report["errors"][:3],
+            )
+    except Exception as _purge_err:
+        logger.warning("[%s] Purga de material del short #%d falló: %s",
+                       slug, short_id, _purge_err)
 
     # Cross-promote (source_yt_id para clips)
     try:

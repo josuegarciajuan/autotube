@@ -2008,20 +2008,28 @@ def run_job(
                             _pre_render_err, {"stage": "post_upload"},
                         )
 
-                if vp and Path(vp).exists():
-                    try:
-                        Path(vp).unlink()
-                        db.update_video(video_id, video_path="")
-                        logger.info("Deleted local mp4: %s", vp)
-                    except Exception:
-                        pass
-
-                # ── Clean up residual files (v9): audio + scene assets ──
+                # ── v64: Retención 0 días — purga central tras subida correcta ──
+                # Borra mp4 + audio + escenas (preserva thumbnail + SRT principal).
+                # Ya no se silencian los fallos: se loguean y se alerta.
                 try:
-                    from pipeline.cleanup_utils import cleanup_video_residuals
-                    cleanup_video_residuals(db, video_id, audio_data=audio_data, log=logger)
-                except Exception:
-                    pass
+                    from pipeline.media_retention import purge_entity_media
+                    _purge_report = purge_entity_media(
+                        db, "video", video_id, reason="upload_success", log=logger,
+                    )
+                    if _purge_report.get("errors"):
+                        logger.warning(
+                            "[%s] Purga de material con errores para video %d: %s",
+                            canal, video_id, _purge_report["errors"][:3],
+                        )
+                except Exception as _purge_err:
+                    logger.warning(
+                        "[%s] Purga de material falló para video %d: %s",
+                        canal, video_id, _purge_err,
+                    )
+                    _alert_nonfatal(
+                        db, video_id, channel_id, "media_purge",
+                        _purge_err, {"stage": "post_upload"},
+                    )
                 
                 # ── Post-upload: real YouTube stats snapshot ──
                 try:
