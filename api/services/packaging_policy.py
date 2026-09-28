@@ -15,6 +15,7 @@ from pipeline.title_tokens import (
     has_dangling_tail,
     has_unbalanced_punctuation,
     is_all_caps,
+    is_complete_title,
     uppercase_words,
 )
 
@@ -49,6 +50,11 @@ def validate_title(title: str, config) -> ValidationResult:
     if contains_banned_token(text):
         reasons.append("banned_token")
     if has_dangling_tail(text):
+        reasons.append("incomplete_phrase")
+    # W1: a title that ends in an aperture verb or hanging adverb is a
+    # mid-phrase cut even when no connector is present ("...aún no logra").
+    complete, _reason = is_complete_title(text)
+    if not complete and _reason in {"aperture_verb", "dangling_adverb"}:
         reasons.append("incomplete_phrase")
     if "|" in text or "[" in text or "]" in text:
         reasons.append("injected_suffix")
@@ -162,6 +168,36 @@ def validate_thumbnail_file(path, min_width: int = 640, min_height: int = 360) -
     return ValidationResult(not reasons, tuple(reasons))
 
 
+def validate_packaging_coherence(video: dict, config) -> ValidationResult:
+    """Title ↔ thumbnail overlay coherence (W3).
+
+    Uses the persisted OverlaySpec fields so the text that is validated is the
+    text that was painted. Legacy rows (no ``thumbnail_overlay_source``) are
+    tolerated by :func:`validate_video_packaging`.
+    """
+    try:
+        from pipeline.packaging_brief import (
+            OverlaySpec,
+            split_overlay_text,
+            validate_overlay_spec,
+        )
+    except Exception:  # pragma: no cover - defensive
+        return ValidationResult(True, ())
+
+    title = video.get("titulo_final", "") or ""
+    l1, l2 = split_overlay_text(video.get("thumbnail_text", ""))
+    spec = OverlaySpec(
+        l1=l1,
+        l2=l2,
+        badge=video.get("thumbnail_badge_text", "") or "",
+        emphasis=video.get("thumbnail_emphasis", "") or "",
+        variant_strategy=video.get("thumbnail_variant_strategy", "") or "",
+        source=video.get("thumbnail_overlay_source", "") or "",
+    )
+    reasons, _warnings = validate_overlay_spec(spec, title, config)
+    return ValidationResult(not reasons, tuple(dict.fromkeys(reasons)))
+
+
 def validate_video_packaging(video: dict, config) -> ValidationResult:
     """Final upload gate for title, overlay, and rendered thumbnail."""
     results = [validate_title(video.get("titulo_final", ""), config)]
@@ -169,6 +205,12 @@ def validate_video_packaging(video: dict, config) -> ValidationResult:
         video.get("thumbnail_text", ""),
         int(getattr(config, "THUMBNAIL_MAX_OVERLAY_CHARS", 32)),
     ))
+    results.append(validate_packaging_coherence(video, config))
     results.append(validate_thumbnail_file(video.get("thumbnail_path", "")))
     reasons = tuple(dict.fromkeys(r for result in results for r in result.reasons))
+    # Backward compat: a legacy row with no persisted overlay source only ever
+    # reports overlay_empty. Do not stall pre-W3 pending videos; the generation
+    # path always sets thumbnail_overlay_source for new ones.
+    if reasons == ("overlay_empty",) and not video.get("thumbnail_overlay_source"):
+        return ValidationResult(True, ())
     return ValidationResult(not reasons, reasons)

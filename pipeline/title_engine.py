@@ -29,6 +29,7 @@ from pipeline.title_tokens import (
     contains_banned_token,
     has_dangling_tail,
     is_all_caps,
+    is_complete_title,
     normalize,
     uppercase_words,
 )
@@ -191,11 +192,14 @@ def _to_one_word_caps(text: str) -> str:
     return base
 
 
-def apply_caps_policy(title: str, config) -> str:
-    """Apply ``TITLE_CAPS_POLICY`` deterministically and word-truncate.
+def apply_caps_policy(title: str, config, *, truncate: bool = True) -> str:
+    """Apply ``TITLE_CAPS_POLICY`` deterministically.
 
     Policies: ``sentence`` (default), ``title_case``, ``one_word_caps``.
-    Always removes ``|``/``[``/``]`` and truncates at a word boundary.
+    Always removes ``|``/``[``/``]``. When ``truncate`` is True (default,
+    legacy behaviour) it also word-truncates to ``TITLE_MAX_CHARS``. The
+    TitleEngine calls it with ``truncate=False`` so a candidate is either
+    complete or rejected — never cut mid-phrase (W1 packaging).
     """
     policy = str(getattr(config, "TITLE_CAPS_POLICY", "sentence") or "sentence").lower()
     text = _remove_injected_markers(title)
@@ -209,6 +213,8 @@ def apply_caps_policy(title: str, config) -> str:
         text = _to_one_word_caps(text)
     else:
         text = _to_sentence_case(text)
+    if not truncate:
+        return text
     hard_max = int(getattr(config, "TITLE_MAX_CHARS", 100) or 100)
     return truncate_title_at_word(text, hard_max)
 
@@ -230,20 +236,57 @@ def _parse_json_list(raw) -> list[str]:
     return [str(x).strip() for x in parsed if isinstance(x, (str, int, float)) and str(x).strip()]
 
 
-def deterministic_fallback_title(script: dict, config) -> str:
-    """Return a complete, grammatical fallback title (never a broken suffix)."""
+def _channel_fallback_phrase(config) -> str:
+    """Channel-specific closure for the deterministic fallback.
+
+    Before W1 every channel converged on the same generic
+    "la historia que cambió el caso" whenever validation rejected candidates,
+    which amplified the "repetitive/template" signal the reach experiment is
+    fighting. The phrase now derives from the channel narrative.
+    """
+    explicit = str(getattr(config, "TITLE_FALLBACK_PHRASE", "") or "").strip()
+    if explicit:
+        return explicit
+    narrative = str(getattr(config, "CANAL_NARRATIVE_STYLE", "") or "").lower()
+    if "medic" in narrative or "clinic" in narrative:
+        return "la pregunta clínica que aún no tiene respuesta"
+    if "arqueolog" in narrative or "civiliz" in narrative:
+        return "el hallazgo que la historia aún no sabe explicar"
+    if "superviven" in narrative or "expedic" in narrative:
+        return "lo que ocurrió cuando ya no había vuelta atrás"
+    if "asombro" in narrative or "sincron" in narrative:
+        return "la coincidencia que nadie ha podido explicar"
+    return "la historia que todavía no tiene explicación"
+
+
+def deterministic_fallback_title(script: dict, config, keyword_plan=None) -> str:
+    """Return a complete, grammatical fallback title within the hard budget.
+
+    Never mutates via truncation: if the keyword+phrase form does not fit, the
+    complete phrase alone is used; if even that does not fit, a short generic
+    complete title is returned (W1 packaging).
+    """
     script = script or {}
-    keywords = _parse_json_list(script.get("keywords") or script.get("keywords_json"))
-    keyword = keywords[0] if keywords else str(
-        getattr(config, "SEO_PRIMARY_KEYWORD", "") or ""
-    ).strip()
+    keyword = ""
+    if keyword_plan is not None:
+        keyword = str(getattr(keyword_plan, "primary", "") or "").strip()
+    if not keyword:
+        keywords = _parse_json_list(script.get("keywords") or script.get("keywords_json"))
+        keyword = keywords[0] if keywords else str(
+            getattr(config, "SEO_PRIMARY_KEYWORD", "") or ""
+        ).strip()
+
+    phrase = _channel_fallback_phrase(config)
+    hard_max = int(getattr(config, "TITLE_MAX_CHARS", 65) or 65)
+    candidates = []
     if keyword:
-        base = f"{keyword[:1].upper() + keyword[1:]}: la historia que cambió el caso"
-    else:
-        base = "La historia que cambió todo: un caso sin resolver"
-    if contains_banned_token(base) or has_dangling_tail(base):
-        return "La historia que cambió todo: un caso sin resolver"
-    return base
+        candidates.append(f"{keyword[:1].upper() + keyword[1:]}: {phrase}")
+    candidates.append(phrase[:1].upper() + phrase[1:])
+    for cand in candidates:
+        if (len(cand) <= hard_max and is_complete_title(cand)[0]
+                and not contains_banned_token(cand)):
+            return cand
+    return "Un caso sin explicación"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -279,16 +322,19 @@ def _primary_keyword(script: dict, config) -> str:
     return str(getattr(config, "SEO_PRIMARY_KEYWORD", "") or "").strip()
 
 
-def score_title(title: str, script: dict, config) -> tuple[int, dict]:
-    """Deterministic 7-criterion rubric (0-14) plus penalties.
+def score_title(title: str, script: dict, config, keyword_plan=None) -> tuple[int, dict]:
+    """Deterministic rubric (search-intent aware) plus penalties.
 
     Returns ``(final_score, breakdown)`` where ``breakdown`` contains each
-    criterion, the penalty map, and the totals.
+    criterion, the penalty map, and the totals. ``keyword_plan`` (W2) adds the
+    real search-demand dimensions ``search_intent`` and ``searchable_entity``.
     """
     text = " ".join(str(title or "").split())
     words = text.split()
     first_norm = normalize(words[0]).strip("¿?¡!.,;:()«»\"'") if words else ""
     norm = normalize(text)
+    proper = _proper_nouns(text)
+    has_fact = _has_number_or_year(text)
 
     # 1. Subject clarity — reject empty demonstratives ("Esto/Esta/Estos").
     if not text:
@@ -315,6 +361,33 @@ def score_title(title: str, script: dict, config) -> tuple[int, dict]:
         else:
             keyword_front = 0
 
+    # 2b. Search intent (W2) — the planned real query is present and front.
+    plan_primary = ""
+    if keyword_plan is not None:
+        plan_primary = str(getattr(keyword_plan, "primary", "") or "").strip()
+    if not plan_primary:
+        search_intent = 1
+    else:
+        plan_norm = normalize(plan_primary)
+        idx = norm.find(plan_norm)
+        if idx != -1 and idx <= 50:
+            search_intent = 3
+        else:
+            plan_tokens = {t for t in plan_norm.split() if len(t) >= 4}
+            overlap = len(plan_tokens & set(norm.split())) / max(1, len(plan_tokens))
+            search_intent = 2 if overlap >= 0.6 else (1 if overlap > 0 else 0)
+
+    # 2c. Searchable entity — a proper noun / number / planned entity.
+    plan_entities = []
+    if keyword_plan is not None:
+        plan_entities = [str(e) for e in (getattr(keyword_plan, "entities", []) or [])]
+    if plan_entities and any(normalize(e) in norm for e in plan_entities):
+        searchable_entity = 2
+    elif has_fact or proper:
+        searchable_entity = 1
+    else:
+        searchable_entity = 0
+
     # 3. Curiosity — real unknown / revelation / contradiction.
     if any(p in norm.split() for p in _EMPTY_PRONOUNS):
         curiosity = 0
@@ -334,8 +407,6 @@ def score_title(title: str, script: dict, config) -> tuple[int, dict]:
         stakes = 0
 
     # 5. Specificity — number / year / proper noun / place.
-    proper = _proper_nouns(text)
-    has_fact = _has_number_or_year(text)
     if has_fact or proper:
         specificity = 2
     elif len(words) >= 5:
@@ -364,6 +435,8 @@ def score_title(title: str, script: dict, config) -> tuple[int, dict]:
     criteria = {
         "subject_clarity": subject,
         "keyword_front": keyword_front,
+        "search_intent": search_intent,
+        "searchable_entity": searchable_entity,
         "curiosity": curiosity,
         "stakes": stakes,
         "specificity": specificity,
@@ -374,12 +447,14 @@ def score_title(title: str, script: dict, config) -> tuple[int, dict]:
 
     # ── Deterministic penalties ──
     t_min = int(getattr(config, "TITLE_TARGET_MIN_CHARS", 45) or 45)
-    t_max = int(getattr(config, "TITLE_TARGET_MAX_CHARS", 70) or 70)
-    hard_max = int(getattr(config, "TITLE_MAX_CHARS", 100) or 100)
+    t_max = int(getattr(config, "TITLE_TARGET_MAX_CHARS", 65) or 65)
+    hard_max = int(getattr(config, "TITLE_MAX_CHARS", 65) or 65)
     band_max = min(t_max, hard_max)
     penalties: dict[str, int] = {}
     if len(text) < t_min or len(text) > band_max:
         penalties["length"] = -3
+    if keyword_plan is not None and plan_primary and search_intent == 0:
+        penalties["keyword_absent"] = -4
     if contains_banned_token(text):
         penalties["banned_token"] = -6
     if has_dangling_tail(text):
@@ -418,7 +493,8 @@ _CAPS_INSTRUCTIONS = {
 }
 
 
-def _build_candidate_prompt(config, script: dict, source_content: dict, count: int) -> tuple[str, str]:
+def _build_candidate_prompt(config, script: dict, source_content: dict, count: int,
+                            keyword_plan=None) -> tuple[str, str]:
     name = getattr(config, "CANAL_DISPLAY_NAME", getattr(config, "CANAL_NAME", "canal"))
     style = getattr(config, "CANAL_NARRATIVE_STYLE", "documental")
     tone = str(getattr(config, "CANAL_TONE", ""))[:400]
@@ -429,7 +505,7 @@ def _build_candidate_prompt(config, script: dict, source_content: dict, count: i
     policy = str(getattr(config, "TITLE_CAPS_POLICY", "sentence") or "sentence").lower()
     t_min = int(getattr(config, "TITLE_TARGET_MIN_CHARS", 45) or 45)
     t_max = int(getattr(config, "TITLE_TARGET_MAX_CHARS", 70) or 70)
-    hard_max = int(getattr(config, "TITLE_MAX_CHARS", 100) or 100)
+    hard_max = int(getattr(config, "TITLE_MAX_CHARS", 65) or 65)
     band_max = min(t_max, hard_max)
 
     guion = str(script.get("guion", "") or "")[:2500]
@@ -440,10 +516,28 @@ def _build_candidate_prompt(config, script: dict, source_content: dict, count: i
     if not keyword:
         keyword = source_title[:80]
 
+    # W2: real search demand. The primary query must survive into the title.
+    plan_primary = ""
+    plan_secondary: list[str] = []
+    if keyword_plan is not None:
+        plan_primary = str(getattr(keyword_plan, "primary", "") or "").strip()
+        plan_secondary = [str(s).strip() for s in (getattr(keyword_plan, "secondary", []) or []) if str(s).strip()]
+        if plan_primary:
+            keyword = plan_primary
+
     formulas_str = "\n".join(f"  - {f}" for f in formulas[:8]) or "  (sin fórmulas configuradas)"
     good_str = "\n".join(f"  - {g}" for g in good[:5]) or "  (sin ejemplos)"
     bad_str = "\n".join(f"  - {b}" for b in bad[:5]) or "  (sin ejemplos)"
     guide_str = guide or "(sin guía adicional para este canal)"
+
+    plan_block = ""
+    if plan_primary:
+        plan_block = (
+            "\nCONSULTA REAL DE BÚSQUEDA (prioridad SEO):\n"
+            f"  - PRINCIPAL (debe aparecer tal cual o casi tal cual, en los primeros 50 caracteres): {plan_primary}\n"
+        )
+        if plan_secondary:
+            plan_block += "  - SECUNDARIAS (úsalas si encajan con naturalidad): " + ", ".join(plan_secondary[:5]) + "\n"
 
     user = f"""CANAL: {name}
 NICHO: {style}
@@ -463,21 +557,25 @@ MALOS EJEMPLOS (nunca hagas esto):
 
 TEMA / KEYWORD PRINCIPAL: {keyword or "(deducir del guion)"}
 TÍTULO DE LA FUENTE (si existe): {source_title or "(sin fuente)"}
-
+{plan_block}
 GUION (fragmento):
 {guion}
 
 REGLAS OBLIGATORIAS:
 - Devuelve exactamente {count} títulos DISTINTOS, en español.
-- Longitud objetivo {t_min}-{band_max} caracteres. El gancho debe quedar en los primeros 40.
+- LÍMITE DURO: {band_max} caracteres. Cuenta los caracteres de cada título.
+  Si no caben la premisa + el detalle + el desenlace, ELIMINA la parte final
+  completa; NUNCA recortes una frase a la mitad ni dejes un conector o un
+  verbo sin complemento al final. El gancho debe quedar en los primeros 40.
 - Capitalización: {_CAPS_INSTRUCTIONS.get(policy, _CAPS_INSTRUCTIONS["sentence"])}
 - Sin emojis. Sin sufijos tipo (REAL), (IMPACTANTE), (REVELACIÓN).
-- Prohibido terminar en preposición, artículo o conector.
+- Prohibido terminar en preposición, artículo, conector o verbo transitivo sin objeto.
 - Prohibido usar '|' o '[' ']'.
 - Máximo UNA palabra en MAYÚSCULAS por título.
 - Un número/cifra/nombre propio al frente cuando exista.
 - Oculta la RESPUESTA, no el TEMA. ~80% premisa + 20% incógnita.
 - Una sola idea por título. Sin promesas que el vídeo no cumpla.
+- Gancho fuerte sin clickbait: tensión, contradicción o consecuencia real; nada de superlativos vacíos.
 
 Responde SOLO con JSON: {{"candidates": ["título 1", "título 2", ...]}}"""
 
@@ -501,46 +599,48 @@ class TitleEngine:
         script: dict,
         source_content: dict = None,
         use_llm: bool = True,
+        keyword_plan=None,
     ) -> dict:
         """Return ``{selected_title, candidates, rationale}``.
 
         ``use_llm=False`` forces the deterministic fallback path (used by
-        failure-recovery callers and tests).
+        failure-recovery callers and tests). ``keyword_plan`` is an optional
+        ``KeywordPlan`` (W2) carrying real search demand.
+
+        Candidates are rendered **without truncation** and only complete,
+        in-budget titles become eligible; an oversized/incomplete candidate is
+        sent to a single compression pass or discarded. The selected title is
+        never a mid-phrase cut (W1 packaging).
         """
         script = script or {}
         raw_candidates: list[tuple[str, str]] = []
 
         if use_llm:
-            for title in self._llm_generate_candidates(script, source_content):
+            for title in self._llm_generate_candidates(
+                script, source_content, keyword_plan=keyword_plan
+            ):
                 raw_candidates.append((title, "llm"))
 
         if not raw_candidates:
-            raw_candidates = self._fallback_candidates(script, source_content)
-            if not raw_candidates:
-                raw_candidates = [
-                    (deterministic_fallback_title(script, self.config), "deterministic")
-                ]
+            raw_candidates = self._fallback_candidates(
+                script, source_content, keyword_plan=keyword_plan
+            )
 
-        candidates: list[dict] = []
-        seen: set[str] = set()
-        for title, source in raw_candidates:
-            cleaned = _strip_clickbait_suffix_safe(" ".join(str(title or "").split()))
-            cleaned = _remove_injected_markers(cleaned)
-            key = normalize(cleaned)
-            if not cleaned or key in seen:
-                continue
-            seen.add(key)
-            score, breakdown = score_title(cleaned, script, self.config)
-            candidates.append({
-                "title": cleaned,
-                "rubric_score": score,
-                "rubric_breakdown": breakdown,
-                "source": source,
-            })
+        candidates = self._collect_candidates(raw_candidates, script, keyword_plan)
+
+        # One compression pass for oversized/incomplete LLM candidates.
+        if not candidates and use_llm:
+            oversized = self._oversized_candidates(raw_candidates)
+            if oversized:
+                for title in self._compress_candidates(
+                    oversized, script, keyword_plan=keyword_plan
+                ):
+                    raw_candidates.append((title, "compressed"))
+                candidates = self._collect_candidates(raw_candidates, script, keyword_plan)
 
         if not candidates:
-            fallback = deterministic_fallback_title(script, self.config)
-            score, breakdown = score_title(fallback, script, self.config)
+            fallback = deterministic_fallback_title(script, self.config, keyword_plan)
+            score, breakdown = score_title(fallback, script, self.config, keyword_plan)
             candidates = [{
                 "title": fallback,
                 "rubric_score": score,
@@ -552,30 +652,34 @@ class TitleEngine:
             candidates, script, self.config, use_llm=use_llm
         )
         chosen = candidates[best_index]
-        selected_title = apply_caps_policy(chosen["title"], self.config)
+        selected_title = chosen["title"]  # already rendered, complete, in budget
 
-        # Never ship a banned / dangling / broken selection: fall back to the
-        # best clean candidate, then to the deterministic fallback.
-        if not selected_title or contains_banned_token(selected_title) or has_dangling_tail(selected_title):
+        # Final safety net: never ship a banned/incomplete/over-budget title.
+        hard_max = int(getattr(self.config, "TITLE_MAX_CHARS", 65) or 65)
+        if (not selected_title
+                or contains_banned_token(selected_title)
+                or not is_complete_title(selected_title)[0]
+                or len(selected_title) > hard_max):
             clean = [
                 c for c in candidates
-                if not contains_banned_token(c["title"]) and not has_dangling_tail(c["title"])
+                if not contains_banned_token(c["title"]) and is_complete_title(c["title"])[0]
             ]
             if clean:
                 clean.sort(key=lambda c: (-c["rubric_score"], len(c["title"])))
                 chosen = clean[0]
-                selected_title = apply_caps_policy(chosen["title"], self.config)
+                selected_title = chosen["title"]
             else:
+                selected_title = deterministic_fallback_title(script, self.config, keyword_plan)
                 chosen = {
-                    "title": deterministic_fallback_title(script, self.config),
+                    "title": selected_title,
                     "rubric_score": 0,
                     "rubric_breakdown": {},
                     "source": "deterministic",
                 }
-                selected_title = apply_caps_policy(chosen["title"], self.config)
             if not rationale:
                 rationale = "Selección determinista por descarte de candidatos inválidos."
-                best_index = candidates.index(chosen) if chosen in candidates else best_index
+                if chosen in candidates:
+                    best_index = candidates.index(chosen)
 
         return {
             "selected_title": selected_title,
@@ -583,9 +687,123 @@ class TitleEngine:
             "rationale": rationale,
         }
 
+    # ── Candidate rendering / integrity ───────────────────────────
+
+    def _collect_candidates(
+        self, raw_candidates: list[tuple[str, str]], script: dict, keyword_plan=None
+    ) -> list[dict]:
+        """Render candidates without truncation; keep only complete + in-budget."""
+        hard_max = int(getattr(self.config, "TITLE_MAX_CHARS", 65) or 65)
+        out: list[dict] = []
+        seen: set[str] = set()
+        for title, source in raw_candidates:
+            rendered = apply_caps_policy(title, self.config, truncate=False)
+            rendered = " ".join(rendered.split())
+            if not rendered:
+                continue
+            key = normalize(rendered)
+            if key in seen:
+                continue
+            seen.add(key)
+            ok, _reason = is_complete_title(rendered)
+            if not ok or len(rendered) > hard_max or contains_banned_token(rendered):
+                continue
+            score, breakdown = score_title(rendered, script, self.config, keyword_plan)
+            out.append({
+                "title": rendered,
+                "rubric_score": score,
+                "rubric_breakdown": breakdown,
+                "source": source,
+            })
+        return out
+
+    def _oversized_candidates(self, raw_candidates: list[tuple[str, str]]) -> list[str]:
+        """Candidates that fail only because of length/completeness."""
+        hard_max = int(getattr(self.config, "TITLE_MAX_CHARS", 65) or 65)
+        out: list[str] = []
+        seen: set[str] = set()
+        for title, _source in raw_candidates:
+            rendered = apply_caps_policy(title, self.config, truncate=False)
+            rendered = " ".join(rendered.split())
+            if not rendered or len(rendered) > hard_max * 2:
+                continue
+            ok, _reason = is_complete_title(rendered)
+            if len(rendered) <= hard_max and ok:
+                continue
+            key = normalize(rendered)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(rendered)
+        return out[:6]
+
+    def _compress_candidates(
+        self, titles: list[str], script: dict, keyword_plan=None
+    ) -> list[str]:
+        """Single LLM pass: rewrite each title to fit the budget, staying complete."""
+        try:
+            from config.llm_client import create_llm_client
+            from config.llm_helpers import llm_json_call
+            from config.settings import LLM_MODEL_CREATIVE
+        except Exception as exc:  # pragma: no cover - import safety
+            logger.warning("TitleEngine: LLM imports unavailable for compression: %s", exc)
+            return []
+
+        hard_max = int(getattr(self.config, "TITLE_MAX_CHARS", 65) or 65)
+        keyword = ""
+        if keyword_plan is not None:
+            keyword = str(getattr(keyword_plan, "primary", "") or "")
+        if not keyword:
+            keyword = _primary_keyword(script, self.config)
+
+        listing = "\n".join(f"- {t}" for t in titles)
+        user = f"""Comprime cada titular para que quepa en {hard_max} caracteres MÁXIMO, sin cortar ninguna frase por la mitad.
+
+CONSULTA PRINCIPAL A CONSERVAR (si existe): {keyword or "(ninguna)"}
+
+TITULARES A COMPRIMIR:
+{listing}
+
+REGLAS:
+- Conserva la consulta principal y el dato concreto (cifra/nombre/lugar) si existe.
+- Elimina la parte MENOS importante (normalmente la cláusula final), nunca palabras sueltas.
+- Gramática COMPLETA: prohibido terminar en conector (de, la, que, y...) o en verbo sin complemento.
+- Sin emojis, sin sufijos tipo (REAL)/(IMPACTANTE), sin '|' ni corchetes.
+- Devuelve exactamente {len(titles)} títulos, uno por línea de entrada.
+
+Responde SOLO con JSON: {{"candidates": ["título 1", ...]}}"""
+
+        try:
+            client = create_llm_client(enable_thinking=False, timeout=60.0, max_retries=1)
+            result = llm_json_call(
+                client,
+                max_retries=1,
+                retry_delay=1.0,
+                model=LLM_MODEL_CREATIVE,
+                messages=[
+                    {"role": "system", "content": "Eres un editor de titulares de YouTube en español. Comprimes sin romper la gramática."},
+                    {"role": "user", "content": user},
+                ],
+                temperature=0.4,
+                max_tokens=500,
+            )
+        except Exception as exc:
+            logger.warning("TitleEngine: compression call failed: %s", exc)
+            return []
+
+        if not isinstance(result, dict):
+            return []
+        raw = result.get("candidates") or result.get("titles") or []
+        if isinstance(raw, str):
+            raw = _parse_json_list(raw)
+        if not isinstance(raw, list):
+            return []
+        return [str(t).strip() for t in raw if str(t).strip()]
+
     # ── Candidate generation ──────────────────────────────────────
 
-    def _llm_generate_candidates(self, script: dict, source_content: dict) -> list[str]:
+    def _llm_generate_candidates(self, script: dict, source_content: dict,
+                                 keyword_plan=None) -> list[str]:
         try:
             from config.llm_client import create_llm_client
             from config.llm_helpers import llm_json_call
@@ -595,7 +813,9 @@ class TitleEngine:
             return []
 
         count = int(getattr(self.config, "TITLE_CANDIDATE_COUNT", 5) or 5)
-        system, user = _build_candidate_prompt(self.config, script, source_content, count)
+        system, user = _build_candidate_prompt(
+            self.config, script, source_content, count, keyword_plan=keyword_plan
+        )
         try:
             client = create_llm_client(enable_thinking=False, timeout=90.0, max_retries=2)
             result = llm_json_call(
@@ -624,7 +844,7 @@ class TitleEngine:
         return [str(t).strip() for t in raw if str(t).strip()][:count]
 
     def _fallback_candidates(
-        self, script: dict, source_content: dict
+        self, script: dict, source_content: dict, keyword_plan=None
     ) -> list[tuple[str, str]]:
         out: list[tuple[str, str]] = []
         for title in _parse_json_list(script.get("titulo_options"))[:8]:
@@ -636,7 +856,7 @@ class TitleEngine:
             source_title = source_content.get("title")
             if source_title:
                 out.append((str(source_title), "source"))
-        out.append((deterministic_fallback_title(script, self.config), "deterministic"))
+        out.append((deterministic_fallback_title(script, self.config, keyword_plan), "deterministic"))
         return out
 
     # ── Judge ─────────────────────────────────────────────────────

@@ -18,12 +18,14 @@ from pipeline.title_tokens import (  # noqa: E402
     has_clickbait_suffix,
     has_dangling_tail,
     has_unbalanced_punctuation,
+    is_complete_title,
     normalize,
     uppercase_words,
 )
 from pipeline.title_engine import (  # noqa: E402
     TitleEngine,
     apply_caps_policy,
+    deterministic_fallback_title,
     score_title,
 )
 from pipeline.title_enricher import enforce_power_words  # noqa: E402
@@ -302,3 +304,70 @@ def test_title_engine_generate_falls_back_when_llm_fails(monkeypatch):
     result = engine.generate({"titulo_options": "[]", "keywords": "[]"})
     assert result["selected_title"]
     assert result["candidates"][0]["source"] == "deterministic"
+
+
+# ── W1: completeness / no truncation ─────────────────────────────────
+
+def test_is_complete_title_flags_aperture_and_connector_tails():
+    assert not is_complete_title(
+        "El misterio del sistema solar exterior que la NASA aún no logra"
+    )[0]
+    assert not is_complete_title(
+        "¿Cómo lograron sobrevivir a lo imposible? 7 casos que desafían"
+    )[0]
+    assert not is_complete_title(
+        "El científico que puso a prueba a Dios: la evidencia que lo"
+    )[0]
+    assert not is_complete_title(
+        "Por qué las epidemias solo avanzaban en una dirección y nunca"
+    )[0]
+    assert is_complete_title(
+        "La expedición Franklin: 129 hombres que desaparecieron en el hielo"
+    )[0]
+    assert is_complete_title("¿Qué esconde la Antártida bajo el hielo?")[0]
+
+
+def test_generate_never_returns_over_budget_or_incomplete_title(monkeypatch):
+    cfg = _cfg(TITLE_MAX_CHARS=40, TITLE_TARGET_MAX_CHARS=40)
+    long_complete = (
+        "La expedición Franklin desapareció en el hielo con 129 hombres"
+    )
+    engine = TitleEngine(cfg)
+    monkeypatch.setattr(
+        engine, "_llm_generate_candidates", lambda *a, **k: [long_complete]
+    )
+    # No LLM/network in the test: compression returns nothing, so the engine
+    # must fall back to a complete, in-budget title instead of truncating.
+    monkeypatch.setattr(engine, "_compress_candidates", lambda *a, **k: [])
+    result = engine.generate({"keywords": "[]"})
+    selected = result["selected_title"]
+    assert len(selected) <= 40
+    assert is_complete_title(selected)[0]
+    # The long candidate must NOT appear as a truncated prefix.
+    assert not long_complete.startswith(selected) or selected == long_complete
+
+
+def test_generate_uses_compression_pass_for_over_budget(monkeypatch):
+    cfg = _cfg(TITLE_MAX_CHARS=45, TITLE_TARGET_MAX_CHARS=45)
+    engine = TitleEngine(cfg)
+    monkeypatch.setattr(
+        engine, "_llm_generate_candidates",
+        lambda *a, **k: ["La expedición Franklin desapareció en el hielo con 129 hombres"],
+    )
+    monkeypatch.setattr(
+        engine, "_compress_candidates",
+        lambda titles, script, keyword_plan=None: ["La expedición Franklin: 129 desaparecidos"],
+    )
+    result = engine.generate({"keywords": "[]"})
+    assert result["selected_title"] == "La expedición Franklin: 129 desaparecidos"
+    assert is_complete_title(result["selected_title"])[0]
+
+
+def test_fallback_title_differs_by_channel_narrative():
+    medical = _cfg(CANAL_NARRATIVE_STYLE="documental medico de asombro")
+    archeo = _cfg(CANAL_NARRATIVE_STYLE="documental arqueologico")
+    t_med = deterministic_fallback_title({"keywords": "[]"}, medical)
+    t_arc = deterministic_fallback_title({"keywords": "[]"}, archeo)
+    assert t_med != t_arc
+    assert is_complete_title(t_med)[0]
+    assert is_complete_title(t_arc)[0]

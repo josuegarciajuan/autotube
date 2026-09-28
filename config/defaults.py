@@ -56,11 +56,26 @@ TITLE_BANNED_PATTERNS = ["nadie puede explicar", "te dejará sin palabras"]
 TITLE_ENGINE_ENABLED = True
 TITLE_CANDIDATE_COUNT = 5
 TITLE_TARGET_MIN_CHARS = 45
-TITLE_TARGET_MAX_CHARS = 70
+TITLE_TARGET_MAX_CHARS = 65
+# Hard ceiling. Channels override it; it must agree with TITLE_TARGET_MAX_CHARS
+# so the engine never generates to one budget and cuts with another (W1).
+TITLE_MAX_CHARS = 65
 TITLE_CAPS_POLICY = "sentence"          # "sentence" | "title_case" | "one_word_caps"
 TITLE_STYLE_GUIDE = ""
 TITLE_GOOD_EXAMPLES = []
 TITLE_BAD_EXAMPLES = []
+# Per-channel closure used by the deterministic fallback (avoids every channel
+# converging on the same generic "la historia que cambió el caso").
+TITLE_FALLBACK_PHRASE = ""
+
+# ── W2: search-demand planner (0 quota) ─────────────────────────────
+# Feeds real autocomplete/Trends demand into the title engine. Competition via
+# yt-dlp is opt-in (extra latency, 0 quota). Kill-switch: set to False.
+TITLE_KEYWORD_PLANNER_ENABLED = True
+TITLE_KEYWORD_MAX_SEEDS = 8
+TITLE_KEYWORD_COMPETITION_ENABLED = False
+TITLE_KEYWORD_INTENT_PREFIXES = ["cómo", "por qué", "qué pasó con", "la historia de"]
+TITLE_KEYWORD_SUFFIXES = ["explicado", "caso", "documental"]
 
 THUMBNAIL_MAX_OVERLAY_CHARS = 32
 THUMBNAIL_BANNED_OVERLAY_CLAIMS = ["oculto", "real", "prohibido"]
@@ -603,6 +618,19 @@ THUMBNAIL_EMPHASIS_ENABLED = True
 # "auto" deja que la política decida el rol de la cara por tipo de sujeto.
 THUMBNAIL_FACE_ROLE = "auto"
 THUMBNAIL_TYPOGRAPHY_POOL = ["DejaVuSans-Bold"]
+
+# ── W3 (sep 2026): OverlaySpec, fuente única del texto de miniatura ──
+# Presupuestos compartidos por generador, pintor y validador (antes eran
+# 14/24 en el generador, 14/28 en el pintor y 32 en el validador).
+THUMBNAIL_OVERLAY_BUDGETS = {"l1": 14, "l2": 24, "badge": 14}
+# El gate de subida rechaza un overlay vacío cuando es True.
+THUMBNAIL_REQUIRE_TEXT = True
+# Sellos de credibilidad que NO se pueden pintar sin evidencia en el guion.
+THUMBNAIL_BADGE_CLICHES = [
+    "oculto", "oculta", "real", "prohibido", "impactante", "increible",
+    "increíble", "secreto", "secreta", "nadie", "exclusivo", "inedito",
+    "inédito", "shock", "impensable", "caso real", "archivo", "expediente",
+]
 
 # ── Fase 1 packaging ──
 # El A/B real (3 variantes de miniatura, ganador por CTR) se activa POR CANAL
