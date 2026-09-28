@@ -12,6 +12,7 @@ are left untouched (only a diagnostic detail is returned).
 """
 
 import logging
+from datetime import datetime
 
 logger = logging.getLogger("autotube.packaging_recovery")
 
@@ -249,6 +250,12 @@ def recover_packaging_held_videos(
                 "progress_phase": "upload",
                 "scheduled_upload_at": None,
                 "error_message": "Requeued by packaging recovery",
+                # Refresca el reloj de "listo para subir": sin esto, un vídeo
+                # reencolado tras >AWAITING_UPLOAD_STUCK_HOURS en
+                # validation_failed disparaba al instante la alerta
+                # awaiting_upload_stuck (el generation_finished_at seguía siendo
+                # antiguo). El vídeo acaba de volver a la cola de subida.
+                "generation_finished_at": datetime.now().isoformat(),
             }
             if new_title:
                 import json as _json
