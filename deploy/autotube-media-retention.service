@@ -1,0 +1,23 @@
+[Unit]
+Description=Autotube — barrido diario de retención de material (0 cuota)
+After=autotube-panel.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/autotube
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+# No competir con un render en curso.
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+# 1) Retención: material de entidades subidas + huérfanos/caché (0 días tras
+#    la subida los cubre el hook post-subida; esto es la red de seguridad).
+# 2) Logs rotados + backups de BD viejos (los trackeados en git se omiten).
+# flock evita solapamiento con una ejecución manual.
+# `;` (no `&&`) para que la purga de logs se ejecute aunque el barrido falle.
+ExecStart=/bin/sh -c 'flock -n /run/lock/autotube-media-retention.lock /usr/bin/python3 /root/autotube/scripts/cleanup_residuals_batch.py --execute --min-age-hours 24 --json-out /root/autotube/logs/retention_latest.json; flock -n /run/lock/autotube-media-retention.lock /usr/bin/python3 /root/autotube/scripts/purge_logs_and_backups.py --execute --days 14'
+
+[Install]
+WantedBy=multi-user.target
