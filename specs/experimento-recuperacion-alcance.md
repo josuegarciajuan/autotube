@@ -157,6 +157,32 @@ experimento esté activo (T+45), para no escalar a `normal` en plena recuperaci�
 `scripts/freeze_pacing_for_experiment.py` fija el perfil (`recovery` por defecto)
 y desactiva la auto-transición; `--off` revierte.
 
+### 9.3 Bucle de retención (Fase 3) — curva → fase → directiva
+Cierra el lazo histórico→generación sobre la **retención por fase del guion**:
+
+- **Recolección (cuota propia de la Analytics API, 0 Data API):**
+  `YouTubeStatsFetcher.get_video_audience_retention()` pide el reporte
+  `audienceRetention` (`elapsedVideoTimeRatio` × `audienceWatchRatio` +
+  `relativeRetentionPerformance`) en la **recolección profunda** ("Recolectar
+  stats" con `deep=true`), acotado a los `RETENTION_CURVE_MAX_VIDEOS` (20)
+  long-forms recientes. Se persiste en `video_analytics_detailed`
+  (`report_type='audience_retention'`, `dimension=elapsed_ratio`), sin migración.
+- **Beat mapping:** `scene_ranges` (start/end + `phase_id` por escena) se persiste
+  en el checkpoint de media del worker y se restaura al reanudar
+  (`full_pipeline_worker`); la curva se mapea a las fases narrativas con fallback
+  proporcional desde `scripts.bloques_json`.
+- **Señal + directiva:** `api/services/retention_feedback.py` agrega retención
+  media, tendencia y **fases más débiles** por canal, y deriva una directiva
+  cacheada en `system_state["retention_feedback_{slug}"]`. Loop diario
+  `_retention_feedback_loop` (0 cuota).
+- **Uso:** `orchestrator._apply_retention_directive()` inyecta la directiva en
+  `build_outline_prompt` / `build_system_prompt` / `build_content_only_prompt`
+  (parámetro `retention_directive`). Fail-open: sin datos, prompt = config estática.
+- **Observabilidad:** `GET /api/analytics/experiment` → `retention_feedback` por
+  canal; `scripts/experiment_report.py` imprime la sección "Fase 3 — retención por
+  fase". Kill-switch: `RETENTION_FEEDBACK_ENABLED=false` o
+  `system_state["retention_feedback_disabled"]="true"`.
+
 ## 10. Criterio de cierre
 El experimento se cierra cuando, a T+45: avisos = 0, alcance por vídeo recuperado y
 long-form con distribución y retención > 40 %, o cuando una regla de decisión obligue a
@@ -204,7 +230,7 @@ El Reporting API tiene latencia de hasta 48 h: los últimos 1-2 días pueden fal
 | 24/9 | Congelación de cadencia en `recovery` (auto-transición off) | Ritmo prudente durante el experimento |
 | (Fase 1) | Packaging: A/B por canal + caras selectivas + composición + saneo títulos (canal3/canal5) | Subir CTR e impresiones/vídeo |
 | (Fase 2) | Search-first: temas por demanda de búsqueda | Impresiones vía búsqueda |
-| (Fase 3) | Retención: hooks/estructura + bucle de feedback | Retención > 40 % |
+| 28/9 | **Fase 3 (retención)**: curvas `audienceRetention` por fase + directiva en prompts + loop diario `retention_feedback` | Retención > 40 % corrigiendo las fases que pierden audiencia |
 
 ### 11.5 Cómo decidir
 Aplicar la matriz de §6 con los KPIs leading: si en 2-4 semanas CTR/impresiones-por-vídeo

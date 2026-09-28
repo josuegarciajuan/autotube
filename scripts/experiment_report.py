@@ -76,6 +76,22 @@ def _print_report(rep: dict) -> None:
               f"{_fmt(lg.get('subs_now')):>11} {_fmt(lg.get('subs_pre')):>11} "
               f"{_delta_str(lg.get('subs_net_delta')):>8} {_fmt(lg.get('shorts_reach7d')):>9}")
 
+    print("\nFASE 3 — retención por fase (curvas de audiencia)")
+    rf = rep.get("retention_feedback") or {}
+    if not rf:
+        print("  (sin señal todavía — requiere recolección profunda de stats)")
+    for slug, s in rf.items():
+        weak = ", ".join(
+            f"{w.get('label')} {w.get('watch_ratio_pct')}%"
+            for w in (s.get("weak_phases") or [])
+        )
+        print(f"  {slug:<8} retención {_fmt(s.get('retention_pct'), '%'):>7} "
+              f"(objetivo {_fmt(s.get('target_pct'), '%')}, "
+              f"gap {_fmt(s.get('gap_pp'))} pp)  "
+              f"tendencia={s.get('trend')}  n={s.get('videos_analyzed')}")
+        if weak:
+            print(f"           fases más débiles: {weak}")
+
     print("\nNOTA:", rep.get("note", ""))
     print("=" * 78)
 

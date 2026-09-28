@@ -198,6 +198,32 @@ def build_report(db=None, days_now: int = 14) -> dict:
                 },
             })
 
+    # ── Fase 3: diagnóstico de retención por fase (caché del loop diario) ──
+    retention_feedback: dict = {}
+    try:
+        from api.services.retention_feedback import load_cached_signal
+    except Exception:  # noqa: BLE001
+        load_cached_signal = None
+    if load_cached_signal:
+        for ch in channels_out:
+            slug = ch.get("slug")
+            if not slug:
+                continue
+            try:
+                sig = load_cached_signal(db, slug)
+            except Exception:  # noqa: BLE001
+                sig = None
+            if sig:
+                retention_feedback[slug] = {
+                    "retention_pct": sig.get("retention_pct"),
+                    "target_pct": sig.get("target_pct"),
+                    "gap_pp": sig.get("gap_pp"),
+                    "trend": sig.get("trend"),
+                    "videos_analyzed": sig.get("videos_analyzed"),
+                    "weak_phases": sig.get("weak_phases"),
+                    "generated_at": sig.get("generated_at"),
+                }
+
     return {
         "experiment_started_at": started_raw or None,
         "generated_at": now.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -207,9 +233,15 @@ def build_report(db=None, days_now: int = 14) -> dict:
         },
         "interventions": interventions,
         "channels": channels_out,
+        "retention_feedback": retention_feedback,
+        "retention_feedback_started_at": (
+            db.get_system_state("retention_feedback_started_at")
+            if hasattr(db, "get_system_state") else None
+        ),
         "note": (
             "KPIs leading = CTR/impresiones-por-vídeo/retención long-form (responden en días). "
-            "El Reporting API tiene latencia de hasta 48 h: los últimos 1-2 días pueden faltar."
+            "El Reporting API tiene latencia de hasta 48 h: los últimos 1-2 días pueden faltar. "
+            "retention_feedback = Fase 3 (curvas por fase); 0 cuota."
         ),
     }
 
