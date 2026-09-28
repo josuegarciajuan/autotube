@@ -65,15 +65,18 @@ def test_recovers_only_valid_videos(tmp_path, monkeypatch):
 
     assert result["recovered"] == 1
     assert result["scanned"] == 2
-    assert db.updated == [
-        (1, {
-            "status": "awaiting_upload",
-            "progress": 5,
-            "progress_phase": "upload",
-            "scheduled_upload_at": None,
-            "error_message": "Requeued by packaging recovery",
-        })
-    ]
+    assert len(db.updated) == 1
+    _vid, _kwargs = db.updated[0]
+    assert _vid == 1
+    # El reencolado refresca generation_finished_at (evita awaiting_upload_stuck).
+    assert isinstance(_kwargs.pop("generation_finished_at"), str)
+    assert _kwargs == {
+        "status": "awaiting_upload",
+        "progress": 5,
+        "progress_phase": "upload",
+        "scheduled_upload_at": None,
+        "error_message": "Requeued by packaging recovery",
+    }
     actions = {d["video_id"]: d["action"] for d in result["details"]}
     assert actions[1] == "requeued"
     assert actions[2] == "still_invalid"

@@ -16,6 +16,7 @@ for manual review.
 
 import json
 import logging
+from datetime import datetime
 
 logger = logging.getLogger("autotube.title_recovery")
 
@@ -267,6 +268,10 @@ def retitle_one_video(
         progress_phase="upload",
         scheduled_upload_at=None,
         error_message="Retitled by title recovery",
+        # Refresca el reloj de "listo para subir" para no disparar al instante
+        # awaiting_upload_stuck en vídeos reencolados tras mucho tiempo en
+        # validation_failed (mismo fix que packaging_recovery).
+        generation_finished_at=datetime.now().isoformat(),
     )
     return {"video_id": vid, "action": "retitled", "new_title": candidate,
             "reasons": list(current.reasons)}
