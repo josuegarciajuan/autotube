@@ -56,6 +56,9 @@ class ThumbnailBrief:
     marketing_ctr_estimate: str = ""
     marketing_text_variants: list[str] = field(default_factory=list)
 
+    # ── W6: A/B variant strategy (subject_hero | data_question | tension_contrast) ──
+    variant_strategy: str = ""
+
 
 # ── LLM Prompts ─────────────────────────────────────────────────
 
@@ -175,6 +178,41 @@ REQUISITOS:
 
 Responde SOLO con JSON:
 {{"text_gancho": "...", "text_complemento": "...", "emphasis_word": "...", "badge_text": "...", "color_intent": "...", "best_text": "...", "text_variants": ["...", "...", "..."], "layout": "...", "composition_notes": "...", "ctr_estimate": "..."}}"""
+
+
+# ── W6: genuinely distinct A/B strategies ───────────────────────
+# Variants 2/3 used to clone variant 1's image concept, so the A/B compared
+# near-identical thumbnails. Each strategy now has its own directive, layout
+# pool and LLM persona, and is persisted for CTR attribution.
+VARIANT_STRATEGIES: dict[str, dict] = {
+    "subject_hero": {
+        "directive": (
+            "IMAGEN protagonista: el sujeto/tema concreto ocupa 75-80% del "
+            "encuadre con una sola luz dramática. Texto mínimo (1 palabra grande "
+            "o L1 corto). Máxima fuerza visual, cero desorden."
+        ),
+        "layouts": ["topic_hero", "subject_closeup", "portrait_hero"],
+        "persona": "Eres un director de arte de miniaturas: piensas en imagen, no en copy.",
+    },
+    "data_question": {
+        "directive": (
+            "DATO + PREGUNTA: el texto domina 55-60% sobre fondo oscuro/duotono; "
+            "la imagen es un inset secundario. L1 = cifra/fecha concreta, L2 = "
+            "pregunta cuya respuesta está en el vídeo."
+        ),
+        "layouts": ["artifact_document", "negative_space_top", "dark_reveal"],
+        "persona": "Eres un copywriter de curiosidad: conviertes un hecho en una pregunta irresistible.",
+    },
+    "tension_contrast": {
+        "directive": (
+            "CONTRASTE: composición dividida (antes/después, seguro/peligro) con "
+            "un solo color de acento. L1 corto y L2 que rompe la expectativa. "
+            "Tensión real, sin morbo ni promesas vacías."
+        ),
+        "layouts": ["split_diagonal", "center_burst", "negative_space_top"],
+        "persona": "Eres un editor de historias: buscas el conflicto y la tensión.",
+    },
+}
 
 
 class ThumbnailBrainstorm:
@@ -314,67 +352,151 @@ class ThumbnailBrainstorm:
             logger.warning("Variant 1 brainstorm failed: %s — using fallback", exc)
             style = style_profile or {}
             brief_default = self._fallback_brief(title, style, allow_faces=allow_faces)
+        brief_default.variant_strategy = "subject_hero"
         variants.append(brief_default)
         
         if num_variants < 2:
             return variants
-        
-        # ── Variant 2: Text-heavy (curiosity question) ─────────
-        # Reuses the same base image concept but changes composition
-        brief_text = self._clone_brief_with_directive(
-            brief_default,
-            variant_directive=(
-                "Crea un diseño donde el TEXTO domine el 60% de la miniatura. "
-                "Usa una pregunta intrigante o dato impactante como texto principal "
-                "en letras GRANDES que ocupan la mayor parte del espacio. "
-                "La imagen de fondo debe ser secundaria, textura o patrón difuminado. "
-                "El texto debe ser imposible de ignorar al hacer scroll."
-            ),
-            channel_name=channel_name,
-        )
-        variants.append(brief_text)
-        
-        if num_variants < 3:
-            return variants
-        
-        # ── Variant 3: Image-heavy (emotional shock) ───────────
-        brief_image = self._clone_brief_with_directive(
-            brief_default,
-            variant_directive=(
-                "Crea un diseño donde la IMAGEN domine el 80% de la miniatura. "
-                "Máximo 3 palabras de texto en total (una sola palabra grande o "
-                "una frase cortísima de 2-3 palabras). La imagen debe provocar una "
-                "reacción emocional fuerte: asombro, miedo, curiosidad intensa, shock. "
-                "Fotorealista, 8K, iluminación dramática, alto contraste."
-            ),
-            channel_name=channel_name,
-        )
-        variants.append(brief_image)
+
+        # ── W6: genuinely distinct strategies (not clones of variant 1) ──
+        # Each strategy runs its own lightweight agent with a different directive
+        # and layout pool; the fallback clone still carries the strategy label.
+        effective_face_directive = DEFAULT_FACE_DIRECTIVE
+        if concept_directive:
+            effective_face_directive = f"{DEFAULT_FACE_DIRECTIVE}\n{concept_directive}"
+        for strategy_key in ("data_question", "tension_contrast"):
+            if len(variants) >= num_variants:
+                break
+            brief = None
+            try:
+                brief = self._run_strategy_brief(
+                    strategy_key,
+                    script_text=script_text,
+                    title=title,
+                    style_profile=style_profile,
+                    channel_name=channel_name,
+                    channel_theme=channel_theme,
+                    face_directive=effective_face_directive,
+                    recent_context=recent_context,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("strategy %s failed: %s", strategy_key, exc)
+            if brief is None:
+                brief = self._clone_brief_with_directive(
+                    brief_default,
+                    variant_directive=VARIANT_STRATEGIES[strategy_key]["directive"],
+                    channel_name=channel_name,
+                    variant_strategy=strategy_key,
+                )
+            variants.append(brief)
         
         logger.info(
-            "Brainstorm variants: %d briefs generated for '%s'",
+            "Brainstorm variants: %d distinct strategies generated for '%s'",
             len(variants), title[:50],
         )
-        return variants
+        return variants[:num_variants]
+
+    def _run_strategy_brief(
+        self,
+        strategy_key: str,
+        *,
+        script_text: str,
+        title: str,
+        style_profile: dict | None,
+        channel_name: str,
+        channel_theme: str,
+        face_directive: str,
+        recent_context: dict | None,
+    ) -> "ThumbnailBrief | None":
+        """One LLM call producing a full brief for a specific A/B strategy."""
+        strategy = VARIANT_STRATEGIES.get(strategy_key)
+        if not strategy:
+            return None
+        from config.llm_client import create_llm_client
+        from config.llm_helpers import llm_json_call
+        from config.settings import LLM_MODEL_CREATIVE
+        from pipeline.thumbnail_art_director import recent_context_prompt
+
+        layouts = strategy["layouts"]
+        recent_block = recent_context_prompt(recent_context)
+        system = (
+            f"{strategy['persona']}\n{face_directive}\n"
+            "Diseñas miniaturas de YouTube en español. Respondes SIEMPRE con JSON."
+        )
+        user = f"""TÍTULO DEL VIDEO: {title[:120]}
+CANAL: {channel_name[:80]}
+TEMA: {channel_theme[:160]}
+GUION (fragmento): {(script_text or '')[:900]}
+
+DIRECTIVA DE ESTA VARIANTE:
+{strategy['directive']}
+
+LAYOUT OBLIGATORIO (elige uno): {', '.join(layouts)}
+{recent_block}
+
+Responde SOLO con JSON:
+{{"image_concept": "...", "primary_subject": "...", "subject_type": "person|place|object_artifact|concept|medical|event",
+  "text_gancho": "L1 max 12 chars MAYÚSCULAS", "text_complemento": "L2 max 24 chars",
+  "badge_text": "DOCUMENTAL o vacío", "emphasis_word": "una palabra de L1 o L2",
+  "layout": "uno de los permitidos", "composition_notes": "breve"}}"""
+        try:
+            client = create_llm_client(enable_thinking=False, timeout=45.0, max_retries=1)
+            result = llm_json_call(
+                client,
+                model=LLM_MODEL_CREATIVE,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=0.85,
+                max_tokens=450,
+                max_retries=1,
+                retry_delay=0.5,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("strategy brief LLM failed (%s): %s", strategy_key, exc)
+            return None
+        if not isinstance(result, dict):
+            return None
+
+        layout = str(result.get("layout", "") or "")
+        if layout not in layouts:
+            layout = layouts[0]
+        return ThumbnailBrief(
+            image_concept=str(result.get("image_concept", "") or ""),
+            visual_focus=str(result.get("image_concept", "") or "")[:80],
+            emotion_target="tension",
+            curiosity_gap="",
+            text_overlay=f"{result.get('text_gancho','')} | {result.get('text_complemento','')}".strip(" |"),
+            text_gancho=str(result.get("text_gancho", "") or ""),
+            text_complemento=str(result.get("text_complemento", "") or ""),
+            badge_text=str(result.get("badge_text", "") or ""),
+            layout=layout,
+            composition_notes=str(result.get("composition_notes", strategy["directive"])),
+            subject_type=str(result.get("subject_type", "") or ""),
+            primary_subject=str(result.get("primary_subject", "") or ""),
+            emphasis_word=str(result.get("emphasis_word", "") or ""),
+            variant_strategy=strategy_key,
+        )
 
     def _clone_brief_with_directive(
         self,
         base: ThumbnailBrief,
         variant_directive: str,
         channel_name: str = "",
+        variant_strategy: str = "",
     ) -> ThumbnailBrief:
         """Create a variant brief by cloning the base and adjusting 
         composition notes and text overlay for a different strategy.
         
         Uses a lightweight LLM call only for the text overlay — the
-        image concept and visual focus are inherited from the base.
+        image concept and visual focus are inherited from the base. This is the
+        fallback when ``_run_strategy_brief`` cannot run (no LLM).
         """
         # Build a lightweight prompt for text overlay only
         from config.llm_client import create_llm_client
         from config.settings import LLM_MODEL_CREATIVE
         from config.llm_helpers import llm_json_call
-        
-        client = create_llm_client(enable_thinking=False, timeout=30.0, max_retries=1)
         
         system = """Eres un diseñador de miniaturas de YouTube.
 Genera el TEXTO SUPERPUESTO para una miniatura basado en una directiva de diseño.
@@ -391,6 +513,7 @@ DIRECTIVA DE DISEÑO: {variant_directive}
 Genera el texto superpuesto para esta variante."""
         
         try:
+            client = create_llm_client(enable_thinking=False, timeout=30.0, max_retries=1)
             result = llm_json_call(
                 client,
                 model=LLM_MODEL_CREATIVE,
@@ -432,6 +555,7 @@ Genera el texto superpuesto para esta variante."""
                         result.get("text_complemento", ""),
                         result.get("badge_text", ""),
                     ],
+                    variant_strategy=variant_strategy,
                 )
         except Exception as exc:
             logger.debug("Variant brief generation failed: %s — cloning base with directive", exc)
@@ -460,6 +584,7 @@ Genera el texto superpuesto para esta variante."""
             psych_score=base.psych_score,
             marketing_ctr_estimate=base.marketing_ctr_estimate,
             marketing_text_variants=list(base.marketing_text_variants),
+            variant_strategy=variant_strategy,
         )
 
     # ── Agent runners ────────────────────────────────────────

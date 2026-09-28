@@ -1556,6 +1556,7 @@ def run_job(
         # Phase 5.8: A/B Testing — generate thumbnail variants (if enabled)
         # ═══════════════════════════════════════════════════════
         ab_test_variant_paths = []
+        ab_test_variant_strategies = []
         try:
             from config.settings import ENABLE_AB_TESTING as _AB_GLOBAL
         except ImportError:
@@ -1615,6 +1616,10 @@ def run_job(
                 )
                 
                 if ab_test_variant_paths:
+                    # W6: capture per-variant strategies for CTR attribution.
+                    ab_test_variant_strategies = list(
+                        getattr(maker, "last_variant_strategies", []) or []
+                    )
                     # Update thumbnail_path to the first variant (will be uploaded)
                     video_data["thumbnail_path"] = str(ab_test_variant_paths[0])
                     db.update_video(
@@ -1854,12 +1859,14 @@ def run_job(
                             conn.execute("""
                                 INSERT INTO video_ab_tests
                                 (video_id, yt_video_id, channel_id, phase, title_v1,
-                                 thumbnail_variant_paths, thumbnail_variant_active)
-                                VALUES (?, ?, ?, 'pending', ?, ?, 1)
+                                 thumbnail_variant_paths, thumbnail_variant_strategies,
+                                 thumbnail_variant_active)
+                                VALUES (?, ?, ?, 'pending', ?, ?, ?, 1)
                             """, (
                                 video_id, yt_video_id, channel_id,
                                 (title_v1 or "")[:100],
                                 json.dumps([str(p) for p in ab_test_variant_paths]),
+                                json.dumps(ab_test_variant_strategies),
                             ))
                             conn.commit()
                         logger.info("[AB] A/B test record created for video %s (3 thumbnail variants)", video_id)

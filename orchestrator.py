@@ -572,6 +572,24 @@ class PipelineOrchestrator:
                 f"[{self.canal}] demand ranking error (fail-open): {_dm_exc}"
             )
 
+        # ── W4: guardia de nicho — prioriza fuentes del nicho del canal ──
+        # No bloquea por sí sola: solo descarta fuera-de-nicho cuando queda al
+        # menos una fuente on-niche (evita la inanición del canal).
+        try:
+            from pipeline.niche_guard import filter_on_niche
+            content_items, _niche_dropped = filter_on_niche(
+                content_items,
+                lambda ci: f"{ci.get('title') or ''} {ci.get('text') or ''}"[:400],
+                getattr(self, "config", None),
+            )
+            if _niche_dropped:
+                logger.info(
+                    "[%s] niche-guard: %d fuente(s) fuera de nicho descartadas",
+                    self.canal, _niche_dropped,
+                )
+        except Exception as _ng_exc:  # noqa: BLE001
+            logger.warning(f"[{self.canal}] niche-guard error (fail-open): {_ng_exc}")
+
         # ── Anti-strike: filtro de seguridad de contenido ─────────────
         # Rechaza temas sensibles (menores, autolesión, claims médicos, violencia
         # gráfica, desinformación sanitaria) antes de guionar. Itera sobre los

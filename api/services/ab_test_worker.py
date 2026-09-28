@@ -245,6 +245,11 @@ class ABTestWorker:
             variant_paths = json.loads(variant_paths_json) if variant_paths_json else []
         except (json.JSONDecodeError, TypeError):
             variant_paths = []
+        # W6: strategy labels (may be absent on pre-v63 rows).
+        try:
+            variant_strategies = json.loads(row.get("thumbnail_variant_strategies") or "[]")
+        except (json.JSONDecodeError, TypeError):
+            variant_strategies = []
 
         conn = self._get_db_conn()
 
@@ -262,7 +267,10 @@ class ABTestWorker:
         if active_variant == 1 and len(variant_paths) >= 2:
             # Rotate to thumbnail variant 2
             new_variant = 2
-            self._swap_thumbnail_on_youtube(yt_video_id, channel_slug, variant_paths, new_variant, video_id, channel_id)
+            self._swap_thumbnail_on_youtube(
+                yt_video_id, channel_slug, variant_paths, new_variant,
+                video_id, channel_id, variant_strategies=variant_strategies,
+            )
 
             conn.execute("""
                 UPDATE video_ab_tests
@@ -610,10 +618,13 @@ class ABTestWorker:
 
     def _swap_thumbnail_on_youtube(self, yt_video_id: str, channel_slug: str,
                                      variant_paths: list, new_variant: int,
-                                     video_id: int = None, channel_id: int = None):
+                                     video_id: int = None, channel_id: int = None,
+                                     variant_strategies: list | None = None):
         """Swap the YouTube custom thumbnail to a different variant.
 
-        Uses youtube.thumbnails().set() — costs 50 quota units.
+        Uses youtube.thumbnails().set() — costs 50 quota units. Also updates
+        ``videos.thumbnail_variant_strategy`` so CTR-by-strategy follows the
+        active variant (W6).
         """
         if not variant_paths or new_variant > len(variant_paths):
             logger.warning("[AB] Cannot swap thumbnail: variant %d not available (have %d)", new_variant, len(variant_paths))
@@ -639,6 +650,20 @@ class ABTestWorker:
                 except Exception:
                     pass
                 logger.info("[AB] Thumbnail swapped on YT for %s: variant %d", yt_video_id, new_variant)
+                # W6: attribute the active strategy to the rotated variant.
+                strategy = ""
+                if variant_strategies and 1 <= new_variant <= len(variant_strategies):
+                    strategy = str(variant_strategies[new_variant - 1] or "")
+                if strategy and video_id:
+                    try:
+                        conn = self._get_db_conn()
+                        conn.execute(
+                            "UPDATE videos SET thumbnail_variant_strategy = ? WHERE id = ?",
+                            (strategy, video_id),
+                        )
+                        conn.commit()
+                    except Exception as up_exc:
+                        logger.debug("[AB] could not update variant strategy: %s", up_exc)
             else:
                 logger.error("[AB] YT auth failed for channel %s — cannot swap thumbnail", channel_slug)
                 if video_id and channel_id:

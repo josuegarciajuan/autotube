@@ -328,6 +328,12 @@ YT_DEFAULT_TAGS = [
 
 # SEO
 SEO_PRIMARY_KEYWORD = "expediciones fallidas reales"
+# W4: anclas de nicho (guardia anti-fuga). Stems en minúscula sin acentos.
+NICHE_ANCHORS = [
+    "expedic", "naufragio", "superviven", "explorador", "exploracion",
+    "rescate", "tragedia", "hielo", "artic", "antartid", "montan",
+    "desierto", "ocean", "travesia", "aislamiento", "desapareci",
+]
 SEO_SECONDARY_KEYWORDS = [
     "exploraciones que salieron mal", "tragedias en expediciones", "supervivencia extrema documental",
     "naufragios historicos documental", "expediciones fallidas reales",

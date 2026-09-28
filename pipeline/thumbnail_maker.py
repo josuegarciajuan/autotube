@@ -181,6 +181,8 @@ class ThumbnailMaker:
         self._last_face_chip_path = "__unset__"  # marker: None = resolved "no face"
         # W3: the OverlaySpec actually painted in the last composition.
         self.last_overlay_spec = None
+        # W6: strategy labels of the last A/B variant batch (for attribution).
+        self.last_variant_strategies: list[str] = []
 
         self.font = _find_font(self.font_size, bold=True,
                                font_name=self.font_family)
@@ -782,26 +784,48 @@ class ThumbnailMaker:
         inset_path = self._pick_inset_image(scene_images, base_image=base_image)
 
         # ── F4: Compose each variant on the same base image ────
-        # Each variant gets a different layout (never repeat within the call).
+        # Each variant gets a different layout (never repeat within the call)
+        # and its own OverlaySpec + strategy (W3/W6).
+        try:
+            from pipeline.thumbnail_brainstorm import VARIANT_STRATEGIES
+        except Exception:  # pragma: no cover - defensive
+            VARIANT_STRATEGIES = {}
+
         variant_paths: list[Path] = []
+        self.last_variant_strategies = []
+        variant_specs: list = []
         used_layouts: list[str] = list(recent_context.get("layouts", []) or [])
         for i, brief in enumerate(variant_briefs):
-            # Build overlay text from brief fields
+            strategy_key = getattr(brief, "variant_strategy", "") or f"variant_{i+1}"
             l1 = getattr(brief, 'text_gancho', '') or ''
             l2 = getattr(brief, 'text_complemento', '') or ''
-            overlay = f"{l1} {l2}".strip() if l1 or l2 else getattr(brief, 'text_overlay', '')
-            # P3: no repetir el inicio del título en el texto de la miniatura
-            l1 = self._dedupe_overlay(title, l1)
-            overlay = self._dedupe_overlay(title, overlay)
+            if not (l1 or l2):
+                from pipeline.packaging_brief import split_overlay_text
+                l1, l2 = split_overlay_text(getattr(brief, 'text_overlay', '') or '')
             badge = getattr(brief, 'badge_text', '') or ''
+            from pipeline.packaging_brief import build_overlay_spec, render_overlay
+            spec = build_overlay_spec(
+                title=title,
+                cfg=self._channel_cfg,
+                script_text=script_text,
+                raw_l1=l1,
+                raw_l2=l2,
+                raw_badge=badge,
+                emphasis=getattr(brief, 'emphasis_word', '') or art.emphasis_word,
+                subject_noun=art.primary_subject,
+                variant_strategy=strategy_key,
+                source="brainstorm",
+            )
             # Rotation: variant i never reuses a layout already used here.
+            # Prefer the strategy's own layout pool when it has one.
+            strategy_pool = VARIANT_STRATEGIES.get(strategy_key, {}).get("layouts")
             layout = self.art_director.plan(
                 title=f"{title}#{i}",
                 script_text=script_text,
                 style=style,
                 raw_subject_type=art.subject_type,
                 primary_subject=art.primary_subject,
-                layout_pool=self.layout_pool,
+                layout_pool=strategy_pool or self.layout_pool,
                 recent_context={"layouts": used_layouts, "colors": [], "subjects": []},
                 allow_faces=allow_faces,
                 preferred_layout=getattr(brief, 'layout', '') or "",
@@ -809,18 +833,20 @@ class ThumbnailMaker:
             ).layout
             used_layouts.insert(0, layout)
             brief.layout = layout
+            self.last_variant_strategies.append(strategy_key)
+            variant_specs.append(spec)
 
             thumb_path = self._compose_final(
                 base_image=base_image,
                 brief=brief,
                 style=style,
-                overlay_text=overlay,
+                overlay_text=render_overlay(spec),
                 title=title,
                 canal_slug=slug,
                 video_id=video_id,
-                text_gancho=l1,
-                text_complemento=l2,
-                badge_text=badge,
+                text_gancho=spec.l1,
+                text_complemento=spec.l2,
+                badge_text=spec.badge,
                 layout=layout,
                 inset_image_path=inset_path,
                 color_plan=color_plan,
@@ -831,18 +857,20 @@ class ThumbnailMaker:
                     None if (len(variant_briefs) > 1 and i == len(variant_briefs) - 1)
                     else face_chip_path
                 ),
-                emphasis_word=getattr(brief, 'emphasis_word', '') or art.emphasis_word,
+                emphasis_word=spec.emphasis,
             )
             variant_paths.append(thumb_path)
             logger.info(
-                "[Thumbnail v2] ✅ Variant %d/%d complete: %s", i + 1, len(variant_briefs), thumb_path
+                "[Thumbnail v2] ✅ Variant %d/%d complete (%s): %s",
+                i + 1, len(variant_briefs), strategy_key, thumb_path,
             )
 
-        # ── P1 (ago 2026): registrar estilo usado (loop CTR→estilo) ──
+        # ── P1 + W3/W6: registrar estilo, overlay y estrategia de la variante 1 ──
         if video_id:
             try:
                 from database.db_extended import ExtendedDatabase
                 db = ExtendedDatabase()
+                first_spec = variant_specs[0] if variant_specs else None
                 db.update_video_thumbnail_style(
                     video_id,
                     str(style.get("visual_style", "") or ""),
@@ -850,6 +878,12 @@ class ThumbnailMaker:
                     color_key=str(color_plan.get("color_key", "") or ""),
                     face_role=art.face_role,
                     subject=art.primary_subject[:120],
+                    overlay=render_overlay(first_spec) if first_spec else "",
+                    badge=first_spec.badge if first_spec else "",
+                    emphasis=first_spec.emphasis if first_spec else "",
+                    variant_strategy=(self.last_variant_strategies[0]
+                                      if self.last_variant_strategies else ""),
+                    overlay_source="brainstorm",
                 )
             except Exception as exc:
                 logger.warning("[Thumbnail v2] thumbnail_style persist failed (variants): %s", exc)

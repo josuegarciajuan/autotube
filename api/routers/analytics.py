@@ -321,6 +321,30 @@ def get_channel_thumbnail_styles(channel_id: int):
     }
 
 
+@router.get("/channels/{channel_id}/analytics/thumbnail-ctr")
+def get_channel_thumbnail_ctr(channel_id: int, dimension: str = "style",
+                              min_impressions: int = 500):
+    """CTR promedio por dimensión de packaging (W7).
+
+    ``dimension`` ∈ {style, layout, color_key, variant_strategy, emphasis}.
+    Permite atribuir CTR a la estrategia A/B, layout, color o palabra énfasis
+    con la que se generó cada miniatura.
+    """
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+    if dimension not in db._THUMB_CTR_DIMENSIONS:
+        raise HTTPException(400, f"dimensión inválida: {dimension}")
+    return {
+        "channel_id": channel_id,
+        "channel_name": ch["name"],
+        "channel_slug": ch["slug"],
+        "dimension": dimension,
+        "groups": db.get_thumbnail_ctr_by(channel_id, dimension, min_impressions),
+    }
+
+
 @router.get("/channels/{channel_id}/analytics/ctr")
 def get_channel_ctr(channel_id: int):
     """Get CTR, retention, and impressions summary for a channel.

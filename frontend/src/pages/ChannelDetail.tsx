@@ -284,6 +284,7 @@ export default function ChannelDetail() {
   const [milestonesData, setMilestonesData] = useState<any>(null)
   const [contentRanking, setContentRanking] = useState<any[]>([])
   const [thumbStyles, setThumbStyles] = useState<any[]>([])
+  const [strategyCtr, setStrategyCtr] = useState<any[]>([])
   const [funnelData, setFunnelData] = useState<any>(null)
   const [growthDays, setGrowthDays] = useState(30)
 
@@ -502,6 +503,13 @@ export default function ChannelDetail() {
         setContentRanking(content?.videos || [])
         setWatchTimeData(watchtime)
         setThumbStyles(thumbstyles?.styles || [])
+        // W7: CTR por estrategia A/B de miniatura (best-effort, no bloquea la vista)
+        try {
+          const vc = await api.getThumbnailCtr(channelId, 'variant_strategy', 200)
+          setStrategyCtr(vc?.groups || [])
+        } catch {
+          setStrategyCtr([])
+        }
         setFunnelData(funnel)
       } catch (e) {
         console.error('Error loading growth data:', e)
@@ -1681,6 +1689,43 @@ export default function ChannelDetail() {
                       {thumbStyles.map((s: any, i: number) => (
                         <tr key={i} className="border-b border-white/5 hover:bg-dark-800/30">
                           <td className="py-2 pr-4"><span className="text-gray-300 font-mono">{s.style}</span></td>
+                          <td className="py-2 text-right font-mono tabular-nums text-gray-400">{s.videos}</td>
+                          <td className="py-2 text-right font-mono tabular-nums"
+                              style={{ color: (s.avg_ctr ?? 0) >= 3 ? '#4ade80' : (s.avg_ctr ?? 0) > 0 ? '#fbbf24' : '#6b7280' }}>
+                            {s.avg_ctr != null ? `${s.avg_ctr}%` : '—'}
+                          </td>
+                          <td className="py-2 text-right font-mono tabular-nums text-gray-400 hidden sm:table-cell">
+                            {s.total_impressions > 0 ? formatShortNumber(s.total_impressions) : '—'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* W7: CTR por estrategia A/B de miniatura */}
+            {strategyCtr.length > 0 && (
+              <div className="glass p-4 rounded-xl">
+                <div className="flex items-center gap-2 mb-3">
+                  <Image size={18} className="text-neon-purple" />
+                  <h3 className="text-sm font-semibold text-gray-300">CTR por estrategia de miniatura (A/B)</h3>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="text-gray-500 border-b border-white/5">
+                        <th className="text-left py-2 font-medium">Estrategia</th>
+                        <th className="text-right py-2 font-medium">Videos</th>
+                        <th className="text-right py-2 font-medium">CTR medio</th>
+                        <th className="text-right py-2 font-medium hidden sm:table-cell">Impresiones</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {strategyCtr.map((s: any, i: number) => (
+                        <tr key={i} className="border-b border-white/5 hover:bg-dark-800/30">
+                          <td className="py-2 pr-4"><span className="text-gray-300 font-mono">{s.value}</span></td>
                           <td className="py-2 text-right font-mono tabular-nums text-gray-400">{s.videos}</td>
                           <td className="py-2 text-right font-mono tabular-nums"
                               style={{ color: (s.avg_ctr ?? 0) >= 3 ? '#4ade80' : (s.avg_ctr ?? 0) > 0 ? '#fbbf24' : '#6b7280' }}>

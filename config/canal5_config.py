@@ -324,6 +324,14 @@ YT_DEFAULT_TAGS = [
 ]
 
 SEO_PRIMARY_KEYWORD = "enfermedades raras documental"
+# W4: anclas de nicho (guardia anti-fuga). Stems en minúscula sin acentos.
+NICHE_ANCHORS = [
+    "enfermedad", "sintom", "diagnostic", "paciente", "medic", "doctor",
+    "cerebro", "adn", "patolog", "anomal", "virus", "celula", "cuerpo",
+    "inmun", "dolor", "clinic", "salud", "corazon", "sangre", "cancer",
+    "tumor", "alergia", "sueno", "dormir", "memoria", "hospital",
+    "tratamiento", "sindrom", "trastorno", "genetic",
+]
 SEO_SECONDARY_KEYWORDS = [
     "casos medicos inexplicables", "anomalias medicas reales", "sindromes extraños documental",
     "enfermedades misteriosas", "fenomenos medicos inexplicables",
