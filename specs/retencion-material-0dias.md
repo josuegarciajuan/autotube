@@ -84,7 +84,9 @@ fichero local. No quedan referencias colgantes a rutas borradas.
   0 cuota). Solo borra archivos **huérfanos o de entidades ya subidas**, nunca
   bloqueados ni de entidades pendientes ni recientes
   (`MEDIA_RETENTION_MIN_AGE_HOURS`, def. 6 h).
-  Kill-switch: `MEDIA_RETENTION_SWEEP_ENABLED=false`.
+  **Desactivado por defecto** (`MEDIA_RETENTION_SWEEP_ENABLED=false`): hay que
+  revisar primero el manifiesto del dry-run y activarlo explícitamente.
+  La purga post-subida (retención 0 días) **sí** está activa siempre.
 - **Política de cachés/pools** (`ai_cache/pollinations`, `shorts_clips`,
   `images`, `ai_images`): solo se purgan huérfanos / material subido. **Sin tope
   de tamaño ni TTL** (decisión operativa sep 2026).

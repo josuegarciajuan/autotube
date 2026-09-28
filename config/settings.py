@@ -475,9 +475,13 @@ STATS_AUTO_COLLECT = False  # INVARIANTE: hardcodeado, no depende de env
 # Barrido periódico de huérfanos (media no referenciada por ninguna entidad).
 # No borra material de jobs activos, ni de vídeos/shorts sin subir, ni archivos
 # recientes (< MEDIA_RETENTION_MIN_AGE_HOURS). La purga post-subida (retención
-# 0 días) es independiente de este flag. Kill-switch: MEDIA_RETENTION_SWEEP_ENABLED=false.
+# 0 días) es independiente de este flag (siempre activa).
+#
+# ⚠️ DESACTIVADO por defecto: requiere revisar primero el manifiesto del barrido
+# retroactivo (`scripts/cleanup_residuals_batch.py`, dry-run). Tras validarlo,
+# activar con MEDIA_RETENTION_SWEEP_ENABLED=true y reiniciar la API.
 MEDIA_RETENTION_SWEEP_ENABLED = (
-    os.getenv("MEDIA_RETENTION_SWEEP_ENABLED", "true").lower() == "true"
+    os.getenv("MEDIA_RETENTION_SWEEP_ENABLED", "false").lower() == "true"
 )
 MEDIA_RETENTION_MIN_AGE_HOURS = int(os.getenv("MEDIA_RETENTION_MIN_AGE_HOURS", "6"))
 MEDIA_RETENTION_SWEEP_INTERVAL_S = int(os.getenv("MEDIA_RETENTION_SWEEP_INTERVAL_S", "21600"))
