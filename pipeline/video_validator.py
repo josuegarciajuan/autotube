@@ -91,8 +91,9 @@ class VideoValidator:
     Args:
         channel_config: Channel SimpleNamespace with at least:
             TITLE_POWER_WORDS (list[str])
-            PROD_VIDEO_DURATION_MIN (int, minutes)
-            PROD_VIDEO_DURATION_MAX (int, minutes)
+            VIDEO_AVERAGE_DURATION_MIN (int, minutes) — objetivo del panel
+            VIDEO_DURATION_DISCREPANCY_MIN (int, minutes) — ± del objetivo
+            (fallback legacy: PROD_VIDEO_DURATION_MIN/MAX)
     """
 
     def __init__(self, channel_config, *, dry_run: bool = False):
@@ -103,12 +104,28 @@ class VideoValidator:
             w.lower()
             for w in getattr(channel_config, "TITLE_POWER_WORDS", [])
         ]
-        self.duration_min_sec: int = (
-            getattr(channel_config, "PROD_VIDEO_DURATION_MIN", 10) * 60
-        )
-        self.duration_max_sec: int = (
-            getattr(channel_config, "PROD_VIDEO_DURATION_MAX", 14) * 60
-        )
+        # Rango de duración: el panel "Duración — Objetivo"
+        # (VIDEO_AVERAGE_DURATION_MIN ± VIDEO_DURATION_DISCREPANCY_MIN) es la
+        # fuente autoritativa. PROD_VIDEO_DURATION_* solo se usa como fallback
+        # legacy si el objetivo no está configurado.
+        obj_mean = getattr(channel_config, "VIDEO_AVERAGE_DURATION_MIN", None)
+        obj_disc = getattr(channel_config, "VIDEO_DURATION_DISCREPANCY_MIN", None)
+        if obj_mean is not None:
+            try:
+                obj_mean = float(obj_mean)
+                obj_disc = abs(float(obj_disc)) if obj_disc is not None else 0.0
+            except (TypeError, ValueError):
+                obj_mean, obj_disc = None, None
+        if obj_mean is not None and obj_mean > 0:
+            self.duration_min_sec: int = int(max(0.5, obj_mean - obj_disc) * 60)
+            self.duration_max_sec: int = int(max(0.5, obj_mean + obj_disc) * 60)
+        else:
+            self.duration_min_sec: int = (
+                getattr(channel_config, "PROD_VIDEO_DURATION_MIN", 10) * 60
+            )
+            self.duration_max_sec: int = (
+                getattr(channel_config, "PROD_VIDEO_DURATION_MAX", 14) * 60
+            )
         self.title_max_chars: int = resolve_title_max_chars(channel_config)
 
     # ── Pre-validation (after script, before TTS) ──────────────────

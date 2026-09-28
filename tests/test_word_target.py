@@ -8,8 +8,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
+from types import SimpleNamespace
 from unittest.mock import patch
 from pipeline.script_generator import ScriptGenerator
+from pipeline.video_validator import VideoValidator
 from tests.conftest import MockDB, MockConfigCanal2, MockConfigCanal3, MockConfigKokoro
 
 
@@ -87,3 +89,63 @@ class TestGetWordTarget:
         assert "words_min" in wt
         assert "words_max" in wt
         assert "duration_target" in wt
+
+    def test_objective_wins_over_legacy_prod_max(self):
+        """Regression: PROD_VIDEO_DURATION_MAX must NOT clamp the panel objective.
+
+        Before the fix, a channel with objective 16 ± 3 and legacy
+        PROD_VIDEO_DURATION_MAX=9 always generated ~9 min scripts.
+        """
+        cfg = SimpleNamespace(
+            CANAL_NAME="canalX",
+            TEST_MODE=False,
+            VIDEO_AVERAGE_DURATION_MIN=16,
+            VIDEO_DURATION_DISCREPANCY_MIN=3,
+            PROD_VIDEO_DURATION_MAX=9,
+            TTS_STRATEGY={"rate_base": "-10%"},
+        )
+        sg = ScriptGenerator(MockDB(), cfg)
+        for _ in range(100):
+            wt = sg._get_word_target()
+            assert 13 <= wt["duration_target"] <= 19, \
+                f"objective clamped: duration_target={wt['duration_target']}"
+
+    def test_objective_handles_bad_values(self):
+        """Non-numeric objective falls back to sane defaults instead of crashing."""
+        cfg = SimpleNamespace(
+            CANAL_NAME="canalX",
+            TEST_MODE=False,
+            VIDEO_AVERAGE_DURATION_MIN="oops",
+            VIDEO_DURATION_DISCREPANCY_MIN=None,
+            TTS_STRATEGY={"rate_base": "-10%"},
+        )
+        sg = ScriptGenerator(MockDB(), cfg)
+        wt = sg._get_word_target()
+        assert wt["duration_target"] > 0
+        assert wt["palabras_objetivo"] > 0
+
+
+class TestValidatorDurationRange:
+    """VideoValidator derives its duration warning range from the objective."""
+
+    def test_range_derived_from_objective(self):
+        cfg = SimpleNamespace(
+            TITLE_POWER_WORDS=[],
+            VIDEO_AVERAGE_DURATION_MIN=16,
+            VIDEO_DURATION_DISCREPANCY_MIN=3,
+            PROD_VIDEO_DURATION_MIN=6,
+            PROD_VIDEO_DURATION_MAX=9,
+        )
+        v = VideoValidator(cfg)
+        assert v.duration_min_sec == 13 * 60
+        assert v.duration_max_sec == 19 * 60
+
+    def test_falls_back_to_legacy_when_no_objective(self):
+        cfg = SimpleNamespace(
+            TITLE_POWER_WORDS=[],
+            PROD_VIDEO_DURATION_MIN=6,
+            PROD_VIDEO_DURATION_MAX=9,
+        )
+        v = VideoValidator(cfg)
+        assert v.duration_min_sec == 6 * 60
+        assert v.duration_max_sec == 9 * 60
