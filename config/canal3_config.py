@@ -400,6 +400,12 @@ YT_DEFAULT_TAGS = [
 # SEO
 # ═══════════════════════════════════════════════════════════════════
 SEO_PRIMARY_KEYWORD = "civilizaciones antiguas documental"
+# W4: anclas de nicho (guardia anti-fuga). Stems en minúscula sin acentos.
+NICHE_ANCHORS = [
+    "civiliz", "arqueolog", "yacimiento", "ruina", "antigu", "templo",
+    "piramid", "faraon", "egipto", "maya", "aztec", "inca", "manuscrito",
+    "reliquia", "artefacto", "prehistori", "imperio", "excavacion",
+]
 SEO_SECONDARY_KEYWORDS = [
     "civilizaciones perdidas", "secretos de la historia", "ciudades antiguas misterios",
     "civilizaciones olvidadas", "ruinas misteriosas del mundo",

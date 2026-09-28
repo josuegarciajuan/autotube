@@ -77,6 +77,14 @@ TITLE_KEYWORD_COMPETITION_ENABLED = False
 TITLE_KEYWORD_INTENT_PREFIXES = ["cómo", "por qué", "qué pasó con", "la historia de"]
 TITLE_KEYWORD_SUFFIXES = ["explicado", "caso", "documental"]
 
+# ── W4: guardia de nicho ────────────────────────────────────────────
+# Anchors per channel live in config/DB (never hardcoded). Empty = disabled.
+# A source/title below TITLE_NICHE_FIT_MIN is suppressed, but only when an
+# on-niche alternative exists (no channel starvation).
+NICHE_GUARD_ENABLED = True
+TITLE_NICHE_FIT_MIN = 0.3
+NICHE_ANCHORS = []
+
 THUMBNAIL_MAX_OVERLAY_CHARS = 32
 THUMBNAIL_BANNED_OVERLAY_CLAIMS = ["oculto", "real", "prohibido"]
 RECOVERY_CHECKPOINTS_ENABLED = False

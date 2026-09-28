@@ -455,6 +455,13 @@ def score_title(title: str, script: dict, config, keyword_plan=None) -> tuple[in
         penalties["length"] = -3
     if keyword_plan is not None and plan_primary and search_intent == 0:
         penalties["keyword_absent"] = -4
+    # W4: suppress titles that clearly fall outside the channel niche.
+    try:
+        from pipeline.niche_guard import is_guard_enabled, is_on_niche
+        if is_guard_enabled(config) and text and not is_on_niche(text, config):
+            penalties["off_niche"] = -8
+    except Exception:  # noqa: BLE001 — never break scoring
+        pass
     if contains_banned_token(text):
         penalties["banned_token"] = -6
     if has_dangling_tail(text):

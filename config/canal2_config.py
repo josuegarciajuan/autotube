@@ -568,6 +568,12 @@ YT_DEFAULT_TAGS = [
 # ═══════════════════════════════════════════════════════════════════
 
 SEO_PRIMARY_KEYWORD = "milagros reales documentados"
+# W4: anclas de nicho (guardia anti-fuga). Stems en minúscula sin acentos.
+NICHE_ANCHORS = [
+    "sincron", "coinciden", "casualidad", "milagr", "prodigio",
+    "inexplicable", "misterio", "destino", "premonicion", "paranormal",
+    "espiritual", "universo",
+]
 SEO_SECONDARY_KEYWORDS = [
     "casualidades imposibles", "coincidencias inexplicables",
     "sincronías del universo", "fenómenos inexplicables reales",
