@@ -188,21 +188,25 @@ def _iter_reference_rows(db) -> Iterable[tuple[str, bool]]:
             if bn:
                 yield bn, uploaded
 
-    # video_asset_history inherits the parent video status
+    # video_asset_history inherits the parent video status.
+    # Purged rows are excluded: they keep file_path (no clearing — the table has
+    # a UNIQUE constraint on file_path) and must not count as live references.
     for row in conn.execute(
         "SELECT h.file_path, "
         "(v.yt_video_id IS NOT NULL AND v.yt_video_id != '') AS uploaded "
-        "FROM video_asset_history h LEFT JOIN videos v ON h.video_id = v.id"
+        "FROM video_asset_history h LEFT JOIN videos v ON h.video_id = v.id "
+        "WHERE h.purged_at IS NULL"
     ):
         bn = normalize_basename(row["file_path"])
         if bn:
             yield bn, bool(row["uploaded"])
 
-    # short_asset_history inherits the parent short status
+    # short_asset_history inherits the parent short status (purged excluded).
     for row in conn.execute(
         "SELECT h.file_path, "
         "(s.youtube_id IS NOT NULL AND s.youtube_id != '') AS uploaded "
-        "FROM short_asset_history h LEFT JOIN shorts s ON h.short_id = s.id"
+        "FROM short_asset_history h LEFT JOIN shorts s ON h.short_id = s.id "
+        "WHERE h.purged_at IS NULL"
     ):
         bn = normalize_basename(row["file_path"])
         if bn:
@@ -482,7 +486,7 @@ def _purge_asset_history(db, table: str, fk_col: str, entity_id: int,
     """Delete files referenced by an entity's asset-history rows (shared-safe)."""
     try:
         rows = db._connect().execute(
-            f"SELECT file_path FROM {table} WHERE {fk_col} = ?",
+            f"SELECT file_path FROM {table} WHERE {fk_col} = ? AND purged_at IS NULL",
             (entity_id,),
         ).fetchall()
     except Exception as exc:  # noqa: BLE001
@@ -499,7 +503,7 @@ def _purge_asset_history(db, table: str, fk_col: str, entity_id: int,
         report["freed_bytes"] += _unlink(p, report, table, dry_run, locked)
     _mark_purged(
         db,
-        f"UPDATE {table} SET purged_at=datetime('now'), file_path='' "
+        f"UPDATE {table} SET purged_at=datetime('now') "
         f"WHERE {fk_col}=? AND purged_at IS NULL",
         (entity_id,), report, dry_run, table,
     )
