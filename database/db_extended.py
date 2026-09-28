@@ -1415,6 +1415,9 @@ def migrate_v2(db_path: str = None):
     # ── v62: OverlaySpec persistido (W3 packaging) ──
     _migrate_v62(conn, logger)
 
+    # ── v63: atribución de estrategia A/B de miniatura (W6) ──
+    _migrate_v63(conn, logger)
+
     conn.commit()
     conn.close()
     
@@ -3665,6 +3668,29 @@ def _migrate_v62(conn, logger):
         except sqlite3.OperationalError:
             pass  # already present — idempotent
     conn.commit()
+
+
+def _migrate_v63(conn, logger):
+    """Idempotent v63: A/B thumbnail strategy attribution (W6).
+
+    ``video_ab_tests.thumbnail_variant_strategies`` stores one strategy label
+    per variant so CTR can be attributed to a strategy and the active video's
+    ``thumbnail_variant_strategy`` can follow the A/B rotation.
+    """
+    try:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(video_ab_tests)")}
+    except sqlite3.OperationalError:
+        logger.debug("Migration v63: video_ab_tests table does not exist yet — skipping")
+        return
+    if "thumbnail_variant_strategies" not in cols:
+        try:
+            conn.execute(
+                "ALTER TABLE video_ab_tests ADD COLUMN thumbnail_variant_strategies TEXT DEFAULT '[]'"
+            )
+            conn.commit()
+            logger.info("Migration v63: added thumbnail_variant_strategies to video_ab_tests")
+        except sqlite3.OperationalError as exc:
+            logger.debug("Migration v63: could not add thumbnail_variant_strategies (%s)", exc)
 
 
 def _migrate_v10(conn, logger):
