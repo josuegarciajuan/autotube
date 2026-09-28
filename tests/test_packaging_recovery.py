@@ -267,3 +267,50 @@ def test_evidence_only_failure_without_script_stays_manual(tmp_path, monkeypatch
     assert result["recovered"] == 0
     assert result["details"][0]["action"] == "still_invalid"
     assert called["n"] == 0
+
+
+def test_llm_retitle_after_deterministic_sanitize_reduces_reasons(tmp_path, monkeypatch):
+    """Regresión: un fallo MIXTO (banned_token + incomplete_phrase) debe
+    reintentarse con LLM una vez el saneado determinista quita el conector
+    colgante. Antes se comparaban las razones ORIGINALES y el LLM nunca corría.
+    """
+    import api.services.upload_scheduler as scheduler
+    import config.config_bridge as bridge
+    import api.services.title_recovery as tr
+    from pipeline.title_tokens import has_dangling_tail
+
+    def fake_validate(video, cfg):
+        t = video.get("titulo_final") or ""
+        reasons = []
+        if "imposible" in t.lower():
+            reasons.append("banned_token")
+        if has_dangling_tail(t):
+            reasons.append("incomplete_phrase")
+        return ValidationResult(not reasons, tuple(reasons))
+
+    monkeypatch.setattr(scheduler, "validate_upload_packaging", fake_validate)
+
+    class Cfg:
+        TITLE_MIN_CHARS = 28
+        TITLE_MAX_CHARS = 65
+
+    monkeypatch.setattr(bridge, "get_channel_config", lambda slug: Cfg())
+
+    calls = {"n": 0}
+
+    def fake_retitle_one(db, row, cfg, **kw):
+        calls["n"] += 1
+        return {"action": "retitled",
+                "new_title": "Naufragios reales del Atlántico",
+                "reasons": ["banned_token"]}
+
+    monkeypatch.setattr(tr, "retitle_one_video", fake_retitle_one)
+
+    video = _video(tmp_path, 1, valid=False)
+    video["titulo_final"] = "Náufragos que desafiaron lo imposible: relatos reales de"
+    video["script_id"] = 10
+    db = FakeDB([video])
+
+    result = recovery.recover_packaging_held_videos(db=db)
+    assert result["details"][0]["action"] == "llm_retitled"
+    assert calls["n"] == 1

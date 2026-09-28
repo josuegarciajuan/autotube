@@ -192,9 +192,17 @@ def recover_packaging_held_videos(
                     retry_video = dict(video)
                     retry_video["titulo_final"] = repaired
                     retry = validate_upload_packaging(retry_video, cfg)
+                    # Reflejar SIEMPRE el resultado del saneado determinista
+                    # (aunque siga inválido): así la comprobación de "solo
+                    # razones que exigen evidencia" ve el set REDUCIDO (p. ej.
+                    # solo banned_token tras quitar un conector colgante) y
+                    # permite el reintento LLM. Antes ``result`` conservaba las
+                    # razones ORIGINALES (banned_token + incomplete_phrase) y el
+                    # LLM nunca se intentaba → vídeo colgado para siempre
+                    # (bug sep 2026).
+                    result = retry
                     if retry.valid:
                         new_title = repaired
-                        result = retry
             if not result.valid:
                 # C1b: los motivos que exigen evidencia (specificity,
                 # generic_sensationalism, banned_token) no se pueden reparar de
