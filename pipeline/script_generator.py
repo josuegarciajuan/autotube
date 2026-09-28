@@ -5,7 +5,6 @@ Transforms scraped raw content into structured YouTube scripts
 with scene markers, title options, and emotion annotations.
 """
 
-import importlib
 import json
 import logging
 import random
@@ -1352,14 +1351,17 @@ class ScriptGenerator:
         duration_min_val = word_target.get("duration_target", 15)
         palabras_objetivo = word_target.get("palabras_objetivo", 2500)
 
+        # Fuente única de prompts (no hay módulos prompts/{canal}_prompts).
+        # Se usa build_outline_prompt, que inyecta el arquetipo narrativo variable
+        # y las reglas de retención/hook del canal. El seed fija el arquetipo por
+        # vídeo (anti-plantilla: dos vídeos no comparten estructura).
         try:
-            prompts_module = importlib.import_module(
-                f"prompts.{self.canal}_prompts"
-            )
-            system_prompt = prompts_module.build_outline_prompt(
+            from prompts.base_prompts import build_outline_prompt
+            system_prompt = build_outline_prompt(
                 config=self.canal_config,
                 duration_min=duration_min_val,
                 word_target=palabras_objetivo,
+                variant_seed=content_item.get("id"),
             )
         except (ImportError, AttributeError):
             system_prompt = (

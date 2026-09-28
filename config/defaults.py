@@ -122,6 +122,25 @@ SCRIPT_HISTORY_GATE_THRESHOLD = 0.55   # Jaccard de 4-gramas (conservador)
 # propios dicts {key, name, guidance} para forzar su repertorio.
 NARRATIVE_ARCHETYPES = []
 
+# ── Fase 3: bucle de retención con curvas (experimento de recuperación) ──────
+# Cierra el lazo histórico→generación: recolecta la curva de audiencia
+# (audienceWatchRatio × elapsedVideoTimeRatio), la mapea a las fases del guion
+# (phase_id de scene_ranges) y deriva una directiva que se inyecta en el prompt.
+# Kill-switch sin despliegue: RETENTION_FEEDBACK_ENABLED=False o
+# system_state["retention_feedback_disabled"]="true".
+RETENTION_FEEDBACK_ENABLED = True
+RETENTION_TARGET_PCT = 40.0           # objetivo del experimento (spec §5)
+RETENTION_LOOKBACK_DAYS = 90          # ventana de vídeos analizados
+RETENTION_CURVE_MAX_VIDEOS = 20       # curvas recolectadas por canal y recolección
+RETENTION_CURVE_MIN_VIDEOS = 3        # mínimo para calcular una señal fiable
+RETENTION_CURVE_MIN_POINTS = 5        # mínimo de buckets por curva
+RETENTION_FOCUS_MAX_PHASES = 2        # fases débiles que se citan en la directiva
+RETENTION_FEEDBACK_MAX_AGE_HOURS = 48 # caducidad de la señal cacheada
+# Report type de persistencia de la curva en video_analytics_detailed
+# (dimension = elapsedVideoTimeRatio, metric_value = audienceWatchRatio).
+RETENTION_CURVE_REPORT_TYPE = "audience_retention"
+RETENTION_CURVE_RRP_REPORT_TYPE = "audience_retention_rrp"
+
 # ── Embudo de alcance: YouTube Reporting API (reach reports) ─────────────────
 # La Analytics API no expone impresiones orgánicas ni CTR; el Reporting API sí
 # (bulk, cuota propia). Kill-switch: poner False desactiva la recolección del

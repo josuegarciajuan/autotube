@@ -46,6 +46,66 @@ def _extract_emotions_text(cfg) -> str:
     return "asombro, curiosidad, intriga, anticipacion, reflexion"
 
 
+def _structure_section_text(cfg) -> str:
+    """Narrative phases + per-phase retention anchors (channel config)."""
+    body = _extract_structure_text(cfg)
+    if not body:
+        return ""
+    return (
+        "ESTRUCTURA NARRATIVA OBLIGATORIA (fases del canal, en orden):\n"
+        + body + "\n"
+    )
+
+
+def _emotions_section_text(cfg) -> str:
+    """Emotional arc as an explicit prompt section."""
+    arc = _extract_emotions_text(cfg)
+    if not arc:
+        return ""
+    return f"ARCO EMOCIONAL (progresión de emociones): {arc}\n"
+
+
+def _hook_rule_text(cfg) -> str:
+    """Channel-specific hook rule, if defined."""
+    rule = str(getattr(cfg, "SCRIPT_HOOK_RULE", "") or "").strip()
+    if not rule:
+        return ""
+    return f"\nREGLA DE GANCHO DEL CANAL (OBLIGATORIA):\n{rule}\n"
+
+
+def _virality_rules_text(cfg) -> str:
+    """Virality triggers as concrete instructions, if defined."""
+    triggers = getattr(cfg, "VIRALITY_TRIGGERS", []) or []
+    out = []
+    for t in triggers:
+        if isinstance(t, dict):
+            name = str(t.get("name", "")).strip()
+            mech = str(t.get("mechanism", "")).strip()
+            if name or mech:
+                out.append(f"  - {name}: {mech}".strip().rstrip(":"))
+        elif isinstance(t, str):
+            out.append(f"  - {t}")
+    if not out:
+        return ""
+    return "TRIGGERS DE VIRALIDAD (incluye al menos 2):\n" + "\n".join(out) + "\n"
+
+
+def _retention_playbook_text(cfg) -> str:
+    """Aggregate hook rule + narrative structure + emotional arc + virality.
+
+    This is the *static* retention playbook already declared per channel in
+    ``config/{slug}_config.py``; until now it was never injected into any
+    prompt. It is feed-forward guidance (no historical data involved).
+    """
+    parts = [
+        _hook_rule_text(cfg),
+        _structure_section_text(cfg),
+        _emotions_section_text(cfg),
+        _virality_rules_text(cfg),
+    ]
+    return "".join(p for p in parts if p)
+
+
 def _niche_substance_rule(cfg) -> str:
     """Return a niche-specific credibility rule based on the channel's style."""
     style = str(getattr(cfg, "CANAL_NARRATIVE_STYLE", "")).lower()
@@ -220,6 +280,7 @@ def build_outline_prompt(config, duration_min: float = 15, word_target: int = 25
     archetype_block = archetype_prompt_block(
         pick_archetype(config, seed=variant_seed)
     )
+    playbook = _retention_playbook_text(config)
 
     return f"""Eres un editor de documentales y divulgador especializado.
 TONO: {tone}
@@ -239,6 +300,7 @@ REGLAS INQUEBRANTABLES:
 
 {archetype_block}
 
+{playbook}
 FORMATO DE SALIDA (JSON):
 {{
   "summary": "Resumen de 1-2 frases del arco narrativo completo del video",
@@ -384,6 +446,8 @@ REGLAS DE CONTENIDO (OBLIGATORIO):
     if source_text:
         source_context = f"\nCONTENIDO FUENTE (usalo como base):\n{source_text[:2000]}\n"
 
+    playbook = _retention_playbook_text(config)
+
     base_style = str(getattr(config, "CANAL_NARRATIVE_STYLE", "documental"))
     if "medic" in base_style.lower() or "clinico" in base_style.lower():
         specialty = "casos clinicos inexplicables, enfermedades raras y misterios medicos"
@@ -409,6 +473,7 @@ REGLAS ESTRICTAS:
 6. CRITICO: Cada bloque debe CONTENER al menos un hecho concreto (numero, fecha, nombre, lugar, cita).
 7. ENGANCHE INICIAL: Los primeros bloques deben ser ALTAMENTE intrigantes. NUNCA empieces con frases como "En este video vamos a..." o "Hoy hablaremos de...".{source_context}{context_text}{outline_context}
 
+{playbook}
 Genera entre 2 y 4 bloques narrativos (~{word_guidance} palabras total).
 Cada bloque SOLO necesita el campo "texto".
 Responde UNICAMENTE con JSON: {{"bloques": [{{"texto": "parrafo aqui..."}}, ...]}}"""
@@ -465,6 +530,10 @@ def build_system_prompt(config, word_count_emphasis: float = 1.0,
     # Derive niche-specific intro line from config
     niche_intro = _specialty_intro(config)
 
+    # Retention playbook declared per channel (hook rule, narrative phases with
+    # anchors, emotional arc, virality triggers). Feed-forward guidance.
+    playbook = _retention_playbook_text(config)
+
     return f"""{niche_intro}{mode_banner}{chunk_banner}
 
 TONO: {tone}
@@ -483,6 +552,7 @@ REGLAS ESENCIALES:
 
 5. ESTRUCTURA CLARA. El guion debe tener: introduccion impactante, desarrollo con datos concretos, climax, y cierre reflexivo. Cada bloque debe ser autocontenido y visualizable.
 
+{playbook}
 6. CIERRE. El final debe incluir: \"{outro}\" como reflexion de cierre y resolver el arco de ESTE video. No anticipes, anuncies ni enlaces al proximo/siguiente video, episodio o entrega. PERO NO uses formulas genericas de YouTube como \"suscribete\", \"dale like\", \"activa la campanita\" ni similares.
 
 7. LONGITUD. Apunta a {duration_target} minutos de video ({words_guide} palabras). Es una guia, no una regla rigida — prioriza calidad sobre cantidad.
