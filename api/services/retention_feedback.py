@@ -330,17 +330,25 @@ def compute_channel_signal(db, channel: dict, cfg=None,
         elif older - recent > _TREND_EPS:
             trend = "down"
 
-    labels = _phase_labels(
-        cfg,
-        [pid for pid, _ in sorted(phase_avg.items(), key=lambda kv: kv[1])[:max_phases]],
-    )
+    # Prioriza fases REALES del canal (SCRIPT_STRUCTURE). La pseudo-fase
+    # "default" solo aparece en vídeos anteriores sin phase_id; citarla en la
+    # directiva sería confuso, así que se omite salvo que no haya ninguna real.
+    known = {
+        p.get("id") for p in (getattr(cfg, "SCRIPT_STRUCTURE", []) or [])
+        if isinstance(p, dict) and p.get("id")
+    }
+    ranked = sorted(phase_avg.items(), key=lambda kv: kv[1])
+    ranked_known = [(pid, val) for pid, val in ranked if pid in known]
+    ranked_sel = (ranked_known if ranked_known else ranked)[:max_phases]
+
+    labels = _phase_labels(cfg, [pid for pid, _ in ranked_sel])
     weak = [
         {
             "phase_id": pid,
             "label": labels.get(pid, pid),
             "watch_ratio_pct": round(val * 100, 1),
         }
-        for pid, val in sorted(phase_avg.items(), key=lambda kv: kv[1])[:max_phases]
+        for pid, val in ranked_sel
     ]
 
     signal = {

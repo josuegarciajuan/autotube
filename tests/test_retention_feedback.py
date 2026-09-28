@@ -214,6 +214,41 @@ def test_signal_above_target_has_no_weak_directive():
     assert "OBJETIVO" not in sig["directive"]  # positive branch
 
 
+def test_weak_phases_exclude_default_when_real_phases_exist():
+    """La pseudo-fase 'default' (vídeos viejos sin phase_id) no se cita."""
+    conn = _make_conn()
+    timeline = [
+        {"phase_id": "gancho", "start": 0, "end": 60},
+        {"phase_id": "default", "start": 60, "end": 300},
+        {"phase_id": "cierre", "start": 300, "end": 600},
+    ]
+    for v in range(1, 5):
+        conn.execute(
+            "INSERT INTO videos VALUES (?,?,?,?,?,?,?)",
+            (v, 1, None, 600, f"2026-09-{v:02d}T10:00:00", None,
+             json.dumps({"media": {"scene_ranges": timeline}})),
+        )
+        rows = []
+        for i in range(0, 100, 5):
+            ratio = i / 100.0
+            t = ratio * 600
+            wr = 0.50 if t < 60 else (0.05 if t < 300 else 0.30)
+            rows.append((v, f"y{v}", "audience_retention", str(round(ratio, 5)), wr))
+        conn.executemany(
+            """INSERT INTO video_analytics_detailed
+               (video_id, yt_video_id, report_type, dimension, metric_value)
+               VALUES (?,?,?,?,?)""",
+            rows,
+        )
+    conn.commit()
+    db = FakeDB(conn)
+    sig = rf.compute_channel_signal(db, {"id": 1, "slug": "canalx"}, cfg=_cfg())
+    assert sig is not None
+    weak_ids = [w["phase_id"] for w in sig["weak_phases"]]
+    assert "default" not in weak_ids
+    assert weak_ids and weak_ids[0] == "cierre"  # 0.30 vs gancho 0.50
+
+
 def test_signal_insufficient_data_returns_none():
     conn = _make_conn()
     _seed_videos(conn, n=2)  # < RETENTION_CURVE_MIN_VIDEOS=3
