@@ -1,0 +1,11 @@
+[Unit]
+Description=Ejecuta el barrido de retención de Autotube a diario (06:30)
+Requires=autotube-media-retention.service
+
+[Timer]
+OnCalendar=*-*-* 06:30:00
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

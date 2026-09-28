@@ -15,6 +15,7 @@ Dry-run por defecto. Uso:
 """
 
 import argparse
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -30,8 +31,32 @@ def format_size(b: float) -> str:
     return f"{b:.1f} TB"
 
 
+def _tracked_files() -> set:
+    """Absolute paths of files tracked by git (must never be deleted).
+
+    Some stale DB backups are versioned in the repo (``*.bak``); deleting them
+    would dirty the production tree and is forbidden. The repo pre-commit hook
+    also blocks committing their removal, so the only safe behaviour is to skip
+    them. Best-effort: if git is unavailable, returns an empty set.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "-z"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if out.returncode == 0:
+            return {
+                str((ROOT / p).resolve())
+                for p in out.stdout.split("\0") if p
+            }
+    except Exception:  # noqa: BLE001
+        pass
+    return set()
+
+
 def _collect(min_age_days: float):
     cutoff = time.time() - min_age_days * 86400.0
+    tracked = _tracked_files()
     candidates = []
     logs = ROOT / "logs"
     if logs.is_dir():
@@ -49,14 +74,15 @@ def _collect(min_age_days: float):
         for p in data.glob("*.bak*"):
             if p.is_file() and p.stat().st_mtime < cutoff:
                 candidates.append(p)
-    # dedup preserving order
+    # dedup preserving order, skipping git-tracked files
     seen = set()
     out = []
     for p in candidates:
         rp = str(p.resolve())
-        if rp not in seen:
-            seen.add(rp)
-            out.append(p)
+        if rp in seen or rp in tracked:
+            continue
+        seen.add(rp)
+        out.append(p)
     return out
 
 

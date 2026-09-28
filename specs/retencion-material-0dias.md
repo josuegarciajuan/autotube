@@ -80,12 +80,20 @@ fichero local. No quedan referencias colgantes a rutas borradas.
   revisar manifiesto → `--execute`.
   Modos: `--entity-videos`, `--entity-shorts`, `--orphans`, `--category`,
   `--min-age-hours`, `--canal`, `--json-out`.
-- **Periódico (automático):** loop `media_retention` en `api/main.py` (cada 6 h,
-  0 cuota). Solo borra archivos **huérfanos o de entidades ya subidas**, nunca
-  bloqueados ni de entidades pendientes ni recientes
-  (`MEDIA_RETENTION_MIN_AGE_HOURS`, def. 6 h).
-  **Desactivado por defecto** (`MEDIA_RETENTION_SWEEP_ENABLED=false`): hay que
-  revisar primero el manifiesto del dry-run y activarlo explícitamente.
+- **Periódico (automático):** **systemd timer** `autotube-media-retention.timer`
+  (diario 06:30, `RandomizedDelaySec=30min`, `Persistent=true`), unidades
+  versionadas en `deploy/autotube-media-retention.{service,timer}`.
+  Ejecuta en una pasada, con `flock` anti-solapamiento y prioridad baja
+  (`Nice=10`, IO best-effort):
+  1. `scripts/cleanup_residuals_batch.py --execute --min-age-hours 24`
+     (material de entidades subidas + huérfanos/caché),
+  2. `scripts/purge_logs_and_backups.py --execute --days 14`
+     (logs rotados + backups de BD viejos; **los archivos trackeados en git se
+     omiten**, p. ej. los `autotube.db.bak*` versionados, para no ensuciar el árbol).
+  Solo borra archivos **huérfanos o de entidades ya subidas**, nunca bloqueados,
+  de entidades pendientes, ni recientes (`--min-age-hours 24`).
+  El loop in-app (`_media_retention_loop`) queda **desactivado**
+  (`MEDIA_RETENTION_SWEEP_ENABLED=false`) para que la única fuente sea el timer.
   La purga post-subida (retención 0 días) **sí** está activa siempre.
 - **Política de cachés/pools** (`ai_cache/pollinations`, `shorts_clips`,
   `images`, `ai_images`): solo se purgan huérfanos / material subido. **Sin tope
