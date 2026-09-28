@@ -322,16 +322,19 @@ def _primary_keyword(script: dict, config) -> str:
     return str(getattr(config, "SEO_PRIMARY_KEYWORD", "") or "").strip()
 
 
-def score_title(title: str, script: dict, config) -> tuple[int, dict]:
-    """Deterministic 7-criterion rubric (0-14) plus penalties.
+def score_title(title: str, script: dict, config, keyword_plan=None) -> tuple[int, dict]:
+    """Deterministic rubric (search-intent aware) plus penalties.
 
     Returns ``(final_score, breakdown)`` where ``breakdown`` contains each
-    criterion, the penalty map, and the totals.
+    criterion, the penalty map, and the totals. ``keyword_plan`` (W2) adds the
+    real search-demand dimensions ``search_intent`` and ``searchable_entity``.
     """
     text = " ".join(str(title or "").split())
     words = text.split()
     first_norm = normalize(words[0]).strip("¿?¡!.,;:()«»\"'") if words else ""
     norm = normalize(text)
+    proper = _proper_nouns(text)
+    has_fact = _has_number_or_year(text)
 
     # 1. Subject clarity — reject empty demonstratives ("Esto/Esta/Estos").
     if not text:
@@ -358,6 +361,33 @@ def score_title(title: str, script: dict, config) -> tuple[int, dict]:
         else:
             keyword_front = 0
 
+    # 2b. Search intent (W2) — the planned real query is present and front.
+    plan_primary = ""
+    if keyword_plan is not None:
+        plan_primary = str(getattr(keyword_plan, "primary", "") or "").strip()
+    if not plan_primary:
+        search_intent = 1
+    else:
+        plan_norm = normalize(plan_primary)
+        idx = norm.find(plan_norm)
+        if idx != -1 and idx <= 50:
+            search_intent = 3
+        else:
+            plan_tokens = {t for t in plan_norm.split() if len(t) >= 4}
+            overlap = len(plan_tokens & set(norm.split())) / max(1, len(plan_tokens))
+            search_intent = 2 if overlap >= 0.6 else (1 if overlap > 0 else 0)
+
+    # 2c. Searchable entity — a proper noun / number / planned entity.
+    plan_entities = []
+    if keyword_plan is not None:
+        plan_entities = [str(e) for e in (getattr(keyword_plan, "entities", []) or [])]
+    if plan_entities and any(normalize(e) in norm for e in plan_entities):
+        searchable_entity = 2
+    elif has_fact or proper:
+        searchable_entity = 1
+    else:
+        searchable_entity = 0
+
     # 3. Curiosity — real unknown / revelation / contradiction.
     if any(p in norm.split() for p in _EMPTY_PRONOUNS):
         curiosity = 0
@@ -377,8 +407,6 @@ def score_title(title: str, script: dict, config) -> tuple[int, dict]:
         stakes = 0
 
     # 5. Specificity — number / year / proper noun / place.
-    proper = _proper_nouns(text)
-    has_fact = _has_number_or_year(text)
     if has_fact or proper:
         specificity = 2
     elif len(words) >= 5:
@@ -407,6 +435,8 @@ def score_title(title: str, script: dict, config) -> tuple[int, dict]:
     criteria = {
         "subject_clarity": subject,
         "keyword_front": keyword_front,
+        "search_intent": search_intent,
+        "searchable_entity": searchable_entity,
         "curiosity": curiosity,
         "stakes": stakes,
         "specificity": specificity,
@@ -417,12 +447,14 @@ def score_title(title: str, script: dict, config) -> tuple[int, dict]:
 
     # ── Deterministic penalties ──
     t_min = int(getattr(config, "TITLE_TARGET_MIN_CHARS", 45) or 45)
-    t_max = int(getattr(config, "TITLE_TARGET_MAX_CHARS", 70) or 70)
-    hard_max = int(getattr(config, "TITLE_MAX_CHARS", 100) or 100)
+    t_max = int(getattr(config, "TITLE_TARGET_MAX_CHARS", 65) or 65)
+    hard_max = int(getattr(config, "TITLE_MAX_CHARS", 65) or 65)
     band_max = min(t_max, hard_max)
     penalties: dict[str, int] = {}
     if len(text) < t_min or len(text) > band_max:
         penalties["length"] = -3
+    if keyword_plan is not None and plan_primary and search_intent == 0:
+        penalties["keyword_absent"] = -4
     if contains_banned_token(text):
         penalties["banned_token"] = -6
     if has_dangling_tail(text):
@@ -594,7 +626,7 @@ class TitleEngine:
                 script, source_content, keyword_plan=keyword_plan
             )
 
-        candidates = self._collect_candidates(raw_candidates, script)
+        candidates = self._collect_candidates(raw_candidates, script, keyword_plan)
 
         # One compression pass for oversized/incomplete LLM candidates.
         if not candidates and use_llm:
@@ -604,11 +636,11 @@ class TitleEngine:
                     oversized, script, keyword_plan=keyword_plan
                 ):
                     raw_candidates.append((title, "compressed"))
-                candidates = self._collect_candidates(raw_candidates, script)
+                candidates = self._collect_candidates(raw_candidates, script, keyword_plan)
 
         if not candidates:
             fallback = deterministic_fallback_title(script, self.config, keyword_plan)
-            score, breakdown = score_title(fallback, script, self.config)
+            score, breakdown = score_title(fallback, script, self.config, keyword_plan)
             candidates = [{
                 "title": fallback,
                 "rubric_score": score,
@@ -658,7 +690,7 @@ class TitleEngine:
     # ── Candidate rendering / integrity ───────────────────────────
 
     def _collect_candidates(
-        self, raw_candidates: list[tuple[str, str]], script: dict
+        self, raw_candidates: list[tuple[str, str]], script: dict, keyword_plan=None
     ) -> list[dict]:
         """Render candidates without truncation; keep only complete + in-budget."""
         hard_max = int(getattr(self.config, "TITLE_MAX_CHARS", 65) or 65)
@@ -676,7 +708,7 @@ class TitleEngine:
             ok, _reason = is_complete_title(rendered)
             if not ok or len(rendered) > hard_max or contains_banned_token(rendered):
                 continue
-            score, breakdown = score_title(rendered, script, self.config)
+            score, breakdown = score_title(rendered, script, self.config, keyword_plan)
             out.append({
                 "title": rendered,
                 "rubric_score": score,

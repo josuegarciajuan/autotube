@@ -68,6 +68,15 @@ TITLE_BAD_EXAMPLES = []
 # converging on the same generic "la historia que cambió el caso").
 TITLE_FALLBACK_PHRASE = ""
 
+# ── W2: search-demand planner (0 quota) ─────────────────────────────
+# Feeds real autocomplete/Trends demand into the title engine. Competition via
+# yt-dlp is opt-in (extra latency, 0 quota). Kill-switch: set to False.
+TITLE_KEYWORD_PLANNER_ENABLED = True
+TITLE_KEYWORD_MAX_SEEDS = 8
+TITLE_KEYWORD_COMPETITION_ENABLED = False
+TITLE_KEYWORD_INTENT_PREFIXES = ["cómo", "por qué", "qué pasó con", "la historia de"]
+TITLE_KEYWORD_SUFFIXES = ["explicado", "caso", "documental"]
+
 THUMBNAIL_MAX_OVERLAY_CHARS = 32
 THUMBNAIL_BANNED_OVERLAY_CLAIMS = ["oculto", "real", "prohibido"]
 RECOVERY_CHECKPOINTS_ENABLED = False

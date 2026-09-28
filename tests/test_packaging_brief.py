@@ -118,10 +118,12 @@ def test_validate_spec_flags_empty_offtopic_and_credibility():
     reasons, _ = validate_overlay_spec(OverlaySpec(), "Un caso", cfg)
     assert "overlay_empty" in reasons
 
-    reasons2, _ = validate_overlay_spec(
+    reasons2, warnings2 = validate_overlay_spec(
         OverlaySpec(l1="ZZZ", l2="algo"), "La expedición Franklin", cfg
     )
-    assert "overlay_off_topic" in reasons2
+    # Off-topic anchoring is advisory at the gate (enforced at generation).
+    assert "overlay_off_topic" in warnings2
+    assert "overlay_off_topic" not in reasons2
 
     reasons3, _ = validate_overlay_spec(
         OverlaySpec(l1="FRANKLIN", l2="129", badge="CASO REAL"),

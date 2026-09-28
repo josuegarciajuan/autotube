@@ -591,13 +591,32 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
             )
             
             # ── Title selection via TitleEngine (v49) ──────────────
+            # ── W2: real search-demand plan (0 quota, fail-open) ──
+            keyword_plan = None
+            if (getattr(self.config, "TITLE_KEYWORD_PLANNER_ENABLED", True)
+                    and getattr(self.config, "SEO_ENABLE_REALTIME_RESEARCH", True)):
+                try:
+                    from pipeline.title_keyword_planner import TitleKeywordPlanner
+                    keyword_plan = TitleKeywordPlanner(
+                        self.config, getattr(self.config, "CANAL_NAME", "")
+                    ).plan(script, source_content)
+                    if keyword_plan and keyword_plan.primary:
+                        logger.info(
+                            "SEO plan: primary=%r secondary=%s",
+                            keyword_plan.primary, keyword_plan.secondary[:3],
+                        )
+                except Exception as exc:  # noqa: BLE001 — never block metadata
+                    logger.debug("keyword planner failed (non-critical): %s", exc)
+
             engine_result = None
             title = ""
             title_candidates: list = []
             title_rationale = ""
             if getattr(self.config, "TITLE_ENGINE_ENABLED", True):
                 try:
-                    engine_result = TitleEngine(self.config).generate(script, source_content)
+                    engine_result = TitleEngine(self.config).generate(
+                        script, source_content, keyword_plan=keyword_plan
+                    )
                     title = engine_result.get("selected_title", "") or ""
                     title_candidates = engine_result.get("candidates", []) or []
                     title_rationale = engine_result.get("rationale", "") or ""
@@ -691,6 +710,7 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
                 "thumbnail_text": thumbnail_text,
                 "badge_text": badge_text,
                 "thumbnail_spec": thumbnail_spec.as_dict(),
+                "keyword_plan": keyword_plan.as_dict() if keyword_plan else {},
                 "category_id": self.yt_category_id,
                 "token_count": token_count,
                 "cost_estimate": cost_estimate,

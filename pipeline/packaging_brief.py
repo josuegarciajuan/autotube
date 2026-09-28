@@ -245,8 +245,11 @@ def validate_overlay_spec(spec: OverlaySpec, title: str, cfg) -> tuple[list[str]
         reasons.append("length")
 
     terms = set(title_terms(title))
+    # Advisory: generation-time build_overlay_spec already anchors L1 to a
+    # title term. At the gate this is a warning, not a block, so a retitled
+    # video is not stalled (the thumbnail is regenerated on the next cycle).
     if spec.l1 and terms and not (set(_tokens(spec.l1)) & terms):
-        reasons.append("overlay_off_topic")
+        warnings.append("overlay_off_topic")
 
     norm_title = normalize(title)
     if spec.l2 and len(spec.l2) >= 8 and normalize(spec.l2) in norm_title:
