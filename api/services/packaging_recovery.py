@@ -22,18 +22,28 @@ MAX_RECOVERIES_PER_CHANNEL_PER_CYCLE = 5
 # Hard cap per invocation.
 MAX_RECOVERIES_PER_CYCLE = 25
 
-# Motivos de título que NO se pueden reparar de forma determinista: exigen
-# evidencia del contenido, así que solo el LLM (o un humano) puede proponer un
-# título válido. Si el vídeo tiene guion, se intenta regenerar UNA vez por
-# vídeo y ciclo; el resto de motivos los cubre el saneado determinista.
-_EVIDENCE_ONLY_TITLE_REASONS = frozenset({
-    "specificity", "generic_sensationalism", "banned_token",
+# Motivos que pertenecen al TÍTULO (a diferencia de los de overlay/imagen).
+# Sirven para distinguir "el título sigue inválido" de "la miniatura tiene un
+# problema aparte" al decidir si merece la pena un re-título por LLM.
+_TITLE_REASON_UNIVERSE = frozenset({
+    "length", "generic_sensationalism", "specificity", "banned_token",
+    "incomplete_phrase", "injected_suffix", "clickbait_suffix",
+    "unbalanced_punctuation", "excessive_caps", "all_caps",
 })
 
 
-def _is_evidence_only_title_failure(reasons) -> bool:
-    r = set(reasons or ())
-    return bool(r) and r <= _EVIDENCE_ONLY_TITLE_REASONS
+def _has_title_reason(reasons) -> bool:
+    """True si queda algún bloqueo de título tras el saneado determinista.
+
+    Al contrario que el antiguo ``_is_evidence_only_title_failure`` (que exigía
+    que TODOS los motivos fueran "evidence-only"), aquí basta con que quede
+    CUALQUIER motivo de título. Así el re-título por LLM también se intenta
+    cuando el motivo es mixto (p. ej. ``banned_token`` + ``incomplete_phrase``,
+    o un fallo "reparable" que el saneador determinista no consiguió resolver)
+    sin que un ``overlay_empty`` legacy lo bloquee. Con guion disponible y el
+    guard por vídeo, el coste LLM sigue acotado.
+    """
+    return bool(set(reasons or ()) & _TITLE_REASON_UNIVERSE)
 
 
 def _retitle_attempted_key(video_id) -> str:
@@ -161,6 +171,10 @@ def recover_packaging_held_videos(
             "titulo_final": row.get("titulo_final"),
             "thumbnail_path": row.get("thumbnail_path"),
             "thumbnail_text": row.get("thumbnail_text"),
+            "thumbnail_badge_text": row.get("thumbnail_badge_text"),
+            "thumbnail_emphasis": row.get("thumbnail_emphasis"),
+            "thumbnail_variant_strategy": row.get("thumbnail_variant_strategy"),
+            "thumbnail_overlay_source": row.get("thumbnail_overlay_source"),
         }
         try:
             result = validate_upload_packaging(video, cfg)
@@ -206,9 +220,10 @@ def recover_packaging_held_videos(
             if not result.valid:
                 # C1b: los motivos que exigen evidencia (specificity,
                 # generic_sensationalism, banned_token) no se pueden reparar de
-                # forma determinista. Si hay guion, se intenta regenerar el
-                # título con el LLM UNA vez por vídeo (guard en system_state).
-                if (_is_evidence_only_title_failure(result.reasons)
+                # forma determinista. Si queda CUALQUIER motivo de título y hay
+                # guion, se intenta regenerar el título con el LLM UNA vez por
+                # vídeo (guard en system_state).
+                if (_has_title_reason(result.reasons)
                         and row.get("script_id")
                         and _llm_retitle_once(db, row, cfg, dry_run=dry_run)):
                     recovered += 1

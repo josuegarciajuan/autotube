@@ -2736,14 +2736,22 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                             continue  # restart loop with guard bypass
                         logger.warning(
                             "Force dispatch: no viable slots after %d attempts "
-                            "(bypass=%s)",
-                            _force_retry, _force_bypass_guards,
+                            "(bypass=%s, failed_ids=%d)",
+                            _force_retry, _force_bypass_guards, len(_failed_force_ids),
                         )
-                        _alert_shorts_dispatch_exhausted(
-                            f"Force dispatch sin slots viables tras {_force_retry} intentos "
-                            f"(bypass={_force_bypass_guards}). Slots intentados: "
-                            f"{list(sorted(_failed_force_ids))[:20] or 'ninguno'}."
-                        )
+                        # Anti-ruido (fix sep 2026): solo alertar cuando hubo
+                        # intentos REALES que fallaron los guards. Si no hay
+                        # slots pendientes (bloqueo normal de pacing/cooldown/
+                        # cuota, p. ej. perfil strike a 1 short/día), NO es un
+                        # agotamiento: el dispatcher lo reintentará en el
+                        # siguiente tick. Antes se emitía
+                        # shorts_dispatch_exhausted con "0 intentos, ninguno".
+                        if _failed_force_ids:
+                            _alert_shorts_dispatch_exhausted(
+                                f"Force dispatch sin slots viables tras {_force_retry} intentos "
+                                f"(bypass={_force_bypass_guards}). Slots intentados: "
+                                f"{list(sorted(_failed_force_ids))[:20]}."
+                            )
                         # ── Fase 2: sin slots subibles → rellenar cola de nativos ──
                         try:
                             _fill = _fill_native_short_queue(db=db, loop=loop)
@@ -4600,7 +4608,54 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
             )
             _native_fail(slot_id, job_id, f"título similar a {_sim_what} (tras {MAX_SCRIPT_ATTEMPTS} intentos)")
             return None
-        break  # script válido y título sin conflicto
+
+        # ── Hard content-safety filter (anti-strike, DENTRO del bucle) ──
+        # Rechaza temas sensibles (menores, autolesión, claims médicos,
+        # violencia gráfica, desinformación sanitaria) ANTES de gastar
+        # TTS/render/upload. Igual que el guard de títulos: si quedan intentos
+        # se REGENERA con feedback en vez de consumir los reintentos del slot y
+        # acabar cancelándolo. Antes se evaluaba TRAS el bucle, así que cada
+        # tema inseguro generaba un short_dispatch_failed (ruido + slot perdido).
+        # Se conserva el comportamiento fail-open si el clasificador falla.
+        _cs_topic = (script.get("tema") or "")[:200]
+        _cs_title = (script.get("titulo") or script.get("title") or "")[:100]
+        _cs_hook = (script.get("hook_text") or "")[:100]
+        _cs_bloques = script.get("bloques", [])
+        try:
+            from pipeline.content_safety import classify_topic_safety
+            _cs_textos = [b.get("texto", "") for b in _cs_bloques if isinstance(b, dict)]
+            _safety = classify_topic_safety(
+                topic=_cs_topic, title=_cs_title,
+                script_texts=[_cs_hook] + _cs_textos,
+                config=ch_config,
+            )
+        except Exception as _cs_exc:
+            logger.warning("[%s] Content-safety filter error (fail-open): %s", channel_slug, _cs_exc)
+            _safety = None
+        if _safety is not None and not _safety.safe:
+            if not _is_last:
+                conflict_feedback = (
+                    f"\n\n❌ RECHAZADO por seguridad: el tema '{_cs_topic[:60]}' "
+                    f"({_safety.reason}) NO es publicable. Elige un tema "
+                    f"COMPLETAMENTE DIFERENTE, sin menores, autolesión/suicidio, "
+                    f"claims médicos de cura, violencia gráfica ni desinformación "
+                    f"sanitaria.\n"
+                )
+                logger.warning(
+                    "[%s] Contenido rechazado por seguridad (intento %d/%d): '%s' "
+                    "— %s — regenerando con feedback",
+                    channel_slug, _attempt + 1, MAX_SCRIPT_ATTEMPTS,
+                    _cs_title[:60], _safety.reason,
+                )
+                continue
+            logger.warning(
+                "[%s] Contenido rechazado por filtro de seguridad: '%s' — %s "
+                "(tras %d intentos)",
+                channel_slug, _cs_title[:60], _safety.reason, MAX_SCRIPT_ATTEMPTS,
+            )
+            _native_fail(slot_id, job_id, f"contenido no seguro: {_safety.reason}")
+            return None
+        break  # script válido, título sin conflicto y contenido seguro
 
     _update_short_job_progress(job_id, 10, "script")
 
@@ -4608,30 +4663,6 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     hook_text = (script.get("hook_text") or "")[:100]
     bloques = script.get("bloques", [])
     topic = (script.get("tema") or "")[:200]  # store topic for dedup
-
-    # ── Hard content-safety filter (anti-strike) ─────────────────
-    # Rechaza temas sensibles (menores, autolesión, claims médicos, violencia
-    # gráfica, desinformación sanitaria) ANTES de gastar TTS/render/upload.
-    # Igual que el guard de títulos: return None → el slot reintenta con otro
-    # contenido. Evita repetir los strikes de canal5 (casos médicos de menores).
-    try:
-        from pipeline.content_safety import classify_topic_safety
-        _bloque_textos = [b.get("texto", "") for b in bloques if isinstance(b, dict)]
-        _safety = classify_topic_safety(
-            topic=topic, title=title,
-            script_texts=[hook_text] + _bloque_textos,
-            config=ch_config,
-        )
-        if not _safety.safe:
-            logger.warning(
-                "[%s] Contenido rechazado por filtro de seguridad: '%s' — %s "
-                "(slot reintentará con otro tema)",
-                channel_slug, title[:60], _safety.reason,
-            )
-            _native_fail(slot_id, job_id, f"contenido no seguro: {_safety.reason}")
-            return None
-    except Exception as _cs_exc:
-        logger.warning("[%s] Content-safety filter error (fail-open): %s", channel_slug, _cs_exc)
 
     # 1c. Subscribe CTA (~40% of native shorts) — programmatic append
     has_subscribe_cta = False
