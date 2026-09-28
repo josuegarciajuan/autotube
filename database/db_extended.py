@@ -6531,6 +6531,35 @@ class ExtendedDatabase(Database):
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_video_retention_curve(
+        self, video_id: int, report_type: str = "audience_retention"
+    ) -> list[dict]:
+        """Get a video's audience-retention curve ordered by elapsed ratio.
+
+        ``dimension`` stores ``elapsedVideoTimeRatio`` (0..1) as TEXT, so the
+        generic `get_video_analytics` ordering (metric_value DESC) scrambles it.
+        This reader orders by the numeric ratio and returns
+        ``[{"elapsed": float, "watch_ratio": float}, ...]``.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT dimension, metric_value FROM video_analytics_detailed
+                   WHERE video_id = ? AND report_type = ?
+                   ORDER BY CAST(dimension AS REAL) ASC""",
+                (video_id, report_type),
+            ).fetchall()
+        curve = []
+        for r in rows:
+            try:
+                elapsed = float(r["dimension"])
+            except (TypeError, ValueError):
+                continue
+            curve.append({
+                "elapsed": elapsed,
+                "watch_ratio": float(r["metric_value"] or 0.0),
+            })
+        return curve
+
     # ── Channel-level Analytics Queries ────────────────────────
 
     def insert_channel_demographics(self, channel_id: int, demographics: list[dict]) -> int:

@@ -959,6 +959,78 @@ class YouTubeStatsFetcher:
 
         return result
 
+    def get_video_audience_retention(
+        self, video_id: str, days: int = 365
+    ) -> list[dict]:
+        """Fetch the audience-retention CURVE for a single video.
+
+        Uses the Analytics API ``audienceRetention`` report:
+          - dimension ``elapsedVideoTimeRatio`` (0..1 → how far into the video)
+          - metric    ``audienceWatchRatio`` (fraction of viewers still watching)
+          - metric    ``relativeRetentionPerformance`` (vs similar videos)
+
+        Returns buckets ordered by elapsed ratio:
+        ``[{"dimension": "0.05", "metric_value": 0.82, "rrp": 0.11}, ...]``.
+        Empty list when the API/token is unavailable or the video has no data.
+        """
+        if not self._analytics_service or not video_id:
+            return []
+
+        start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        end_date = datetime.now().strftime("%Y-%m-%d")
+
+        def _query(with_rrp: bool):
+            metrics = "audienceWatchRatio"
+            if with_rrp:
+                metrics += ",relativeRetentionPerformance"
+            return (
+                self._analytics_service.reports()
+                .query(
+                    ids="channel==MINE",
+                    startDate=start_date,
+                    endDate=end_date,
+                    metrics=metrics,
+                    dimensions="elapsedVideoTimeRatio",
+                    filters=f"video=={video_id}",
+                    maxResults=200,
+                )
+                .execute()
+            )
+
+        try:
+            try:
+                resp = _query(True)
+            except Exception as exc:  # noqa: BLE001
+                # relativeRetentionPerformance no está disponible para todos los
+                # vídeos; reintenta solo con audienceWatchRatio.
+                logger.debug(
+                    "audienceRetention rrp unavailable for %s (%s) — retrying",
+                    video_id, exc,
+                )
+                resp = _query(False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("audienceRetention failed for %s: %s", video_id, exc)
+            return []
+
+        out: list[dict] = []
+        for row in resp.get("rows", []) or []:
+            try:
+                ratio = float(row[0])
+            except (TypeError, ValueError):
+                continue
+            bucket = {
+                "dimension": str(round(ratio, 5)),
+                "metric_value": (
+                    float(row[1]) if len(row) > 1 and row[1] is not None else 0.0
+                ),
+            }
+            if len(row) > 2 and row[2] is not None:
+                bucket["rrp"] = float(row[2])
+            out.append(bucket)
+
+        out.sort(key=lambda b: float(b["dimension"]))
+        return out
+
     def get_channel_demographics(self, days: int = 90) -> list[dict]:
         """Get audience demographics (age + gender) for the channel.
 
@@ -1630,6 +1702,70 @@ class YouTubeStatsFetcher:
             except Exception as exc:
                 logger.error("Deep analytics (demographics) failed for %s: %s", self.slug, exc)
                 result["demographics_stored"] = 0
+
+            # ── Curvas de retención (Fase 3 del experimento de alcance) ──
+            # audienceWatchRatio × elapsedVideoTimeRatio, una curva por vídeo.
+            # Se limita a los N long-forms recientes para acotar la cuota de la
+            # Analytics API (pool propio, no toca la cuota del Data API).
+            # Persiste en video_analytics_detailed (sin migración).
+            try:
+                from config.config_bridge import get_channel_config
+                _rcfg = get_channel_config(self.slug)
+                result["retention_curves_stored"] = 0
+                if getattr(_rcfg, "RETENTION_FEEDBACK_ENABLED", True):
+                    _max_v = int(
+                        getattr(_rcfg, "RETENTION_CURVE_MAX_VIDEOS", 20) or 20
+                    )
+                    _lookback = int(
+                        getattr(_rcfg, "RETENTION_LOOKBACK_DAYS", 90) or 90
+                    )
+                    # Solo long-forms ya subidos (con yt_video_id), recientes.
+                    _curve_videos = [v for v in videos if v.get("yt_video_id")]
+                    _curve_videos.sort(
+                        key=lambda v: str(
+                            v.get("published_at") or v.get("uploaded_at") or ""
+                        ),
+                        reverse=True,
+                    )
+                    _curve_videos = _curve_videos[:_max_v]
+                    _stored = 0
+                    for v in _curve_videos:
+                        yt_id = v.get("yt_video_id")
+                        try:
+                            curve = self.get_video_audience_retention(
+                                yt_id, days=_lookback
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug(
+                                "Retention curve failed for %s: %s", yt_id, exc
+                            )
+                            continue
+                        if not curve:
+                            continue
+                        db.insert_video_analytics_batch(
+                            v["id"], yt_id, "audience_retention",
+                            [{"dimension": p["dimension"],
+                              "metric_value": p["metric_value"]} for p in curve],
+                        )
+                        _rrp = [{"dimension": p["dimension"],
+                                 "metric_value": p["rrp"]}
+                                for p in curve if p.get("rrp") is not None]
+                        if _rrp:
+                            db.insert_video_analytics_batch(
+                                v["id"], yt_id, "audience_retention_rrp", _rrp,
+                            )
+                        _stored += 1
+                    result["retention_curves_stored"] = _stored
+                    logger.info(
+                        "Deep analytics: %d retention curves stored for %s",
+                        _stored, self.slug,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "Deep analytics (retention curves) failed for %s: %s",
+                    self.slug, exc,
+                )
+                result["retention_curves_stored"] = 0
 
         # ── Daily channel analytics ──
         if channel and self._analytics_service:
