@@ -341,6 +341,34 @@ class PipelineOrchestrator:
             self.media_fetcher.set_theme_context(new_ctx)
             logger.info("[%s] Theme re-anchored from final script", self.canal)
 
+    def _apply_retention_directive(self) -> None:
+        """Fase 3: apply the retention directive to the script generator.
+
+        Reads the cached per-channel retention signal (or recomputes it from
+        local stats — no network) and stores the directive on the generator so
+        every prompt for this video is shaped by measured retention. Fail-open:
+        any failure leaves the generator with only the static channel config.
+        """
+        try:
+            from api.services.retention_feedback import get_directive_for_generation
+            directive = get_directive_for_generation(
+                self.db, self.canal,
+                channel_id=self._get_channel_id(),
+                cfg=self.config,
+            )
+            self.script_gen.retention_directive = directive
+            if directive:
+                logger.info(
+                    "[%s] Directiva de retencion aplicada (%d chars)",
+                    self.canal, len(directive),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[%s] retention directive skipped: %s", self.canal, exc)
+            try:
+                self.script_gen.retention_directive = None
+            except Exception:  # noqa: BLE001
+                pass
+
     def _extract_and_set_theme(self, content_text: str, content_title: str = "") -> None:
         """Extract visual theme from content and inject into script gen + media fetcher.
 
@@ -660,6 +688,9 @@ class PipelineOrchestrator:
         content_text = content_item.get("text", "")
         content_title = content_item.get("title", "")
         self._extract_and_set_theme(content_text, content_title)
+
+        # ── Fase 3: directiva de retención desde el histórico (fail-open) ──
+        self._apply_retention_directive()
 
         self._emit_progress(15, "script", "Eligiendo mejor contenido y generando guion con IA...")
         result = self.script_gen.generate(content_item)

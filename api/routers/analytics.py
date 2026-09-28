@@ -65,6 +65,34 @@ def get_experiment_metrics():
         except Exception:  # noqa: BLE001
             continue
 
+    # Fase 3: diagnóstico de retención por fase (caché del loop diario).
+    retention_feedback: dict = {}
+    try:
+        from api.services.retention_feedback import load_cached_signal
+    except Exception:  # noqa: BLE001
+        load_cached_signal = None
+    if load_cached_signal:
+        for ch in _channels:
+            slug = ch.get("slug") or ""
+            if not slug or slug == "test":
+                continue
+            try:
+                sig = load_cached_signal(db, slug)
+            except Exception:  # noqa: BLE001
+                sig = None
+            if sig:
+                retention_feedback[slug] = {
+                    "retention_pct": sig.get("retention_pct"),
+                    "target_pct": sig.get("target_pct"),
+                    "gap_pp": sig.get("gap_pp"),
+                    "trend": sig.get("trend"),
+                    "videos_analyzed": sig.get("videos_analyzed"),
+                    "phase_watch_ratio_pct": sig.get("phase_watch_ratio_pct"),
+                    "weak_phases": sig.get("weak_phases"),
+                    "generated_at": sig.get("generated_at"),
+                    "directive": sig.get("directive"),
+                }
+
     return {
         "started_at": started,
         "baseline": baseline,
@@ -72,6 +100,7 @@ def get_experiment_metrics():
         "checkpoints": checkpoints,
         "rejected": rejected,
         "reach_funnel": reach_funnel,
+        "retention_feedback": retention_feedback,
     }
 
 

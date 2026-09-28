@@ -913,9 +913,13 @@ def run_job(
     
     media_cp = checkpoint.get("media", {})
     media_assets = None
+    media_scene_ranges = None
     if media_cp and isinstance(media_cp, dict):
         assets = media_cp.get("assets", [])
-        scene_ranges = media_cp.get("scene_ranges")
+        # scene_ranges: real start/end + phase_id per scene. Persisted so the
+        # resume keeps 1:1 scene↔asset alignment AND so retention curves can be
+        # mapped to narrative beats later (Fase 3 del experimento de alcance).
+        media_scene_ranges = media_cp.get("scene_ranges")
         if assets:
             # Strict checkpoint validation: at least 80% of asset files must
             # still exist on disk. If too many were deleted (e.g. by concurrent
@@ -984,6 +988,12 @@ def run_job(
         )
         if test_mode:
             orch.config = config
+
+        # Restore scene_ranges from the media checkpoint on resume: keeps 1:1
+        # scene↔asset alignment in phase_video (previously discarded) and makes
+        # the timing available to the retention-curve beat mapper.
+        if media_scene_ranges:
+            orch._last_scene_ranges = media_scene_ranges
 
         pipeline_start = time.time()
 
@@ -1214,6 +1224,9 @@ def run_job(
                 "assets": [{"type": a.get("type", "?"), "path": str(a.get("path", "")),
                             "source": a.get("source", "?")}
                            for a in (media_assets if isinstance(media_assets, list) else [])],
+                # Persist real scene timing + phase_id for 1:1 alignment on resume
+                # and for retention-curve → narrative-beat mapping (Fase 3).
+                "scene_ranges": getattr(orch, "_last_scene_ranges", None),
             }, db)
             log_phase_end(db, entity_type='video', entity_id=video_id, phase='media', channel_id=channel_id)
         

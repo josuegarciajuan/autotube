@@ -512,6 +512,11 @@ async def lifespan(app: FastAPI):
     # uploads plus a daily channel audit. They never mutate historical videos.
     editorial_reviews_task = _supervised_loop("editorial_reviews", _editorial_reviews_loop)
 
+    # ── Fase 3: señal de retención por fase (diario, 0 cuota) ──
+    # Recalcula system_state["retention_feedback_{slug}"] desde las curvas ya
+    # recolectadas; alimenta la directiva de los prompts de guion.
+    retention_feedback_task = _supervised_loop("retention_feedback", _retention_feedback_loop)
+
     # ── Red de seguridad del marcado IA (sep 2026) ──
     # Reintenta marcar subidas recientes sin marcar cada 30 min (0 cuota). Cubre
     # el caso en que el hilo daemon post-subida falló; si la sesión de YT Studio
@@ -836,6 +841,41 @@ async def _editorial_reviews_loop():
         except Exception as exc:
             logger.exception("Editorial reviews loop failed: %s", exc)
         await asyncio.sleep(3600)
+
+
+async def _retention_feedback_loop():
+    """Recompute the per-channel retention signal once a day (Fase 3, 0 cuota).
+
+    Reads the retention curves already collected by the deep stats run and
+    refreshes ``system_state["retention_feedback_{slug}"]``, which feeds the
+    directive injected into script prompts. Never calls YouTube.
+    Kill-switch: RETENTION_FEEDBACK_ENABLED / system_state[retention_feedback_disabled].
+    """
+    import asyncio, logging
+    logger = logging.getLogger("autotube.retention_feedback")
+    await asyncio.sleep(360)  # dejar estabilizar API y recolección de stats
+    while True:
+        try:
+            from api.services.lifecycle_monitor import touch_task_heartbeat
+            from api.services.retention_feedback import (
+                compute_and_cache_all, mark_started,
+            )
+            from database.db_extended import ExtendedDatabase
+            touch_task_heartbeat("retention_feedback")
+            db = ExtendedDatabase()
+            await asyncio.to_thread(mark_started, db)
+            signals = await asyncio.to_thread(compute_and_cache_all, db)
+            if signals:
+                logger.info(
+                    "Retention feedback: %d canales con senal (%s)",
+                    len(signals),
+                    ", ".join(
+                        f"{s['slug']}={s['retention_pct']}%" for s in signals
+                    ),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Retention feedback loop failed: %s", exc)
+        await asyncio.sleep(86400)
 
 
 async def _yt_state_reconcile_loop():
