@@ -471,6 +471,18 @@ STATS_ENABLED = os.getenv("STATS_ENABLED", "true").lower() == "true"
 # STATS_AUTO_COLLECT esta hardcodeado a False — NO se puede cambiar con .env.
 STATS_AUTO_COLLECT = False  # INVARIANTE: hardcodeado, no depende de env
 
+# ── Retención de material (v64) ──────────────────────────────────
+# Barrido periódico de huérfanos (media no referenciada por ninguna entidad).
+# No borra material de jobs activos, ni de vídeos/shorts sin subir, ni archivos
+# recientes (< MEDIA_RETENTION_MIN_AGE_HOURS). La purga post-subida (retención
+# 0 días) es independiente de este flag. Kill-switch: MEDIA_RETENTION_SWEEP_ENABLED=false.
+MEDIA_RETENTION_SWEEP_ENABLED = (
+    os.getenv("MEDIA_RETENTION_SWEEP_ENABLED", "true").lower() == "true"
+)
+MEDIA_RETENTION_MIN_AGE_HOURS = int(os.getenv("MEDIA_RETENTION_MIN_AGE_HOURS", "6"))
+MEDIA_RETENTION_SWEEP_INTERVAL_S = int(os.getenv("MEDIA_RETENTION_SWEEP_INTERVAL_S", "21600"))
+DISK_FREE_WARN_GB = int(os.getenv("DISK_FREE_WARN_GB", "30"))
+
 # ── View Gap Monitor ─────────────────────────────────────────────
 # Daily check comparing YT channel total views vs DB-tracked views.
 # When the gap grows beyond the threshold in 24h, an alert is raised
