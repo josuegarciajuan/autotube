@@ -208,9 +208,13 @@ def validate_video_packaging(video: dict, config) -> ValidationResult:
     results.append(validate_packaging_coherence(video, config))
     results.append(validate_thumbnail_file(video.get("thumbnail_path", "")))
     reasons = tuple(dict.fromkeys(r for result in results for r in result.reasons))
-    # Backward compat: a legacy row with no persisted overlay source only ever
-    # reports overlay_empty. Do not stall pre-W3 pending videos; the generation
-    # path always sets thumbnail_overlay_source for new ones.
-    if reasons == ("overlay_empty",) and not video.get("thumbnail_overlay_source"):
-        return ValidationResult(True, ())
+    # Backward compat: a legacy row with no persisted overlay source reports
+    # ``overlay_empty`` even though its title may also carry fixable reasons.
+    # Drop ``overlay_empty`` for such pre-W3 rows so they are not stalled on
+    # overlay alone (the generation path always sets thumbnail_overlay_source
+    # for new videos, so the check stays fail-closed there). Antes solo se
+    # toleraba cuando ``overlay_empty`` era el ÚNICO motivo, lo que dejaba
+    # atascados los vídeos legacy con título además inválido (bug sep 2026).
+    if reasons and not video.get("thumbnail_overlay_source"):
+        reasons = tuple(r for r in reasons if r != "overlay_empty")
     return ValidationResult(not reasons, reasons)
