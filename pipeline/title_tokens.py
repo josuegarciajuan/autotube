@@ -129,6 +129,59 @@ def has_dangling_tail(text: str) -> bool:
     return last_norm in CONNECTOR_TAIL_WORDS
 
 
+# ── Completeness (W1 packaging, sep 2026) ────────────────────────────
+# A título that ends in a transitive "aperture" verb has lost its object:
+# "...que la NASA aún no logra" (logra explicar), "...7 casos que desafían"
+# (desafían la lógica). Spanish headlines almost never close on one of these.
+APERTURE_VERBS: frozenset[str] = frozenset(normalize(w) for w in (
+    "logra", "logro", "logran", "lograba", "lograban",
+    "desafia", "desafio", "desafian", "desafiaba", "desafiaban",
+    "permite", "permitio", "permiten", "permitia", "permitian",
+    "puede", "pueden", "podia", "podian", "podria", "podrian",
+    "cambia", "cambio", "cambian", "cambiaba", "cambiaban",
+    "convierte", "convirtio", "convierten", "convertia", "convertian",
+    "provoca", "provoco", "provocan", "provocaba", "provocaban",
+    "revela", "revelo", "revelan", "revelaba", "revelaban",
+    "descubre", "descubrio", "descubren", "descubria", "descubrieron",
+    "explica", "explico", "explican", "explicaba", "explicaban",
+    "oculta", "oculto", "ocultan", "ocultaba", "ocultaban",
+    "causa", "causo", "causan", "causaba", "causaban",
+    "desaparece", "desaparecio", "desaparecen", "desaparecia", "desaparecieron",
+    "sobrevive", "sobrevivio", "sobreviven", "sobrevivia", "sobrevivieron",
+    "necesita", "necesito", "necesitan", "requiere", "requirio", "requieren",
+    "deberia", "deberian", "debe", "deben", "debia", "debian",
+))
+
+# Adverbs/particles that leave a clause hanging when they close a title.
+DANGLING_TAIL_EXTRA: frozenset[str] = frozenset(normalize(w) for w in (
+    "nunca", "jamas", "tampoco", "aun", "apenas", "casi",
+))
+
+
+def is_complete_title(text: str) -> tuple[bool, str]:
+    """Return ``(complete, reason)`` for a title about to be published.
+
+    A title is complete when it does **not** end in a dangling connector,
+    an aperture verb missing its object, or a hanging adverb, and its
+    punctuation is balanced. This is the deterministic guard that replaces
+    post-selection truncation (W1 packaging).
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return False, "empty"
+    if has_unbalanced_punctuation(raw):
+        return False, "unbalanced_punctuation"
+    if has_dangling_tail(raw):
+        return False, "dangling_tail"
+    core = raw.rstrip(_SENTENCE_END).strip()
+    last_norm = normalize(core.split()[-1] if core.split() else "").strip("«»\"'()[]")
+    if last_norm in APERTURE_VERBS:
+        return False, "aperture_verb"
+    if last_norm in DANGLING_TAIL_EXTRA:
+        return False, "dangling_adverb"
+    return True, ""
+
+
 # ── Capitalisation helpers ───────────────────────────────────────────
 # All-caps tokens that are legitimate (acronyms / brands) and must not be
 # counted as "excessive caps" nor force-penalised.

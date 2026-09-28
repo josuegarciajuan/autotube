@@ -56,11 +56,17 @@ TITLE_BANNED_PATTERNS = ["nadie puede explicar", "te dejará sin palabras"]
 TITLE_ENGINE_ENABLED = True
 TITLE_CANDIDATE_COUNT = 5
 TITLE_TARGET_MIN_CHARS = 45
-TITLE_TARGET_MAX_CHARS = 70
+TITLE_TARGET_MAX_CHARS = 65
+# Hard ceiling. Channels override it; it must agree with TITLE_TARGET_MAX_CHARS
+# so the engine never generates to one budget and cuts with another (W1).
+TITLE_MAX_CHARS = 65
 TITLE_CAPS_POLICY = "sentence"          # "sentence" | "title_case" | "one_word_caps"
 TITLE_STYLE_GUIDE = ""
 TITLE_GOOD_EXAMPLES = []
 TITLE_BAD_EXAMPLES = []
+# Per-channel closure used by the deterministic fallback (avoids every channel
+# converging on the same generic "la historia que cambió el caso").
+TITLE_FALLBACK_PHRASE = ""
 
 THUMBNAIL_MAX_OVERLAY_CHARS = 32
 THUMBNAIL_BANNED_OVERLAY_CLAIMS = ["oculto", "real", "prohibido"]

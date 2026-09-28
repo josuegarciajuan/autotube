@@ -15,6 +15,7 @@ from pipeline.title_tokens import (
     has_dangling_tail,
     has_unbalanced_punctuation,
     is_all_caps,
+    is_complete_title,
     uppercase_words,
 )
 
@@ -49,6 +50,11 @@ def validate_title(title: str, config) -> ValidationResult:
     if contains_banned_token(text):
         reasons.append("banned_token")
     if has_dangling_tail(text):
+        reasons.append("incomplete_phrase")
+    # W1: a title that ends in an aperture verb or hanging adverb is a
+    # mid-phrase cut even when no connector is present ("...aún no logra").
+    complete, _reason = is_complete_title(text)
+    if not complete and _reason in {"aperture_verb", "dangling_adverb"}:
         reasons.append("incomplete_phrase")
     if "|" in text or "[" in text or "]" in text:
         reasons.append("injected_suffix")
