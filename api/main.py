@@ -3696,6 +3696,7 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
                     "deep": deep,
                     "impressions_stored": result.get("impressions_stored", 0),
                     "ctr_stored": result.get("ctr_stored", 0),
+                    "retention_curves_stored": result.get("retention_curves_stored", 0),
                     "traffic_stored": result.get("traffic_stored", 0),
                     "retention_stored": result.get("retention_stored", 0),
                     "demographics_stored": result.get("demographics_stored", 0),
