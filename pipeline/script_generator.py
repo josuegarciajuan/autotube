@@ -249,6 +249,9 @@ class ScriptGenerator:
         self._theme_context = None
         self._word_count_emphasis = 1.0
         self._chunk_context = None
+        # Fase 3 (bucle de retención): directiva histórica inyectada en todos los
+        # prompts. La fija el orquestador antes de generar; None = sin datos.
+        self.retention_directive = None
 
         # Unified prompts — parameterized by channel config
         # Replaces per-channel prompts/canal*_prompts.py imports
@@ -1362,6 +1365,7 @@ class ScriptGenerator:
                 duration_min=duration_min_val,
                 word_target=palabras_objetivo,
                 variant_seed=content_item.get("id"),
+                retention_directive=self.retention_directive,
             )
         except (ImportError, AttributeError):
             system_prompt = (
@@ -1431,6 +1435,7 @@ class ScriptGenerator:
             source_text=source_text,
             outline=outline,
             batch_num=batch_num,
+            retention_directive=self.retention_directive,
         )
 
         user_prompt = f"Fuente: {content_title}\n\nContinúa la narración documental."
@@ -2709,6 +2714,7 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                 chunk_context=self._chunk_context,
                 theme_context=self._theme_context,
                 word_target=ch_target,
+                retention_directive=self.retention_directive,
             )
 
             chapter_prompt = (
@@ -2812,6 +2818,7 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             chunk_context=self._chunk_context,
             theme_context=self._theme_context,
             word_target=word_target,
+            retention_directive=self.retention_directive,
         )
         messages = [
             {"role": "system", "content": system_prompt},
@@ -3124,6 +3131,7 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                 chunk_context=None,
                 theme_context=self._theme_context,
                 word_target=expansion_target,
+                retention_directive=self.retention_directive,
             )
 
             # NOTE: we inline a correction marker to avoid mutating _format_user_prompt
