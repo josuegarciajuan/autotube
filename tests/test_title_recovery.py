@@ -146,3 +146,45 @@ def test_incomplete_phrase_is_repairable_and_stripped():
     assert out is not None
     assert not out.endswith(" sin")
     assert 28 <= len(out) <= 65
+
+
+def test_sanitize_strips_pronoun_dangling_tail():
+    """Regresión: 'lo' (y demás clíticos) deben contar como conector colgante.
+
+    Antes la lista local no incluía 'lo', así que '...que lo' quedaba como
+    ``incomplete_phrase`` no reparable y el vídeo se colgaba para siempre.
+    """
+    from pipeline.title_tokens import has_dangling_tail
+
+    out = tr.sanitize_title_for_upload(
+        "El científico que puso a prueba a Dios: la evidencia que lo", CFG,
+    )
+    assert out is not None
+    assert not out.endswith(" lo")
+    assert not has_dangling_tail(out)
+    assert 28 <= len(out) <= 65
+
+
+def test_sanitize_balances_unclosed_question_mark():
+    """Regresión: un '¿' sin '?' se cierra de forma determinista."""
+    from pipeline.title_tokens import has_unbalanced_punctuation
+
+    out = tr.sanitize_title_for_upload(
+        "¿Y si la humanidad ya olvidó tecnología más avanzada", CFG,
+    )
+    assert out is not None
+    assert out.endswith("?")
+    assert not has_unbalanced_punctuation(out)
+    assert 28 <= len(out) <= 65
+
+
+def test_sanitize_balances_unclosed_exclamation_mark():
+    from pipeline.title_tokens import has_unbalanced_punctuation
+
+    out = tr.sanitize_title_for_upload(
+        "¡El día que todo cambió para siempre en la Tierra", CFG,
+    )
+    assert out is not None
+    assert out.endswith("!")
+    assert not has_unbalanced_punctuation(out)
+    assert 28 <= len(out) <= 65

@@ -49,7 +49,9 @@ def repair_title(title: str, cfg, max_chars: int | None = None) -> str | None:
     text = _strip_clickbait_suffix(title or "")
     text = " ".join(text.split())
     text = _truncate_at_word(text, maximum)
-    if len(text) < minimum:
+    text = _strip_dangling_tail(text)
+    text = _balance_punctuation(text, maximum)
+    if len(text) < minimum or len(text) > maximum:
         return None
     return text
 
@@ -72,20 +74,46 @@ REPAIRABLE_TITLE_REASONS = frozenset({
     "incomplete_phrase",
 })
 
-# Conectores que quedan colgando al cortar un título por el separador '|'.
-_DANGLING_TAIL_WORDS = frozenset({
-    "al", "a", "el", "la", "los", "las", "un", "una", "unos", "unas",
-    "de", "del", "en", "con", "sin", "por", "para", "que", "su", "sus",
-    "y", "o", "u", "e", "como", "más", "mas",
-})
+# Conectores que quedan colgando al cortar un título. Fuente ÚNICA:
+# ``pipeline.title_tokens.CONNECTOR_TAIL_WORDS`` (dependency-free, sin ciclo de
+# imports). Incluye pronombres/clíticos ("lo", "se", "le"…) y preposiciones
+# ("sobre", "entre", "desde"…) que antes faltaban en la lista local y dejaban
+# títulos truncados sin reparar (p. ej. "...que lo").
+from pipeline.title_tokens import CONNECTOR_TAIL_WORDS as _CONNECTOR_TAIL_WORDS
+from pipeline.title_tokens import normalize as _normalize_token
+
+_DANGLING_TAIL_WORDS = _CONNECTOR_TAIL_WORDS
 
 
 def _strip_dangling_tail(text: str) -> str:
     words = text.split()
-    while words and words[-1].strip(".,;:·•–—-|¿?¡!").casefold() in _DANGLING_TAIL_WORDS:
+    while words and _normalize_token(
+        words[-1].strip(".,;:·•–—-|¿?¡!»«\"'()[]")
+    ) in _DANGLING_TAIL_WORDS:
         words.pop()
     # No incluir ¿?¡! en el strip exterior: son puntuación legítima en español.
     return " ".join(words).strip(" .,;:·•–—-|")
+
+
+def _balance_punctuation(text: str, maximum: int) -> str:
+    """Cierra signos de apertura huérfanos (``¿``/``¡``) del packaging gate.
+
+    El gate marca ``unbalanced_punctuation`` solo en la dirección
+    apertura-sin-cierre (``has_unbalanced_punctuation``); un cierre sin su
+    apertura española se tolera. Repararlo es determinista y seguro: añade el
+    cierre que falta y, si el resultado excede el máximo, trunca y reintenta.
+    """
+    if "¿" in text and "?" not in text:
+        text = f"{text}?"
+    if "¡" in text and "!" not in text:
+        text = f"{text}!"
+    if len(text) > maximum:
+        text = _truncate_at_word(text, maximum)
+        if "¿" in text and "?" not in text:
+            text = f"{text}?"
+        if "¡" in text and "!" not in text:
+            text = f"{text}!"
+    return text
 
 
 def sanitize_title_for_upload(title: str, cfg, max_chars: int | None = None) -> str | None:
@@ -118,6 +146,9 @@ def sanitize_title_for_upload(title: str, cfg, max_chars: int | None = None) -> 
     text = apply_caps_policy(text, cfg)
     text = _truncate_at_word(text, maximum)
     text = _strip_dangling_tail(text)
+    # Cierra interrogaciones/exclamaciones truncadas ("¿...") que el gate
+    # marcaría como ``unbalanced_punctuation``.
+    text = _balance_punctuation(text, maximum)
     if not text or len(text) < minimum or len(text) > maximum:
         return None
     return text
