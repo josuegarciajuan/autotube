@@ -61,11 +61,11 @@ HEARTBEAT_INTERVAL = 15    # seconds between DB heartbeat updates
 
 _CONFIG_KEYS = [
     # Duration / production
-    "VIDEO_AVERAGE_DURATION_MIN", "video_duration_discrepancy_min",
-    "prod_script_words_min", "prod_script_words_max",
-    "prod_script_scenes_min", "prod_script_scenes_max",
-    "prod_script_blocks_min", "prod_script_blocks_max",
-    "prod_video_duration_min", "prod_video_duration_max",
+    "VIDEO_AVERAGE_DURATION_MIN", "VIDEO_DURATION_DISCREPANCY_MIN",
+    "PROD_SCRIPT_WORDS_MIN", "PROD_SCRIPT_WORDS_MAX",
+    "PROD_SCRIPT_SCENES_MIN", "PROD_SCRIPT_SCENES_MAX",
+    "PROD_SCRIPT_BLOCKS_MIN", "PROD_SCRIPT_BLOCKS_MAX",
+    "PROD_VIDEO_DURATION_MIN", "PROD_VIDEO_DURATION_MAX",
     # Publishing
     "PUBLISH_TARGET_HOUR", "PUBLISH_MODE", "PUBLISH_TIMEZONE",
     "PUBLISH_JITTER_MIN", "PUBLISH_WARMUP_MIN",

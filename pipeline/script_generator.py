@@ -2525,17 +2525,23 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         if test_mode:
             duration_target = getattr(cfg, "TEST_VIDEO_DURATION_TARGET", 2)
         else:
+            # El panel "Duración — Objetivo" es la única fuente de verdad de
+            # la duración: los vídeos apuntan a
+            # VIDEO_AVERAGE_DURATION_MIN ± VIDEO_DURATION_DISCREPANCY_MIN.
+            # NO se aplica el clamp legacy PROD_VIDEO_DURATION_MAX (lo recortaba
+            # a 9 min e ignoraba el objetivo configurado en el panel).
             mean = getattr(cfg, "VIDEO_AVERAGE_DURATION_MIN", 15)
             disc = getattr(cfg, "VIDEO_DURATION_DISCREPANCY_MIN", 3)
+            try:
+                mean = float(mean)
+                disc = abs(float(disc))
+            except (TypeError, ValueError):
+                mean, disc = 15.0, 3.0
+            if mean <= 0:
+                mean = 15.0
             duration_target = round(
-                random.uniform(max(0.5, mean - disc), mean + disc), 1
+                random.uniform(max(0.5, mean - disc), max(0.5, mean + disc)), 1
             )
-            # Guard: never exceed PROD_VIDEO_DURATION_MAX regardless of
-            # what the panel "Duración media" is set to. Prevents runaway
-            # durations (e.g. panel set to 40 min) from producing 7h pipelines.
-            max_dur = getattr(cfg, "PROD_VIDEO_DURATION_MAX", None)
-            if max_dur is not None:
-                duration_target = min(duration_target, float(max_dur))
 
         return self._compute_word_target(duration_target)
 

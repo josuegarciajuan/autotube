@@ -257,8 +257,6 @@ export const CONFIG_SECTIONS: ConfigSection[] = [
     key: 'prod',
     label: '🚀 Producción',
     fields: [
-      { key: 'PROD_VIDEO_DURATION_MIN', label: 'Duración (min) — mínimo', affectsVideo: true, type: 'number' },
-      { key: 'PROD_VIDEO_DURATION_MAX', label: 'Duración (min) — máximo', affectsVideo: true, type: 'number' },
       { key: 'PROD_SCRIPT_WORDS_MIN', label: 'Palabras (min)', affectsVideo: true, type: 'number' },
       { key: 'PROD_SCRIPT_WORDS_MAX', label: 'Palabras (max)', affectsVideo: true, type: 'number' },
       { key: 'PROD_SCRIPT_SCENES_MIN', label: 'Escenas (min)', affectsVideo: true, type: 'number' },
