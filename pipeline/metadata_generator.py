@@ -139,7 +139,7 @@ Responde SIEMPRE en formato JSON con exactamente estas claves:
   "description": "CAPÍTULOS CON TIMESTAMPS EN LA PRIMERA LÍNEA + luego 2-3 líneas de resumen + desarrollo + CTAs + 3-5 hashtags al final",
   "tags": ["tag1", "tag2", "tag3", "tag4", "tag5"],
   "thumbnail_text": "LÍNEA1 IMPACTO MAX 12 CHARS | línea2 complemento max 24 chars (separadas por |)",
-  "badge_text": "DOCUMENTAL | CASO REAL | REAL | ARCHIVO | EXPEDIENTE | '' (texto para el sello/badge en la esquina de la miniatura)"
+  "badge_text": "DOCUMENTAL | '' (sello en la esquina; PROHIBIDOS los sellos de credibilidad sin evidencia: CASO REAL, REAL, ARCHIVO, EXPEDIENTE)"
 }"""
 
 
@@ -561,7 +561,7 @@ INSTRUCCIONES:
 3. Crea una descripción SEO. **LOS CAPÍTULOS CON TIMESTAMPS DEBEN SER LA PRIMERA LÍNEA**, sin introducción previa ni resumen delante. YouTube indexa los timestamps como Key Moments. Después de los capítulos, añade un hook irresistible en las primeras 125 chars (sin contar timestamps), desarrollo y hashtags al final.
 4. Genera 5-10 tags optimizados (keyword exacta primero, variantes después).
 5. Crea DOS LÍNEAS de texto para la miniatura separadas por | : L1 (máx 12 chars, palabra-gancho en MAYÚSCULAS) | L2 (máx 24 chars, complemento intrigante). No repitas el título.
-6. Define el texto para el badge/sello de la miniatura (DOCUMENTAL, CASO REAL, REAL, ARCHIVO, EXPEDIENTE, o vacío).
+6. Define el texto para el badge/sello de la miniatura (DOCUMENTAL, o vacío). PROHIBIDO usar sellos de credibilidad sin evidencia en el guion (CASO REAL, REAL, ARCHIVO, EXPEDIENTE).
 
 IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional."""
 
@@ -647,17 +647,29 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
                     tags_validated = self._validate_tags(keyword_bank[:10])
                     logger.debug("MetadataGenerator: using keyword bank as tag fallback")
             
-            # Parse thumbnail text — new format: "L1 | L2" or legacy single line
-            thumbnail_text_raw = result.get("thumbnail_text", "")
-            if thumbnail_text_raw:
-                thumbnail_text = _smart_overlay_text(thumbnail_text_raw).upper()
-            else:
-                thumbnail_text = _smart_overlay_text(title).upper() if title else _derive_hook_from_title(title)
-            
-            # Parse badge text for thumbnail seal
-            badge_text = result.get("badge_text", "").strip().upper()
-            if badge_text:
-                badge_text = badge_text.strip("()（）[]")
+            # ── W3: single OverlaySpec authority (title-coherent, in-budget) ──
+            # The spec is what gets painted, persisted and validated. Legacy
+            # raw text is reconciled deterministically instead of painted as-is.
+            from pipeline.packaging_brief import (
+                build_overlay_spec,
+                render_overlay,
+                split_overlay_text,
+            )
+            thumbnail_text_raw = result.get("thumbnail_text", "") or ""
+            raw_l1, raw_l2 = split_overlay_text(thumbnail_text_raw)
+            if not (raw_l1 or raw_l2):
+                raw_l1 = _derive_hook_from_title(title) if title else ""
+            thumbnail_spec = build_overlay_spec(
+                title=title,
+                cfg=self.config,
+                script_text=guion,
+                raw_l1=raw_l1,
+                raw_l2=raw_l2,
+                raw_badge=result.get("badge_text", ""),
+                source="llm" if thumbnail_text_raw else "derived",
+            )
+            thumbnail_text = render_overlay(thumbnail_spec)
+            badge_text = thumbnail_spec.badge
             
             # Track token usage (estimated — retry wrapper hides raw response)
             token_count = 0
@@ -678,6 +690,7 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
                 "tags": tags_validated,
                 "thumbnail_text": thumbnail_text,
                 "badge_text": badge_text,
+                "thumbnail_spec": thumbnail_spec.as_dict(),
                 "category_id": self.yt_category_id,
                 "token_count": token_count,
                 "cost_estimate": cost_estimate,

@@ -179,6 +179,8 @@ class ThumbnailMaker:
         self._last_art_direction: ArtDirection | None = None
         self._last_color_plan: dict | None = None
         self._last_face_chip_path = "__unset__"  # marker: None = resolved "no face"
+        # W3: the OverlaySpec actually painted in the last composition.
+        self.last_overlay_spec = None
 
         self.font = _find_font(self.font_size, bold=True,
                                font_name=self.font_family)
@@ -431,6 +433,7 @@ class ThumbnailMaker:
         base_image_path: Path | None = None,
         video_id: int = 0,
         art_direction: ArtDirection | None = None,
+        overlay_spec=None,
     ) -> Path:
         """Create a CTR-optimized viral thumbnail using the 4-phase pipeline.
 
@@ -492,26 +495,14 @@ class ThumbnailMaker:
             recent_context=recent_context,
         )
 
-        # Use provided overlay_text or the one from brainstorming
-        final_overlay = overlay_text.strip() if overlay_text else brief.text_overlay
-        overlay_check = validate_thumbnail_overlay(
-            final_overlay,
-            int(getattr(self._channel_cfg, "THUMBNAIL_MAX_OVERLAY_CHARS", 32)),
-        )
-        if not overlay_check.valid:
-            logger.warning("Thumbnail overlay rejected: %s", ", ".join(overlay_check.reasons))
-            final_overlay = ""
-        
-        # ── v2: extract multi-text fields from brief ────────────
-        text_gancho = brief.text_gancho if hasattr(brief, 'text_gancho') and brief.text_gancho else ""
-        text_complemento = brief.text_complemento if hasattr(brief, 'text_complemento') and brief.text_complemento else ""
-        badge_text = brief.badge_text if hasattr(brief, 'badge_text') and brief.badge_text else ""
-
-        # ── P3 (ago 2026): el texto de la miniatura NUNCA debe repetir el
-        # inicio del título (mata el curiosity gap y el CTR). Se recortan los
-        # tokens duplicados del overlay/gancho antes de componer. ──
-        final_overlay = self._dedupe_overlay(title, final_overlay)
-        text_gancho = self._dedupe_overlay(title, text_gancho)
+        # ── Raw text proposals (reconciled into an OverlaySpec after art
+        # direction, so we never validate/paint two different strings). ──
+        text_gancho = getattr(brief, "text_gancho", "") or ""
+        text_complemento = getattr(brief, "text_complemento", "") or ""
+        badge_text = getattr(brief, "badge_text", "") or ""
+        if overlay_text and not (text_gancho or text_complemento):
+            from pipeline.packaging_brief import split_overlay_text
+            text_gancho, text_complemento = split_overlay_text(overlay_text)
 
         # ── F2b: Art direction (subject-first + diversity) ─────
         # Recompose (phase_metadata) reuses the direction chosen in phase_video
@@ -544,6 +535,48 @@ class ThumbnailMaker:
             art_direction.subject_type, art_direction.face_role,
             art_direction.provider_main, art_direction.provider_face,
             art_direction.layout,
+        )
+
+        # ── W3: OverlaySpec — single authority for the painted text ──
+        from pipeline.packaging_brief import (
+            OverlaySpec,
+            build_overlay_spec,
+            render_overlay,
+            split_overlay_text,
+            validate_overlay_spec,
+        )
+        incoming = (
+            overlay_spec if isinstance(overlay_spec, OverlaySpec)
+            else (OverlaySpec.from_dict(overlay_spec) if overlay_spec else OverlaySpec())
+        )
+        raw_l1 = incoming.l1 or text_gancho
+        raw_l2 = incoming.l2 or text_complemento
+        if not (raw_l1 or raw_l2) and title:
+            from config.llm_helpers import _derive_hook_from_title
+            raw_l1, raw_l2 = split_overlay_text(_derive_hook_from_title(title))
+        spec = build_overlay_spec(
+            title=title,
+            cfg=self._channel_cfg,
+            script_text=script_text,
+            raw_l1=raw_l1,
+            raw_l2=raw_l2,
+            raw_badge=incoming.badge or badge_text,
+            emphasis=incoming.emphasis or art_direction.emphasis_word,
+            subject_noun=incoming.subject_noun or art_direction.primary_subject,
+            variant_strategy=incoming.variant_strategy,
+            source=incoming.source if overlay_spec is not None else "brainstorm",
+        )
+        spec_reasons, _spec_warnings = validate_overlay_spec(spec, title, self._channel_cfg)
+        if spec_reasons:
+            logger.warning("[Thumbnail v3] overlay spec rejected: %s", ", ".join(spec_reasons))
+            spec = OverlaySpec()
+        self.last_overlay_spec = spec
+        final_overlay = render_overlay(spec)
+        text_gancho, text_complemento, badge_text = spec.l1, spec.l2, spec.badge
+        emphasis_word = spec.emphasis
+        logger.info(
+            "[Thumbnail v3] overlay spec: l1=%r l2=%r badge=%r source=%s",
+            spec.l1, spec.l2, spec.badge, spec.source,
         )
 
         # ── F3: Image Generation + QC ──────────────────────────
@@ -603,7 +636,7 @@ class ThumbnailMaker:
             inset_image_path=inset_path,
             color_plan=color_plan,
             face_chip_path=face_chip_path,
-            emphasis_word=art_direction.emphasis_word,
+            emphasis_word=emphasis_word,
         )
 
         logger.info("[Thumbnail v2] ✅ Complete: %s", thumb_path)
@@ -620,6 +653,11 @@ class ThumbnailMaker:
                     color_key=str(color_plan.get("color_key", "") or ""),
                     face_role=art_direction.face_role,
                     subject=art_direction.primary_subject[:120],
+                    overlay=render_overlay(spec),
+                    badge=spec.badge,
+                    emphasis=spec.emphasis,
+                    variant_strategy=spec.variant_strategy,
+                    overlay_source=spec.source,
                 )
             except Exception as exc:
                 logger.warning("[Thumbnail v2] thumbnail_style persist failed: %s", exc)
@@ -1479,9 +1517,12 @@ class ThumbnailMaker:
             text_gancho_v = text_gancho_v.upper()
             text_complemento_v = text_complemento_v.upper()
 
-        # Truncate
-        text_gancho_v = text_gancho_v[:14]
-        text_complemento_v = text_complemento_v[:28]
+        # Truncate to the shared OverlaySpec budgets (W3) — the spec already
+        # truncates at word boundaries; this is a last-resort safety net.
+        from pipeline.packaging_brief import overlay_budgets
+        _budgets = overlay_budgets(self._channel_cfg)
+        text_gancho_v = text_gancho_v[: _budgets["l1"]]
+        text_complemento_v = text_complemento_v[: _budgets["l2"]]
 
         stroke_w = max(3, self.text_stroke_width + 2)
 

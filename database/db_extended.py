@@ -1412,6 +1412,9 @@ def migrate_v2(db_path: str = None):
     # ── v61: result_short_id en generation_jobs (shorts en worker subprocess) ──
     _migrate_v61(conn, logger)
 
+    # ── v62: OverlaySpec persistido (W3 packaging) ──
+    _migrate_v62(conn, logger)
+
     conn.commit()
     conn.close()
     
@@ -3643,6 +3646,27 @@ def _migrate_v61(conn, logger):
         logger.debug("Migration v61: result_short_id already present")
 
 
+def _migrate_v62(conn, logger):
+    """Idempotent v62: OverlaySpec columns for the painted thumbnail text (W3).
+
+    ``thumbnail_emphasis``, ``thumbnail_variant_strategy`` and
+    ``thumbnail_overlay_source`` let the painted overlay be persisted and
+    attributed (CTR per strategy/emphasis), closing the loop where the image
+    text used to be neither stored nor validated.
+    """
+    for column in (
+        "thumbnail_emphasis",
+        "thumbnail_variant_strategy",
+        "thumbnail_overlay_source",
+    ):
+        try:
+            conn.execute(f"ALTER TABLE videos ADD COLUMN {column} TEXT DEFAULT ''")
+            logger.info("Migration v62: added %s column to videos", column)
+        except sqlite3.OperationalError:
+            pass  # already present — idempotent
+    conn.commit()
+
+
 def _migrate_v10(conn, logger):
     """Idempotent v10 migration: optimal_publish_slots for data-driven peak hour calculation.
 
@@ -4056,7 +4080,14 @@ class ExtendedDatabase(Database):
                     # ── Error diagnostics (v26) ──
                     "error_message",
                     # ── Progress detail counters (v43) ──
-                    "progress_current", "progress_total"]
+                    "progress_current", "progress_total",
+                    # ── Packaging overlay / OverlaySpec (v49/v62) ──
+                    # These were silently dropped before (not in `allowed`),
+                    # which is why thumbnail_text was empty for every uploaded
+                    # video and the upload gate's overlay check was a no-op.
+                    "thumbnail_text", "thumbnail_badge_text",
+                    "thumbnail_emphasis", "thumbnail_variant_strategy",
+                    "thumbnail_overlay_source"]
         
         # ── Guard: never overwrite status to 'error' if video was already uploaded ──
         # A video with a YouTube ID was successfully published. Pipeline failures
@@ -5341,7 +5372,12 @@ class ExtendedDatabase(Database):
                                      layout: str = "", *,
                                      color_key: str = "",
                                      face_role: str = "",
-                                     subject: str = "") -> bool:
+                                     subject: str = "",
+                                     overlay: str = "",
+                                     badge: str = "",
+                                     emphasis: str = "",
+                                     variant_strategy: str = "",
+                                     overlay_source: str = "") -> bool:
         """Registra el estilo, layout y diversidad de la miniatura de un video.
 
         D2 (ago 2026): cierra el loop CTR→estilo. Con CTR ya instrumentado
@@ -5364,9 +5400,15 @@ class ExtendedDatabase(Database):
                     ("thumbnail_color_key", color_key),
                     ("thumbnail_face_role", face_role),
                     ("thumbnail_subject", subject),
+                    # W3: painted overlay + attribution (v62).
+                    ("thumbnail_text", overlay),
+                    ("thumbnail_badge_text", badge),
+                    ("thumbnail_emphasis", emphasis),
+                    ("thumbnail_variant_strategy", variant_strategy),
+                    ("thumbnail_overlay_source", overlay_source),
                 ):
-                    # Defensive: older DBs before migration v55 keep the legacy
-                    # 3-column update instead of failing.
+                    # Defensive: older DBs before migrations v55/v62 keep the
+                    # legacy column set instead of failing.
                     if column in tables:
                         sets.append(f"{column} = ?")
                         params.append(value or "")

@@ -610,6 +610,19 @@ THUMBNAIL_EMPHASIS_ENABLED = True
 THUMBNAIL_FACE_ROLE = "auto"
 THUMBNAIL_TYPOGRAPHY_POOL = ["DejaVuSans-Bold"]
 
+# ── W3 (sep 2026): OverlaySpec, fuente única del texto de miniatura ──
+# Presupuestos compartidos por generador, pintor y validador (antes eran
+# 14/24 en el generador, 14/28 en el pintor y 32 en el validador).
+THUMBNAIL_OVERLAY_BUDGETS = {"l1": 14, "l2": 24, "badge": 14}
+# El gate de subida rechaza un overlay vacío cuando es True.
+THUMBNAIL_REQUIRE_TEXT = True
+# Sellos de credibilidad que NO se pueden pintar sin evidencia en el guion.
+THUMBNAIL_BADGE_CLICHES = [
+    "oculto", "oculta", "real", "prohibido", "impactante", "increible",
+    "increíble", "secreto", "secreta", "nadie", "exclusivo", "inedito",
+    "inédito", "shock", "impensable", "caso real", "archivo", "expediente",
+]
+
 # ── Fase 1 packaging ──
 # El A/B real (3 variantes de miniatura, ganador por CTR) se activa POR CANAL
 # vía `ENABLE_AB_TESTING` (definido abajo, en el bloque AB_*); el flag global

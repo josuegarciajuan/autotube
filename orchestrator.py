@@ -2093,6 +2093,7 @@ class PipelineOrchestrator:
                         channel_theme=getattr(self.config, "CANAL_TAGLINE", ""),
                         base_image_path=Path(base_img) if base_img else None,
                         video_id=video_data.get("video_id", 0),
+                        overlay_spec=metadata.get("thumbnail_spec"),
                     )
                     video_data["thumbnail_path"] = str(new_thumb)
                     video_data["titulo"] = metadata["selected_title"]
@@ -2112,6 +2113,9 @@ class PipelineOrchestrator:
             if video_id:
                 try:
                     import json as _json_upd
+                    from pipeline.packaging_brief import OverlaySpec, spec_to_db_fields
+                    _spec = metadata.get("thumbnail_spec") or {}
+                    _spec_fields = spec_to_db_fields(OverlaySpec.from_dict(_spec)) if _spec else {}
                     self.db.update_video(
                         video_id,
                         titulo_final=metadata.get("selected_title", video_data.get("titulo", "")),
@@ -2121,6 +2125,7 @@ class PipelineOrchestrator:
                         thumbnail_path=video_data.get("thumbnail_path", ""),
                         status="ready",
                         progress=100,
+                        **_spec_fields,
                     )
                     logger.info(f"[{self.canal}] Video #{video_id} metadata saved to DB")
                 except Exception as e:

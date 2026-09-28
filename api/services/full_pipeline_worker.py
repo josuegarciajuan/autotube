@@ -1431,16 +1431,23 @@ def run_job(
                         # Keep the title that phase_metadata() already generated
 
                 db.update_video(video_id, progress=85, progress_phase="metadata")
+                # W3: persist the OverlaySpec actually painted (single authority).
+                from pipeline.packaging_brief import OverlaySpec, spec_to_db_fields
+                _overlay_fields = spec_to_db_fields(
+                    OverlaySpec.from_dict(metadata.get("thumbnail_spec"))
+                ) if metadata.get("thumbnail_spec") else {
+                    "thumbnail_text": metadata.get("thumbnail_text", ""),
+                    "thumbnail_badge_text": metadata.get("badge_text", ""),
+                }
                 db.update_video(
                     video_id,
                     titulo_final=metadata.get("selected_title", video_data.get("titulo", "")),
                     description=metadata.get("description", ""),
                     tags_json=json.dumps(metadata.get("tags", []), ensure_ascii=False),
                     title_options=json.dumps(metadata.get("titles", []), ensure_ascii=False),
-                    thumbnail_text=metadata.get("thumbnail_text", ""),
-                    thumbnail_badge_text=metadata.get("badge_text", ""),
                     thumbnail_path=video_data.get("thumbnail_path", ""),
                     status="ready",
+                    **_overlay_fields,
                 )
                 _save_checkpoint(video_id, "metadata", {
                     "selected_title": metadata.get("selected_title", ""),
