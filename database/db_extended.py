@@ -1421,6 +1421,9 @@ def migrate_v2(db_path: str = None):
     # ── v64: purga de material (retención 0 días) — sellos purged_at ──
     _migrate_v64(conn, logger)
 
+    # ── v65: candidatos de tema por demanda de búsqueda (Fase 2 experimento) ──
+    _migrate_v65(conn, logger)
+
     conn.commit()
     conn.close()
     
@@ -3729,6 +3732,39 @@ def _migrate_v64(conn, logger):
                 logger.info("Migration v64: added %s.%s", table, column)
             except sqlite3.OperationalError as exc:
                 logger.debug("Migration v64: could not add %s.%s (%s)", table, column, exc)
+    conn.commit()
+
+
+def _migrate_v65(conn, logger):
+    """Idempotent v65: candidatos de tema por demanda de búsqueda (Fase 2).
+
+    Fase 2 del experimento de recuperación de alcance: invierte el flujo de
+    selección de tema (demanda de búsqueda primero). Guarda las consultas
+    semilla y las sugerencias de autocompletado con su score, para que la
+    decisión sea auditable y no dependa de la memoria del operador.
+    """
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS topic_demand_candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id INTEGER NOT NULL,
+                query TEXT NOT NULL,
+                source TEXT DEFAULT 'autocomplete',
+                demand_score REAL DEFAULT 0.0,
+                status TEXT DEFAULT 'new',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_topic_demand_channel "
+            "ON topic_demand_candidates(channel_id, demand_score DESC, "
+            "created_at DESC)"
+        )
+        logger.info("Migration v65: topic_demand_candidates ensured")
+    except sqlite3.OperationalError as exc:
+        logger.debug("Migration v65 failed: %s", exc)
     conn.commit()
 
 
@@ -9323,6 +9359,72 @@ class ExtendedDatabase(Database):
         except Exception as exc:
             logger.warning("get_consumed_topics failed (ch=%s): %s", channel_id, exc)
             return []
+
+    def save_topic_demand_candidates(self, channel_id: int,
+                                     candidates: list[dict],
+                                     source: str = "autocomplete") -> int:
+        """Persiste candidatos de demanda de búsqueda (Fase 2). Devuelve nº filas.
+
+        Fail-open: cualquier error se registra y devuelve 0.
+        """
+        if not channel_id or not candidates:
+            return 0
+        inserted = 0
+        try:
+            with self._connect() as conn:
+                for c in candidates:
+                    if not isinstance(c, dict):
+                        continue
+                    q = " ".join(str(c.get("query") or "").split())
+                    if not q:
+                        continue
+                    conn.execute(
+                        """INSERT INTO topic_demand_candidates
+                           (channel_id, query, source, demand_score, status)
+                           VALUES (?, ?, ?, ?, 'new')""",
+                        (channel_id, q[:300],
+                         str(c.get("source") or source)[:40],
+                         float(c.get("demand_score") or 0.0)),
+                    )
+                    inserted += 1
+                conn.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("save_topic_demand_candidates failed (ch=%s): %s",
+                           channel_id, exc)
+        return inserted
+
+    def get_recent_topic_demand_candidates(self, channel_id: int,
+                                           limit: int = 20,
+                                           min_score: float = 0.0) -> list[dict]:
+        """Candidatos de demanda de un canal (mayor demanda primero)."""
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """SELECT id, query, source, demand_score, status, created_at
+                       FROM topic_demand_candidates
+                       WHERE channel_id = ? AND demand_score >= ?
+                       ORDER BY demand_score DESC, created_at DESC
+                       LIMIT ?""",
+                    (channel_id, float(min_score), int(limit)),
+                ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("get_recent_topic_demand_candidates failed (ch=%s): %s",
+                           channel_id, exc)
+            return []
+
+    def count_topic_demand_candidates(self, channel_id: int) -> int:
+        """Nº total de candidatos de demanda persistidos para un canal."""
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM topic_demand_candidates "
+                    "WHERE channel_id = ?",
+                    (channel_id,),
+                ).fetchone()
+            return int(row["n"]) if row else 0
+        except Exception:  # noqa: BLE001
+            return 0
 
     def get_consumed_topic_signatures(self, channel_id: int) -> list[tuple[str, set]]:
         """Lista ``(label, tokens)`` para chequeos de similitud."""

@@ -77,6 +77,9 @@ class PipelineOrchestrator:
         # Phase timing tracking
         self._timing: dict = {"phases": {}}
         self._pipeline_start: float = time.time()
+        # Fase 2 (search-first): candidatos de tema por demanda de búsqueda,
+        # recolectados al inicio de la generación del guion.
+        self._demand_candidates: list = []
 
         # Load config via bridge (DB-aware) or fall back to Python module
         if canal not in CHANNEL_CONFIGS:
@@ -572,6 +575,11 @@ class PipelineOrchestrator:
         if self.is_marathon:
             return self._phase_generate_script_marathon(start)
 
+        # ── Fase 2: seeding de temas por demanda de búsqueda (0 cuota) ──
+        # Recolecta y persiste candidatos de autocompletado ANTES de elegir
+        # tema, para que la selección se apoye en lo que la gente busca.
+        self._seed_topics_from_demand()
+
         content_items = self.db.get_unused_content(canal=self.canal, limit=5)
         if not content_items:
             logger.warning(f"[{self.canal}] No unused content available for script generation")
@@ -579,22 +587,38 @@ class PipelineOrchestrator:
                                  "No unused content")
             return None
 
-        # ── T1.3: ordenar candidatos por DEMANDA real (autocomplete YouTube) ──
-        # Es un ranking, no un bloqueo: si la red falla se conserva el orden
-        # original (fail-open). Evita guionar sobre temas que nadie busca.
+        # ── T1.3 + Fase 2: ordenar candidatos por DEMANDA real ──
+        # Es un ranking compuesto, no un bloqueo: combina la demanda del propio
+        # tema (autocomplete YouTube) con el solapamiento con las consultas
+        # semilla de la Fase 2. Si la red falla se conserva el orden original
+        # (fail-open). Evita guionar sobre temas que nadie busca.
         try:
             from pipeline.topic_demand import rank_labels
+            from pipeline.topic_dedup import topic_tokens
             _labels = [
                 (ci.get("title") or ci.get("text") or "")[:120]
                 for ci in content_items
             ]
             _demand = {lbl: sc for lbl, sc in rank_labels(_labels)}
-            content_items.sort(
-                key=lambda ci: _demand.get(
-                    (ci.get("title") or ci.get("text") or "")[:120], 0.5
-                ),
-                reverse=True,
-            )
+            _seed_tokens: set = set()
+            for _c in (getattr(self, "_demand_candidates", []) or []):
+                _seed_tokens |= topic_tokens(_c.get("query", ""))
+
+            def _composite(ci):
+                lbl = (ci.get("title") or ci.get("text") or "")[:120]
+                demand = _demand.get(lbl, 0.5)
+                overlap = 0.0
+                if _seed_tokens:
+                    toks = topic_tokens(
+                        f"{ci.get('title') or ''} {ci.get('text') or ''}"[:200]
+                    )
+                    if toks:
+                        overlap = len(_seed_tokens & toks) / max(
+                            1, min(len(_seed_tokens), len(toks))
+                        )
+                return 0.75 * demand + 0.25 * overlap
+
+            content_items.sort(key=_composite, reverse=True)
         except Exception as _dm_exc:  # noqa: BLE001
             logger.warning(
                 f"[{self.canal}] demand ranking error (fail-open): {_dm_exc}"
@@ -1788,6 +1812,38 @@ class PipelineOrchestrator:
             return row["id"] if row else None
         except Exception:
             return None
+
+    def _seed_topics_from_demand(self) -> list[dict]:
+        """Fase 2: recolecta y persiste candidatos de tema por demanda de búsqueda.
+
+        0 cuota (autocompletado público). Fail-open: sin red no cambia nada.
+        """
+        try:
+            from pipeline.topic_seeding import seed_channel
+            cid = self._get_channel_id()
+            cfg = getattr(self, "config", None)
+            if cid is None or cfg is None:
+                self._demand_candidates = []
+                return []
+            candidates = seed_channel(self.db, cid, cfg, persist=True)
+            self._demand_candidates = candidates
+            if candidates:
+                try:
+                    self.db.bump_system_counter(
+                        "topics_seeded_from_demand", len(candidates)
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                logger.info(
+                    "[%s] Fase 2: %d candidatos de demanda de búsqueda (top: %s)",
+                    self.canal, len(candidates),
+                    ", ".join(c.get("query", "") for c in candidates[:3]),
+                )
+            return candidates
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[{self.canal}] topic seeding error (fail-open): {exc}")
+            self._demand_candidates = []
+            return []
 
     def _rebuild_video_data_from_db(self, fallback: dict | None = None) -> dict | None:
         """Reconstruct video_data from the DB when the checkpoint lacks 'video'.

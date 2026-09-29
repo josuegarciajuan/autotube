@@ -118,6 +118,19 @@ TOPIC_DEDUP_SEMANTIC_THRESHOLD = 0.86   # similitud coseno mínima
 # contenido repetitivo entre canales del mismo operador).
 TOPIC_CROSS_CHANNEL_DEDUP_ENABLED = True
 
+# ── Fase 2: seeding de temas por demanda de búsqueda (experimento) ───────────
+# Invierte el flujo de selección de tema: siembra CONSULTAS desde el
+# autocompletado público de YouTube (0 cuota, sin OAuth) a partir de las
+# keywords SEO del canal, las puntúa y las persiste como candidatos auditables
+# (tabla topic_demand_candidates, migración v65). Los shorts las usan para
+# idear y el long-form las usa como señal de ranking.
+# Fail-open: sin red no cambia el comportamiento. Kill-switch:
+# system_state["topic_seeding_disabled"]="true".
+TOPIC_SEEDING_ENABLED = True
+TOPIC_SEED_MAX_QUERIES = 12     # candidatos a persistir/utilizar por canal
+TOPIC_SEEDING_MIN_SCORE = 0.0   # score mínimo de demanda para persistir
+TOPIC_SEED_QUERIES = []         # consultas semilla explícitas por canal
+
 # ── Gate de novedad de guion (T1.4, experimento de recuperación) ─────────────
 # Bloquea guiones casi-idénticos a uno anterior del mismo canal (patrón de
 # plantilla = contenido inauténtico). Se evalúa ANTES de TTS/render.

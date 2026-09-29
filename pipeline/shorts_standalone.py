@@ -60,12 +60,30 @@ def discover_standalone_topics(channel_slug: str, count: int = 3) -> list[dict]:
     # Pick 5-10 keywords to describe the niche
     niche_sample = ", ".join(niche_keywords[:10]) if niche_keywords else tagline[:100]
 
+    # ── Fase 2 (search-first): consultas reales que la gente busca ──
+    # Autocompletado público (0 cuota). Fail-open: sin red se mantiene la
+    # ideación puramente LLM de antes.
+    demand_queries: list[str] = []
+    try:
+        from pipeline.topic_seeding import collect_candidates
+        demand_queries = [c["query"] for c in collect_candidates(ch_config)[:8]]
+    except Exception as _seed_exc:  # noqa: BLE001
+        logger.debug("[standalone] demand seeding unavailable: %s", _seed_exc)
+    demand_block = ""
+    if demand_queries:
+        demand_block = (
+            "\nCONSULTAS REALES que la gente busca en YouTube (Fase 2): ordénalas "
+            "por prioridad y basa al menos la mitad de las ideas en ellas:\n- "
+            + "\n- ".join(demand_queries)
+        )
+
     client = create_llm_client(enable_thinking=False, timeout=60.0, max_retries=1)
 
     prompt = f"""Eres un experto en YouTube Shorts y SEO para el canal "{channel_name}".
 
 Nicho: {niche_sample}
 Estilo: {style}
+{demand_block}
 
 Genera {count} ideas para YouTube Shorts (50-55 segundos) que sean VIRALES, con alta probabilidad de ser compartidos y comentados. Las ideas deben ser:
 
