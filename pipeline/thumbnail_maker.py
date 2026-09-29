@@ -708,6 +708,9 @@ class ThumbnailMaker:
             List of Path objects, one per generated thumbnail variant.
         """
         slug = canal_slug or ""
+        # W6: reset per-call so strategy labels never accumulate across batches
+        # (a reused maker would otherwise mis-attribute CTR to old strategies).
+        self.last_variant_strategies = []
         recent_context = self._load_recent_context(slug, video_id)
 
         # ── F1: Style Engine (shared, cached) ──────────────────

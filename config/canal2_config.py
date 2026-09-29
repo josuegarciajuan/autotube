@@ -191,8 +191,14 @@ TITLE_REQUIRED_SPECIFICITY = ["place_or_person"]
 # Refuerzo de generación: el prompt exige un año de 4 dígitos cuando exista.
 TITLE_REQUIRE_YEAR = True
 TITLE_BANNED_PATTERNS = ["nadie puede explicar", "te dejará sin palabras", "desafía toda lógica"]
-THUMBNAIL_MAX_OVERLAY_CHARS = 32
+THUMBNAIL_MAX_OVERLAY_CHARS = 26
 RECOVERY_CHECKPOINTS_ENABLED = True
+
+# Fase 1 packaging (experimento de recuperación de alcance): A/B de miniaturas
+# + saneo determinista de títulos. Antes solo canal3/canal5. Al activarlo, el
+# worker genera 3 variantes por vídeo y el gate de packaging endurece el título.
+ENABLE_AB_TESTING = True
+TITLE_HARDEN_ENABLED = True
 
 # ═══════════════════════════════════════════════════════════════════
 # SCRIPT STRUCTURE — "Espiral de Asombro" method
@@ -666,6 +672,19 @@ THUMBNAIL_FONT_FAMILY = "DejaVuSans-Bold"
 THUMBNAIL_BORDER_COLOR = "#CC0000"
 THUMBNAIL_SHOW_4K_BADGE = False
 THUMBNAIL_TEXT_STROKE_COLOR = "#000000"
+
+# Fase 1 packaging: composición tipo canal3/canal5 (fuente 64, overlay 26) y
+# directiva tema-primero (el símbolo/escena del tema manda; la cara es secundaria).
+THUMBNAIL_FONT_SIZE = 64
+THUMBNAIL_CONCEPT_DIRECTIVE = (
+    "Canal de sincronías y coincidencias imposibles: el SÍMBOLO o la ESCENA del "
+    "tema (el avión, el reloj detenido, los dos rostros idénticos, el objeto que "
+    "aparece dos veces) es el PROTAGONISTA de la imagen. Si el vídeo gira sobre "
+    "una persona concreta, un rostro humano REAL de stock (sin menores) con "
+    "emoción intensa y creíble puede ser el sujeto principal. En el resto de "
+    "casos la cara es, como mucho, un elemento secundario y pequeño; nunca la "
+    "imagen entera."
+)
 
 # v3 (tema-primero): el color nace del contenido; la firma es el marco.
 THUMBNAIL_COLOR_MODE = "image_content"

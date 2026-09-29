@@ -264,9 +264,11 @@ class ABTestWorker:
         conn.commit()
 
         # ── Decision: thumbnail first, title second ───────────
-        if active_variant == 1 and len(variant_paths) >= 2:
-            # Rotate to thumbnail variant 2
-            new_variant = 2
+        # Fase 1 packaging: con 3 variantes generadas antes solo se probaba la 2.
+        # Ahora avanzamos a la SIGUIENTE variante no probada (1-based) y, cuando
+        # se agotan, caemos a la rotación de título.
+        if len(variant_paths) >= 2 and int(active_variant or 1) < len(variant_paths):
+            new_variant = int(active_variant or 1) + 1
             self._swap_thumbnail_on_youtube(
                 yt_video_id, channel_slug, variant_paths, new_variant,
                 video_id, channel_id, variant_strategies=variant_strategies,
@@ -282,13 +284,55 @@ class ABTestWorker:
             """, (new_variant, video_id))
             conn.commit()
             logger.info(
-                "[AB] Video %s: CTR low (%.2f%%) — rotated thumbnail to variant %d",
-                video_id, ctr, new_variant,
+                "[AB] Video %s: CTR low (%.2f%%) — rotated thumbnail to variant %d/%d",
+                video_id, ctr, new_variant, len(variant_paths),
             )
         else:
             # Rotate title
             title_v1 = row.get("title_v1", "")
             self._rotate_title(row, title_v1, ctr)
+
+    def _try_next_thumbnail_variant(self, row: dict) -> bool:
+        """Fase 1 packaging: prueba la siguiente variante de miniatura no vista.
+
+        Se conserva la línea base original (``ctr_v1``) y se reabre la ventana
+        de segundo check reseteando ``thumbnail_rotated_at``. Devuelve ``True``
+        si rotó a una nueva variante; ``False`` si ya no quedan.
+        """
+        video_id = row["video_id"]
+        yt_video_id = row["yt_video_id"]
+        channel_slug = row.get("channel_slug", "")
+        channel_id = row.get("channel_id")
+        try:
+            variant_paths = json.loads(row.get("thumbnail_variant_paths") or "[]")
+        except (json.JSONDecodeError, TypeError):
+            variant_paths = []
+        try:
+            variant_strategies = json.loads(row.get("thumbnail_variant_strategies") or "[]")
+        except (json.JSONDecodeError, TypeError):
+            variant_strategies = []
+        active_variant = int(row.get("thumbnail_variant_active") or 1)
+        if active_variant >= len(variant_paths):
+            return False
+        next_variant = active_variant + 1
+        self._swap_thumbnail_on_youtube(
+            yt_video_id, channel_slug, variant_paths, next_variant,
+            video_id, channel_id, variant_strategies=variant_strategies,
+        )
+        conn = self._get_db_conn()
+        conn.execute("""
+            UPDATE video_ab_tests
+            SET thumbnail_variant_active = ?,
+                thumbnail_rotated_at = datetime('now'),
+                updated_at = datetime('now')
+            WHERE video_id = ?
+        """, (next_variant, video_id))
+        conn.commit()
+        logger.info(
+            "[AB] Video %s: variante %d no superó — probando variante %d/%d",
+            video_id, active_variant, next_variant, len(variant_paths),
+        )
+        return True
 
     def _process_second_check(self, row: dict, now: datetime):
         """Compare CTR before and after the change to determine the winner.
@@ -354,25 +398,39 @@ class ABTestWorker:
             winner_title = row.get("title_v2", row.get("title_v1", ""))
             self._complete_test(video_id, winner_title, phase, ctr_v2,
                                 impressions_v2, retention_v2, "v2",
-                                "winner_v2")
+                                "winner_v2",
+                                winner_thumbnail_variant=(
+                                    int(row.get("thumbnail_variant_active") or 1)
+                                    if phase == "thumbnail_rotated" else None
+                                ))
             logger.info("[AB] Video %s: CTR improved %.2f%% → %.2f%% — KEEPING change", video_id, ctr_v1, ctr_v2)
             self._record_learning(row, ctr_v1, ctr_v2, winner_title)
         elif ctr_v1 > ctr_v2 * 1.1:
+            # Fase 1: si quedan variantes de miniatura sin probar, seguimos con
+            # la siguiente en vez de cerrar el test.
+            if phase == "thumbnail_rotated" and self._try_next_thumbnail_variant(row):
+                return
             # Regression > 10% — restore original
             winner_title = row.get("title_v1", "")
             self._restore_original(row, phase)
             self._complete_test(video_id, winner_title, phase, ctr_v2,
                                 impressions_v2, retention_v2, "v1",
-                                "winner_v1")
+                                "winner_v1",
+                                winner_thumbnail_variant=(1 if phase == "thumbnail_rotated" else None))
             logger.info("[AB] Video %s: CTR dropped %.2f%% → %.2f%% — RESTORING original", video_id, ctr_v1, ctr_v2)
         else:
+            # Fase 1: sin mejora clara y con variantes pendientes, probamos la
+            # siguiente antes de quedarnos con la original.
+            if phase == "thumbnail_rotated" and self._try_next_thumbnail_variant(row):
+                return
             # Difference < 10% — keep original (conservative)
             winner_title = row.get("title_v1", "")
             if phase == "title_rotated":
                 self._restore_title(row)
             self._complete_test(video_id, winner_title, phase, ctr_v2,
                                 impressions_v2, retention_v2, "v1",
-                                "tie_kept_original")
+                                "tie_kept_original",
+                                winner_thumbnail_variant=(1 if phase == "thumbnail_rotated" else None))
             logger.info("[AB] Video %s: CTR change < 10%% (%.2f%% → %.2f%%) — keeping original", video_id, ctr_v1, ctr_v2)
 
     # ═══════════════════════════════════════════════════════════════
@@ -725,7 +783,8 @@ class ABTestWorker:
 
     def _complete_test(self, video_id: int, winner_title: str, phase: str,
                        ctr_v2: float, impressions_v2: int, retention_v2: float,
-                       winner_source: str, result: str):
+                       winner_source: str, result: str,
+                       winner_thumbnail_variant: int | None = None):
         """Mark the test as completed with results."""
         conn = self._get_db_conn()
         conn.execute("""
@@ -733,13 +792,18 @@ class ABTestWorker:
             SET phase = 'completed',
                 ctr_v2 = ?, impressions_v2 = ?, retention_v2 = ?,
                 winner_title = ?,
+                winner_thumbnail_variant = COALESCE(?, winner_thumbnail_variant),
                 second_checked_at = datetime('now'),
                 completed_at = datetime('now'),
                 updated_at = datetime('now')
             WHERE video_id = ?
-        """, (ctr_v2, impressions_v2, retention_v2, winner_title, video_id))
+        """, (ctr_v2, impressions_v2, retention_v2, winner_title,
+              winner_thumbnail_variant, video_id))
         conn.commit()
-        logger.info("[AB] Video %s: test COMPLETED — winner: %s (source: %s)", video_id, winner_title[:40], winner_source)
+        logger.info(
+            "[AB] Video %s: test COMPLETED — winner: %s (source: %s, thumb_variant: %s)",
+            video_id, winner_title[:40], winner_source, winner_thumbnail_variant,
+        )
 
     def _record_learning(self, row: dict, ctr_v1: float, ctr_v2: float,
                          winning_formula: str):
