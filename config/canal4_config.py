@@ -407,6 +407,14 @@ THUMBNAIL_BORDER_COLOR = "#FF5C00"
 THUMBNAIL_SHOW_4K_BADGE = False
 THUMBNAIL_TEXT_STROKE_COLOR = "#000000"
 
+# Fase 1 packaging (experimento de recuperación de alcance): A/B de miniaturas
+# + saneo determinista de títulos + composición tipo canal3/canal5 (fuente 64,
+# overlay 26). Antes solo canal3/canal5.
+ENABLE_AB_TESTING = True
+TITLE_HARDEN_ENABLED = True
+THUMBNAIL_FONT_SIZE = 64
+THUMBNAIL_MAX_OVERLAY_CHARS = 26
+
 # v3 (tema-primero): color del contenido; la firma es el marco tipo film strip.
 THUMBNAIL_COLOR_MODE = "image_content"
 THUMBNAIL_FRAME_STYLE = "film_strip"

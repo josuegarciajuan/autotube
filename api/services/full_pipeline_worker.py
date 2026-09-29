@@ -1615,6 +1615,10 @@ def run_job(
 
                 maker = ThumbnailMaker(config=config)
                 
+                # Fase 1 packaging: nº de variantes configurable por canal
+                # (AB_TEST_THUMBNAIL_VARIANTS). Antes estaba fijado a 3.
+                _num_variants = int(getattr(config, "AB_TEST_THUMBNAIL_VARIANTS", 3) or 3)
+                _num_variants = max(2, min(5, _num_variants))
                 ab_test_variant_paths = maker.make_variant_thumbnails(
                     title=title_for_thumb,
                     script_text=script_text,
@@ -1624,7 +1628,7 @@ def run_job(
                     channel_description=channel_desc,
                     channel_theme=channel_theme,
                     video_id=video_id,
-                    num_variants=3,
+                    num_variants=_num_variants,
                     scene_images=_scene_images or None,
                 )
                 

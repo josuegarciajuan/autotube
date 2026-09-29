@@ -352,12 +352,15 @@ def get_channel_thumbnail_styles(channel_id: int):
 
 @router.get("/channels/{channel_id}/analytics/thumbnail-ctr")
 def get_channel_thumbnail_ctr(channel_id: int, dimension: str = "style",
-                              min_impressions: int = 500):
+                              min_impressions: int = 100):
     """CTR promedio por dimensión de packaging (W7).
 
     ``dimension`` ∈ {style, layout, color_key, variant_strategy, emphasis}.
     Permite atribuir CTR a la estrategia A/B, layout, color o palabra énfasis
     con la que se generó cada miniatura.
+
+    Umbral por defecto 100 impresiones (Fase 1 packaging): con 500 los canales
+    de bajo alcance nunca acumulaban datos para atribuir CTR por estrategia.
     """
     db = get_db()
     ch = db.get_channel(channel_id)
