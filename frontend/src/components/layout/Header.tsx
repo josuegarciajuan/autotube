@@ -1,5 +1,20 @@
+import { useState } from 'react'
 import { useLocation } from 'react-router-dom'
-import { Film, Menu } from 'lucide-react'
+import { Film, LogOut, Menu } from 'lucide-react'
+
+/**
+ * Cierre de sesión del gate de patrón universal (panel-gate).
+ * El panel no tiene login propio: la sesión es la cookie firmada `pg_session`
+ * emitida por el gate. `POST /__gate/logout` la revoca y la limpia; al recargar
+ * el gate vuelve a mostrar la pantalla de patrón.
+ */
+async function logoutGate(): Promise<void> {
+  try {
+    await fetch('/__gate/logout', { method: 'POST', credentials: 'same-origin' })
+  } finally {
+    window.location.reload()
+  }
+}
 
 const titles: Record<string, string> = {
   '/': 'Dashboard',
@@ -15,6 +30,13 @@ interface Props {
 
 export default function Header({ onMenuToggle }: Props) {
   const location = useLocation()
+  const [loggingOut, setLoggingOut] = useState(false)
+
+  async function handleLogout() {
+    if (loggingOut) return
+    setLoggingOut(true)
+    await logoutGate()
+  }
 
   // Check if we're on a sub-route
   let pageTitle = 'Dashboard'
@@ -47,6 +69,15 @@ export default function Header({ onMenuToggle }: Props) {
       <div className="flex items-center gap-3 shrink-0">
         <span className="text-xs text-gray-500 hidden sm:inline">Autotube v2.0</span>
         <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" title="Sistema activo" />
+        <button
+          onClick={handleLogout}
+          disabled={loggingOut}
+          title="Cerrar sesión (patrón)"
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs text-gray-400 hover:text-white hover:bg-surface-hover border border-surface-border transition-colors disabled:opacity-50"
+        >
+          <LogOut size={14} />
+          <span className="hidden sm:inline">{loggingOut ? 'Saliendo…' : 'Salir'}</span>
+        </button>
       </div>
     </header>
   )
