@@ -1,0 +1,20 @@
+{
+  "name": "panel-gate",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Reverse-proxy gate with Android-style pattern unlock for private panels",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "set-pattern": "node bin/set-pattern.js",
+    "hash-secret": "node bin/hash-secret.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "cookie-parser": "^1.4.7",
+    "express": "^4.21.2",
+    "http-proxy-middleware": "^3.0.3"
+  }
+}
