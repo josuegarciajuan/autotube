@@ -5,6 +5,22 @@
 - **Frontend:** React + TypeScript + Vite, compilado en `frontend/dist/`
 - **Servidor:** Uvicorn (`python3 -m uvicorn api.main:app --host 0.0.0.0 --port 8000`)
 
+## 🔐 Acceso al panel — gate de patrón universal (`josue.ink/autotube`)
+- El panel **no tiene login propio**: se publica en `https://josue.ink/autotube` a través de
+  **panel-gate** (`/root/panel-gate`, `127.0.0.1:8099`), un reverse-proxy con desbloqueo por
+  **patrón 3×3** (estilo Android) verificado en servidor (scrypt) + cookie firmada HMAC-SHA256
+  (`pg_session`, TTL 30 días, dominio `.josue.ink`).
+- Es **universal**: el mismo patrón da acceso a `/admin`, `/trading`, `/reconocimientoFacial`,
+  `/superserver` y `/autotube` (SSO). El gate inyecta `X-Panel-Gate: 1` en el backend.
+- Rutas de autotube por el gate: `/autotube` (SPA), `/api` (API) y `/ws` (WebSockets); el gate
+  quita el prefijo `/autotube` antes de proxear a FastAPI (`127.0.0.1:8000`).
+- **Exposición antigua eliminada:** `lamami.online/autotube` y `/api` ya no sirven el panel;
+  redirigen (301) a `josue.ink/autotube`.
+- Botón **"Salir"** del panel = `POST /__gate/logout` (revoca la cookie).
+- Cambiar el patrón: `node /root/panel-gate/bin/set-pattern.js "0-1-2-5-8-3"` (aplica al instante).
+- Artefactos versionados: `deploy/panel-gate/` (snapshot + README) y
+  `deploy/apache/josue-autotube-gate.conf` (wiring Apache).
+
 ## Canales (v1 multi-channel)
 | ID | Slug | Nombre | YouTube | Token (OAuth) | Proyecto GCP (cuota compartida) |
 |----|------|--------|---------|---------------|----------------------------------|
