@@ -1,0 +1,19 @@
+[Unit]
+Description=panel-gate — pattern-unlock reverse proxy for private panels
+Documentation=file:///root/panel-gate/server.js
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/panel-gate
+ExecStart=/usr/bin/node /root/panel-gate/server.js
+Restart=always
+RestartSec=3
+Environment=NODE_ENV=production
+NoNewPrivileges=true
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

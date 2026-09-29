@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="robots" content="noindex, nofollow, noarchive, nosnippet, noimageindex" />
+    <meta name="theme-color" content="#0d1117" />
+    <title>Acceso restringido</title>
+    <link rel="stylesheet" href="/__gate/static/style.css" />
+  </head>
+  <body>
+    <main class="gate" role="main">
+      <h1 class="gate__title">Acceso restringido</h1>
+      <p class="gate__hint">Dibuja tu patrón para desbloquear</p>
+      <div class="gate__pad-wrap">
+        <canvas id="pad" width="300" height="300" aria-label="Rejilla de patrón 3x3" role="img"></canvas>
+      </div>
+      <p id="msg" class="gate__msg" role="status" aria-live="polite"></p>
+      <noscript class="gate__msg gate__msg--err">Necesitas JavaScript para desbloquear.</noscript>
+    </main>
+    <script src="/__gate/static/pattern.js"></script>
+  </body>
+</html>
