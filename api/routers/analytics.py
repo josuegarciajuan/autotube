@@ -50,6 +50,10 @@ def get_experiment_metrics():
         "topic_dedup_rejected": _counter("topic_dedup_rejected"),
         "script_novelty_blocked": _counter("script_novelty_blocked"),
     }
+    # Fase 2: candidatos de tema sembrados desde demanda de búsqueda.
+    seeded = {
+        "topics_seeded_from_demand": _counter("topics_seeded_from_demand"),
+    }
 
     # Embudo real por canal (Reporting API reach): impresiones → CTR → retención.
     reach_funnel: dict = {}
@@ -99,6 +103,7 @@ def get_experiment_metrics():
         "live": live,
         "checkpoints": checkpoints,
         "rejected": rejected,
+        "seeded": seeded,
         "reach_funnel": reach_funnel,
         "retention_feedback": retention_feedback,
     }
