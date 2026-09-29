@@ -221,8 +221,86 @@ def _phase_labels(cfg, phase_ids) -> dict[str, str]:
     return {pid: labels.get(pid, pid) for pid in phase_ids}
 
 
+def _phase_meta(cfg, phase_id: str) -> dict:
+    """Metadata narrativa de una fase desde ``SCRIPT_STRUCTURE`` (o {})."""
+    for p in (getattr(cfg, "SCRIPT_STRUCTURE", []) or []):
+        if isinstance(p, dict) and p.get("id") == phase_id:
+            return p
+    return {}
+
+
+def _shorten(text, limit: int = 160) -> str:
+    text = " ".join(str(text or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _build_phase_directives(cfg, weak: list[dict]) -> list[dict]:
+    """Instrucciones concretas por fase débil (Fase 3 del experimento).
+
+    A diferencia de la recomendación genérica anterior (idéntica para todas las
+    fases), aquí se usa el ``retention_anchor``, la ``description`` y el
+    ``scene_pacing`` que el canal ya define en ``SCRIPT_STRUCTURE`` para atacar
+    exactamente la fase que pierde audiencia.
+    """
+    directives: list[dict] = []
+    for w in weak or []:
+        pid = w.get("phase_id")
+        label = w.get("label") or pid
+        pct = w.get("watch_ratio_pct")
+        meta = _phase_meta(cfg, pid)
+        time_pct = str(meta.get("time_pct") or "").strip()
+        anchor = _shorten(meta.get("retention_anchor") or "", 240)
+        desc = _shorten(meta.get("description") or "", 140)
+        pacing = meta.get("scene_pacing") if isinstance(
+            meta.get("scene_pacing"), dict) else {}
+
+        head = f"{label}"
+        if time_pct:
+            head += f" ({time_pct})"
+        head += f" pierde audiencia (retención {pct}%)"
+
+        if anchor:
+            action = (
+                "Coloca su ancla de retención EXACTAMENTE en su punto y con el "
+                f"texto indicado: «{anchor}». Elimina cualquier explicación "
+                "previa que retrase esa escena."
+            )
+        else:
+            action = (
+                "Abre la fase con un mini-cliffhanger y elimina la explicación "
+                "que no aporte un hecho nuevo."
+            )
+        if desc:
+            action += f" Contenido esperado de la fase: {desc}."
+        try:
+            its = pacing.get("image_target_sec")
+            vts = pacing.get("video_target_sec")
+            seg = []
+            if its:
+                seg.append(f"imagen ≤{float(its):.1f}s")
+            if vts:
+                seg.append(f"vídeo ≤{float(vts):.1f}s")
+            if seg:
+                action += (
+                    " Acorta los planos de esta fase (" + ", ".join(seg)
+                    + ") para acelerar el ritmo sin relleno."
+                )
+        except (TypeError, ValueError):
+            pass
+
+        directives.append({
+            "phase_id": pid,
+            "label": head,
+            "instruction": action,
+        })
+    return directives
+
+
 def _build_directive(overall_pct: float, target: float, trend: str,
-                     weak: list[dict]) -> str:
+                     weak: list[dict],
+                     phase_directives: list[dict] | None = None) -> str:
     if overall_pct >= target:
         return (
             f"Retencion media reciente {overall_pct}% (objetivo {target}%). "
@@ -234,7 +312,14 @@ def _build_directive(overall_pct: float, target: float, trend: str,
         parts.append("La tendencia de los ultimos videos es a la baja.")
     elif trend == "up":
         parts.append("La tendencia es al alza: consolida lo que funciona.")
-    if weak:
+    if phase_directives:
+        parts.append(
+            "Las fases que mas audiencia pierden y como arreglarlas "
+            "(aplica cada punto a su fase):"
+        )
+        for pd in phase_directives:
+            parts.append(f"- {pd['label']}: {pd['instruction']}")
+    elif weak:
         labels = ", ".join(
             f"{w['label']} ({w['watch_ratio_pct']}%)" for w in weak
         )
@@ -247,7 +332,7 @@ def _build_directive(overall_pct: float, target: float, trend: str,
         "Manten la promesa explicita del payoff en los primeros 90 segundos y "
         "un reset (recapitulacion corta) hacia la mitad."
     )
-    return " ".join(parts)
+    return "\n".join(parts)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -350,6 +435,8 @@ def compute_channel_signal(db, channel: dict, cfg=None,
         }
         for pid, val in ranked_sel
     ]
+    # Fase 3: instrucciones concretas por fase (anchor + description + pacing).
+    phase_directives = _build_phase_directives(cfg, weak)
 
     signal = {
         "slug": slug,
@@ -364,7 +451,10 @@ def compute_channel_signal(db, channel: dict, cfg=None,
             pid: round(val * 100, 1) for pid, val in phase_avg.items()
         },
         "weak_phases": weak,
-        "directive": _build_directive(overall_pct, target, trend, weak),
+        "phase_directives": phase_directives,
+        "directive": _build_directive(
+            overall_pct, target, trend, weak, phase_directives
+        ),
     }
 
     if persist:

@@ -205,6 +205,32 @@ def test_signal_picks_weakest_phase_and_caches():
     assert cached["weak_phases"][0]["phase_id"] == "desarrollo"
 
 
+def test_phase_directives_use_channel_anchors():
+    """Fase 3: la directiva usa ancla, descripción y pacing de la fase débil."""
+    conn = _make_conn()
+    _seed_videos(conn)
+    db = FakeDB(conn)
+    cfg = _cfg(SCRIPT_STRUCTURE=[
+        {"id": "gancho", "step": "EL GANCHO", "time_pct": "0-10%"},
+        {"id": "desarrollo", "step": "EL DESARROLLO", "time_pct": "30-55%",
+         "scene_pacing": {"image_target_sec": 6.0, "video_target_sec": 4.0},
+         "description": "El suceso paso a paso.",
+         "retention_anchor": "CLIFFHANGER al 50%: recapitulemos."},
+        {"id": "cierre", "step": "EL CIERRE", "time_pct": "85-100%"},
+    ])
+    sig = rf.compute_channel_signal(db, {"id": 1, "slug": "canalx"}, cfg=cfg)
+    assert sig is not None
+    pds = {p["phase_id"]: p for p in sig["phase_directives"]}
+    assert "desarrollo" in pds
+    instr = pds["desarrollo"]["instruction"]
+    assert "CLIFFHANGER al 50%" in instr
+    assert "imagen ≤6.0s" in instr
+    assert "El suceso paso a paso." in instr
+    # El directivo global incluye el bloque estructurado por fase.
+    assert "como arreglarlas" in sig["directive"]
+    assert "EL DESARROLLO" in sig["directive"]
+
+
 def test_signal_above_target_has_no_weak_directive():
     conn = _make_conn()
     _seed_videos(conn, wr_gancho=0.95, wr_desarrollo=0.85, wr_cierre=0.9)
