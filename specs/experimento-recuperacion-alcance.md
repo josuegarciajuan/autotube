@@ -231,6 +231,10 @@ El Reporting API tiene latencia de hasta 48 h: los últimos 1-2 días pueden fal
 | (Fase 1) | Packaging: A/B por canal + caras selectivas + composición + saneo títulos (canal3/canal5) | Subir CTR e impresiones/vídeo |
 | (Fase 2) | Search-first: temas por demanda de búsqueda | Impresiones vía búsqueda |
 | 28/9 | **Fase 3 (retención)**: curvas `audienceRetention` por fase + directiva en prompts + loop diario `retention_feedback` | Retención > 40 % corrigiendo las fases que pierden audiencia |
+| 29/9 | **Fase 1 ampliada**: A/B + saneo de títulos + composición 64/26 en canal2/canal4; A/B rota por todas las variantes y persiste ganador; umbral CTR-por-estrategia a 100 imp. | Subir CTR/impresiones/vídeo en canal2/canal4 |
+| 29/9 | **Fase 3 mejorada**: directivas por fase (ancla + descripción + `scene_pacing`) en vez de recomendación genérica | Que el refuerzo ataque la fase concreta que pierde audiencia |
+| 29/9 | **Fase 2 (search-first)**: `topic_seeding` + tabla `topic_demand_candidates` (v65); shorts idean sobre consultas reales, long-form ranking compuesto | Impresiones vía búsqueda |
+| 29/9 | **Ops**: reprogramación autoritativa (32 slots, 0 jobs cancelados) + drenaje canal5 a 3/día + recolección profunda (reach OK; canal2/4 sin curvas aún por bajo watch-time) | Cumplir el plan y habilitar señal Fase 3 |
 
 ### 11.5 Cómo decidir
 Aplicar la matriz de §6 con los KPIs leading: si en 2-4 semanas CTR/impresiones-por-vídeo

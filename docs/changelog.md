@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Experimento de recuperación de alcance — Fases 1, 2 y 3
+- **Fase 1 (packaging/CTR):** activados A/B de miniaturas, saneo determinista de
+  títulos y composición 64/26 en canal2 y canal4 (antes solo canal3/canal5). El
+  worker A/B ahora rota por **todas** las variantes, persiste
+  `winner_thumbnail_variant` y respeta `AB_TEST_THUMBNAIL_VARIANTS`; el panel de
+  CTR por estrategia baja su umbral a 100 impresiones para ser medible.
+- **Fase 3 (retención):** la directiva de retención pasa de texto genérico a
+  instrucciones **por fase** usando el `retention_anchor`, la `description` y el
+  `scene_pacing` de `SCRIPT_STRUCTURE`; se persiste `phase_directives` en la señal.
+- **Fase 2 (search-first):** nuevo `pipeline/topic_seeding.py` que siembra
+  consultas desde el autocompletado público de YouTube (0 cuota) a partir de las
+  keywords SEO del canal y las persiste en `topic_demand_candidates` (migración
+  v65). Los shorts idean sobre consultas reales y el long-form las usa como señal
+  de ranking compuesto. Spec: `specs/fase-2-search-first.md`.
+- **Ops:** reprogramación autoritativa sin cancelar renders, cupo de drenaje de
+  canal5 a 3/día durante el backlog y recolección profunda (reach OK).
+
 ### Fase final — Gate de hardcodes operativos
 - Parametrizados los últimos mapas/defaults operativos: la migración legacy de
   cuentas usa `LEGACY_CHANNEL_GOOGLE_ACCOUNTS`, `test_config` hereda defaults
