@@ -2687,6 +2687,26 @@ class PipelineOrchestrator:
             except Exception as _title_exc:
                 logger.debug("[%s] title sanitize skipped: %s", self.canal, _title_exc)
 
+            # ── F5: garantizar título COMPLETO (sin frases cortadas a medias) ──
+            # No basta con sanear separadores: títulos como "...dejar sin cura a
+            # toda" llegan truncados. Se finaliza en frontera de palabra y sin
+            # conectores colgantes antes de subir.
+            try:
+                from pipeline.packaging_brief import finalize_title
+                _final = finalize_title(
+                    title, int(getattr(self.config, "TITLE_MAX_CHARS", 100) or 100)
+                )
+                if _final and _final != title:
+                    logger.warning(
+                        "[%s] Título finalizado (completitud): '%s' → '%s'",
+                        self.canal, title[:60], _final[:60],
+                    )
+                    title = _final
+                    if metadata is not None:
+                        metadata["selected_title"] = _final
+            except Exception as _ft_exc:
+                logger.debug("[%s] finalize_title skipped: %s", self.canal, _ft_exc)
+
             # ── Thumbnail: resolver desde la DB si el checkpoint no lo trae ──
             # Un upload_only reencolado puede tener un checkpoint sin
             # `thumbnail_path`; el fichero sí existe en la DB. Sin esto, el
