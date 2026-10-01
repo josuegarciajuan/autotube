@@ -1442,6 +1442,9 @@ def migrate_v2(db_path: str = None):
     # ── v66: medición fiable del embudo (F1) — fechas ISO + engaged_views + tráfico ──
     _migrate_v66(conn, logger)
 
+    # ── v67: trazabilidad de selección editorial (F3) ──
+    _migrate_v67(conn, logger)
+
     conn.commit()
     conn.close()
     
@@ -3901,6 +3904,43 @@ def _migrate_v66(conn, logger):
         merged += 1
     if merged:
         logger.info("Migration v66: fusionadas %d fila(s) de fecha duplicada", merged)
+    conn.commit()
+
+
+def _migrate_v67(conn, logger):
+    """Idempotent v67 (F3): trazabilidad de la selección editorial.
+
+    Registra, por cada guion generado, por qué se eligió ese tema (ruta,
+    consulta de demanda, score, encaje con el nicho, novedad). Sin esto no se
+    puede auditar si la estrategia search-first llegó realmente al contenido.
+    """
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS content_selection_provenance (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_type TEXT NOT NULL DEFAULT 'script',
+                entity_id INTEGER,
+                channel_id INTEGER,
+                route TEXT,
+                topic TEXT,
+                demand_query TEXT,
+                source TEXT,
+                demand_score REAL DEFAULT 0.0,
+                niche_fit REAL DEFAULT 0.0,
+                novelty_ok INTEGER DEFAULT 1,
+                reason TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_csp_channel "
+            "ON content_selection_provenance(channel_id, created_at DESC)"
+        )
+        logger.info("Migration v67: content_selection_provenance ensured")
+    except sqlite3.OperationalError as exc:
+        logger.debug("Migration v67 failed: %s", exc)
     conn.commit()
 
 
@@ -9619,6 +9659,65 @@ class ExtendedDatabase(Database):
             return int(row["n"]) if row else 0
         except Exception:  # noqa: BLE001
             return 0
+
+    def mark_topic_demand_used(self, channel_id: int, query: str) -> int:
+        """Marca como 'used' el candidato de demanda que originó el tema elegido."""
+        if not query:
+            return 0
+        try:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    "UPDATE topic_demand_candidates SET status='used' "
+                    "WHERE channel_id=? AND query=? AND status!='used'",
+                    (channel_id, str(query)[:200]),
+                )
+                conn.commit()
+                return cur.rowcount
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("mark_topic_demand_used failed: %s", exc)
+            return 0
+
+    def record_selection_provenance(
+        self, *, channel_id: int, entity_type: str = "script",
+        entity_id: int | None = None, route: str = "", topic: str = "",
+        demand_query: str = "", source: str = "", demand_score: float = 0.0,
+        niche_fit: float = 0.0, novelty_ok: bool = True, reason: str = "",
+    ) -> bool:
+        """Registra por qué se eligió un tema (F3, trazabilidad auditable)."""
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    """INSERT INTO content_selection_provenance
+                         (entity_type, entity_id, channel_id, route, topic,
+                          demand_query, source, demand_score, niche_fit,
+                          novelty_ok, reason)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    (entity_type, entity_id, channel_id, (route or "")[:40],
+                     (topic or "")[:300], (demand_query or "")[:200],
+                     (source or "")[:60], float(demand_score or 0),
+                     float(niche_fit or 0), 1 if novelty_ok else 0,
+                     (reason or "")[:500]),
+                )
+                conn.commit()
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("record_selection_provenance failed: %s", exc)
+            return False
+
+    def get_recent_selection_provenance(self, channel_id: int,
+                                        limit: int = 50) -> list[dict]:
+        """Procedencia de las últimas selecciones de un canal (F3)."""
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM content_selection_provenance WHERE channel_id=? "
+                    "ORDER BY id DESC LIMIT ?",
+                    (channel_id, int(limit)),
+                ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("get_recent_selection_provenance failed: %s", exc)
+            return []
 
     def get_consumed_topic_signatures(self, channel_id: int) -> list[tuple[str, set]]:
         """Lista ``(label, tokens)`` para chequeos de similitud."""

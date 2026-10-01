@@ -568,17 +568,21 @@ class PipelineOrchestrator:
         """
         start = time.time()
 
+        # ── Fase 2/3: seeding de demanda en TODAS las rutas (0 cuota) ──
+        # Antes solo se ejecutaba en la ruta normal; viral y maratón salían por
+        # retorno temprano y quedaban sin señal de demanda ni trazabilidad.
+        self._seed_topics_from_demand()
+
         if self.source_mode == "viral":
-            return self._phase_generate_script_viral(start)
+            _res = self._phase_generate_script_viral(start)
+            self._record_selection_provenance(_res, route="viral")
+            return _res
 
         # ── Marathon mode: long-form deep script generation ──
         if self.is_marathon:
-            return self._phase_generate_script_marathon(start)
-
-        # ── Fase 2: seeding de temas por demanda de búsqueda (0 cuota) ──
-        # Recolecta y persiste candidatos de autocompletado ANTES de elegir
-        # tema, para que la selección se apoye en lo que la gente busca.
-        self._seed_topics_from_demand()
+            _res = self._phase_generate_script_marathon(start)
+            self._record_selection_provenance(_res, route="marathon")
+            return _res
 
         content_items = self.db.get_unused_content(canal=self.canal, limit=5)
         if not content_items:
@@ -784,7 +788,56 @@ class PipelineOrchestrator:
         else:
             _safe_log_error(self.db, self.canal, "script", "Script generation failed")
             # Note: duration_ms logging lost in error path, but safety-first
+        if result:
+            self._record_selection_provenance(result, route="original")
         return result
+
+    def _record_selection_provenance(self, result, route: str) -> None:
+        """F3: registra por qué se eligió el tema (auditable, fail-open)."""
+        if not result or self.db is None:
+            return
+        try:
+            cid = self._get_channel_id()
+            topic = ""
+            for key in ("viral_original_title", "titulo_selected", "titulo"):
+                if result.get(key):
+                    topic = str(result[key])
+                    break
+
+            best_q, best_score = "", 0.0
+            try:
+                from pipeline.topic_dedup import topic_tokens
+                t_tokens = topic_tokens(topic) if topic else set()
+                for c in (getattr(self, "_demand_candidates", []) or []):
+                    q = c.get("query", "")
+                    sc = float(c.get("demand_score") or 0)
+                    if t_tokens and (t_tokens & topic_tokens(q)):
+                        if sc > best_score:
+                            best_q, best_score = q, sc
+                    elif not best_q and sc > best_score:
+                        best_q, best_score = q, sc
+            except Exception:  # noqa: BLE001
+                pass
+
+            niche = 0.0
+            try:
+                from pipeline.niche_guard import niche_fit_score
+                niche = float(niche_fit_score(topic, self.config))
+            except Exception:  # noqa: BLE001
+                pass
+
+            self.db.record_selection_provenance(
+                channel_id=cid, entity_type="script", entity_id=result.get("id"),
+                route=route, topic=topic, demand_query=best_q,
+                source="autocomplete", demand_score=best_score, niche_fit=niche,
+                reason=f"ruta={route}; demanda={'sí' if best_q else 'no'}; "
+                       f"nicho={niche:.2f}",
+            )
+            if best_q and cid:
+                self.db.mark_topic_demand_used(cid, best_q)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[%s] selection provenance error (fail-open): %s",
+                         self.canal, exc)
 
     def _get_viral_scraper(self):
         """Get or create the YouTubeViralScraper instance for on-demand use.
