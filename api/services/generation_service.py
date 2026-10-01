@@ -3424,6 +3424,19 @@ async def auto_recover_on_startup():
     db = _get_db()
     conn = db._connect()
 
+    # ── Step 0: Pausa de generación (hold) — auto-sanación ─────
+    # Los centinelas phase='hold' ocupan los guards de concurrencia para
+    # mantener la generación pausada. La recuperación de arranque los saltaría
+    # (no tienen worker) y liberaría la pausa; este paso re-asegura el hold si
+    # el operador dejó la intención activa, ANTES de que Step 1 los revise.
+    try:
+        from api.services import generation_hold
+        _hold = generation_hold.reconcile_on_startup(db)
+        if _hold.get("intent"):
+            log.info("Generation hold: intención activa — pausa re-asegurada (%s)", _hold)
+    except Exception as _hold_exc:  # noqa: BLE001
+        log.warning("Generation hold reconcile skipped: %s", _hold_exc)
+
     # ── Step 1: Kill stale jobs ───────────────────────────────
     # queued jobs: never started → always stale → mark failed.
     # EXCEPT 'reassemble' jobs: they are pending recovery work created by this
@@ -3463,7 +3476,7 @@ async def auto_recover_on_startup():
     # reconnect_active_workers() can pick it up.
     try:
         running_rows = conn.execute(
-            "SELECT id, video_id, worker_pid FROM generation_jobs WHERE status='running'"
+            "SELECT id, video_id, worker_pid, phase FROM generation_jobs WHERE status='running'"
         ).fetchall()
     except Exception:
         # Older test/legacy schemas predate worker_pid; process-table probing
@@ -3475,6 +3488,12 @@ async def auto_recover_on_startup():
     running_alive = 0
     for rrow in running_rows:
         job_id = rrow["id"]
+        # ── Nunca matar un centinela del hold de generación ──
+        # No tienen worker por diseño; si se marcan 'failed' se libera la pausa.
+        if "phase" in rrow.keys() and str(rrow["phase"] or "").lower() == "hold":
+            running_alive += 1
+            log.info("Job #%d: centinela de pausa (hold) — se preserva como running", job_id)
+            continue
         worker_pid, probe_failed = _probe_worker_process(job_id, rrow["worker_pid"] if "worker_pid" in rrow.keys() else None)
         if worker_pid is not None:
             running_alive += 1
@@ -4292,6 +4311,12 @@ async def reconnect_active_workers():
             # marked as failed (Bug #1).
             if job.get("action") == "reassemble":
                 logger.debug("Skipping reassembly job #%d (no subprocess to reconnect)", job["id"])
+                continue
+
+            # ── Nunca tratar un centinela de hold como worker huérfano ──
+            # No tiene proceso por diseño; marcarlo 'failed' liberaría la pausa.
+            if str(job.get("phase") or "").lower() == "hold":
+                logger.info("Skipping generation-hold sentinel job #%d (no worker by design)", job["id"])
                 continue
 
             job_id = job["id"]

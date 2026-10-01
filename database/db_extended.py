@@ -5220,6 +5220,7 @@ class ExtendedDatabase(Database):
                     AND j.finished_at IS NULL
                     AND j.started_at IS NOT NULL
                      AND j.phase != 'video'
+                     AND j.phase != 'hold'
                      AND (
                          -- Heartbeat mode: last heartbeat > N min ago → truly dead
                          (j.last_heartbeat_at IS NOT NULL
@@ -5299,6 +5300,7 @@ class ExtendedDatabase(Database):
                 LEFT JOIN videos v ON j.video_id = v.id
                 WHERE j.status = 'running'
                   AND j.finished_at IS NOT NULL
+                  AND j.phase != 'hold'
                    AND (julianday('now') - julianday(j.finished_at)) * 1440 > ?
             """, (default_timeout,)).fetchall()
             
