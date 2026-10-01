@@ -331,21 +331,74 @@ class ReachReportClient:
         return out
 
     def parse_basic(self, csv_text: str) -> list[dict]:
-        """Filas del basic report → retención/watch/subs (y views)."""
-        out = []
+        """Filas del basic report → **agregadas por vídeo/día**.
+
+        El CSV trae varios segmentos por vídeo/día (país, suscrito/no suscrito,
+        live/vod). Se suman vistas, watch-time, subs ganados/perdidos y
+        engaged_views; la retención se pondera por watch-time. Antes cada
+        segmento sobrescribía al anterior (bug de medición de horas).
+        """
+        agg: dict[tuple, dict] = {}
         for row in self._rows(csv_text):
             vid = (row.get("video_id") or "").strip()
             date = (row.get("date") or "").strip()
             if not vid or not date:
                 continue
-            out.append({
-                "yt_video_id": vid,
-                "date": date,
-                "retention_pct": _to_float(row.get("average_view_duration_percentage")),
-                "watch_minutes": _to_float(row.get("watch_time_minutes")),
-                "views": _to_int(row.get("views")),
-                "subs_gained": _to_int(row.get("subscribers_gained")),
+            key = (vid, date)
+            a = agg.setdefault(key, {
+                "yt_video_id": vid, "date": date, "views": 0,
+                "watch_minutes": 0.0, "subs_gained": 0, "subs_lost": 0,
+                "engaged_views": 0, "_rw": 0.0, "_w": 0.0,
             })
+            views = _to_int(row.get("views"))
+            watch = _to_float(row.get("watch_time_minutes"))
+            ret = _to_float(row.get("average_view_duration_percentage"))
+            a["views"] += views
+            a["watch_minutes"] += watch
+            a["subs_gained"] += _to_int(row.get("subscribers_gained"))
+            a["subs_lost"] += _to_int(row.get("subscribers_lost"))
+            a["engaged_views"] += _to_int(row.get("engaged_views"))
+            weight = watch if watch > 0 else float(views if views > 0 else 0)
+            a["_rw"] += ret * weight
+            a["_w"] += weight
+
+        out = []
+        for a in agg.values():
+            weight = a.pop("_w")
+            weighted = a.pop("_rw")
+            a["retention_pct"] = round(weighted / weight, 2) if weight else 0.0
+            out.append(a)
+        return out
+
+    def parse_traffic(self, csv_text: str) -> list[dict]:
+        """Filas del traffic-source report → vistas/watch por fuente y día."""
+        agg: dict[tuple, dict] = {}
+        for row in self._rows(csv_text):
+            vid = (row.get("video_id") or "").strip()
+            date = (row.get("date") or "").strip()
+            src = (row.get("traffic_source_type") or "").strip()
+            if not vid or not date or not src:
+                continue
+            key = (vid, date, src)
+            a = agg.setdefault(key, {
+                "yt_video_id": vid, "date": date, "traffic_source": src,
+                "views": 0, "watch_minutes": 0.0, "_rw": 0.0, "_w": 0.0,
+            })
+            views = _to_int(row.get("views"))
+            watch = _to_float(row.get("watch_time_minutes"))
+            ret = _to_float(row.get("average_view_duration_percentage"))
+            a["views"] += views
+            a["watch_minutes"] += watch
+            weight = watch if watch > 0 else float(views if views > 0 else 0)
+            a["_rw"] += ret * weight
+            a["_w"] += weight
+
+        out = []
+        for a in agg.values():
+            weight = a.pop("_w")
+            weighted = a.pop("_rw")
+            a["avg_view_duration_pct"] = round(weighted / weight, 2) if weight else 0.0
+            out.append(a)
         return out
 
     # ── Sync ───────────────────────────────────────────────────
@@ -378,6 +431,7 @@ class ReachReportClient:
             "reports_downloaded": 0,
             "reach_rows": 0,
             "basic_rows": 0,
+            "traffic_rows": 0,
             "errors": 0,
         }
         if not self._service:
@@ -461,11 +515,25 @@ class ReachReportClient:
                             watch_minutes=r["watch_minutes"],
                             views=r["views"],
                             subs_gained=r["subs_gained"],
+                            subs_lost=r["subs_lost"],
+                            engaged_views=r["engaged_views"],
                             source="reporting_basic",
                         )
                     summary["basic_rows"] += len(rows)
+                elif rid == REPORT_TYPE_TRAFFIC:
+                    rows = self.parse_traffic(csv_text)
+                    _upsert_traffic = getattr(db, "upsert_video_reach_traffic_daily", None)
+                    if _upsert_traffic:
+                        for r in rows:
+                            _upsert_traffic(
+                                channel_id, r["yt_video_id"], r["date"],
+                                r["traffic_source"],
+                                views=r["views"],
+                                watch_minutes=r["watch_minutes"],
+                                avg_view_duration_pct=r["avg_view_duration_pct"],
+                            )
+                    summary["traffic_rows"] += len(rows)
                 else:
-                    # traffic source: se registra como visto, no se persiste aún
                     rows = []
 
                 db.mark_reach_report_seen(report_id, job_id, rid)

@@ -674,6 +674,21 @@ def normalize_media_paths(conn, logger):
         logger.info("Migration: normalized %d media paths to relative form", updates)
 
 
+def normalize_reach_date(value) -> str:
+    """Normaliza la fecha del Reporting API a ISO ``YYYY-MM-DD``.
+
+    El CSV real de YouTube llega como ``YYYYMMDD``; los tests y el resto del
+    código usan ISO. Sin normalizar, ``date >= date('now', '-30 days')`` compara
+    formatos distintos y el filtro del embudo no aplica (bug de medición).
+    """
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if len(text) == 8 and text.isdigit():
+        return f"{text[0:4]}-{text[4:6]}-{text[6:8]}"
+    return text
+
+
 def migrate_v2(db_path: str = None):
     """Run v2 schema migration (idempotent)."""
     import logging
@@ -1423,6 +1438,9 @@ def migrate_v2(db_path: str = None):
 
     # ── v65: candidatos de tema por demanda de búsqueda (Fase 2 experimento) ──
     _migrate_v65(conn, logger)
+
+    # ── v66: medición fiable del embudo (F1) — fechas ISO + engaged_views + tráfico ──
+    _migrate_v66(conn, logger)
 
     conn.commit()
     conn.close()
@@ -3765,6 +3783,124 @@ def _migrate_v65(conn, logger):
         logger.info("Migration v65: topic_demand_candidates ensured")
     except sqlite3.OperationalError as exc:
         logger.debug("Migration v65 failed: %s", exc)
+    conn.commit()
+
+
+def _migrate_v66(conn, logger):
+    """Idempotent v66 (F1): medición fiable del embudo de alcance.
+
+    - Normaliza ``video_reach_daily.date`` a ISO (el CSV real llega ``YYYYMMDD``;
+      sin esto el filtro ``date >= date('now', '-30 days')`` no aplica).
+    - Añade ``engaged_views`` (distinto de ``views``; clave en Shorts) y
+      ``subs_lost``.
+    - Crea ``video_reach_traffic_daily`` para no descartar el informe de fuentes
+      de tráfico (antes se marcaba como visto sin persistir nada).
+    - Fusiona colisiones de fecha al normalizar (suma; CTR y retención
+      ponderados), nunca sobrescribe.
+    """
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(video_reach_daily)")}
+        if "engaged_views" not in cols:
+            conn.execute(
+                "ALTER TABLE video_reach_daily ADD COLUMN engaged_views INTEGER DEFAULT 0"
+            )
+        if "subs_lost" not in cols:
+            conn.execute(
+                "ALTER TABLE video_reach_daily ADD COLUMN subs_lost INTEGER DEFAULT 0"
+            )
+    except sqlite3.OperationalError as exc:
+        logger.debug("Migration v66: adding columns failed: %s", exc)
+
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS video_reach_traffic_daily (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id INTEGER NOT NULL,
+                yt_video_id TEXT NOT NULL,
+                date TEXT NOT NULL,
+                traffic_source TEXT NOT NULL,
+                views INTEGER DEFAULT 0,
+                watch_minutes REAL DEFAULT 0,
+                avg_view_duration_pct REAL DEFAULT 0,
+                fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(channel_id, yt_video_id, date, traffic_source)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_vrt_channel_date "
+            "ON video_reach_traffic_daily(channel_id, date)"
+        )
+    except sqlite3.OperationalError as exc:
+        logger.debug("Migration v66: traffic table failed: %s", exc)
+
+    # ── Normalizar fechas no-ISO (con fusión de colisiones) ──
+    try:
+        rows = conn.execute(
+            "SELECT id, channel_id, yt_video_id, date FROM video_reach_daily "
+            "WHERE date IS NOT NULL "
+            "AND date GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+
+    _COLS = ("impressions", "impressions_ctr", "retention_pct",
+             "watch_minutes", "subs_gained", "views", "engaged_views", "subs_lost")
+    merged = 0
+    for r in rows:
+        src_id, cid, vid, raw_date = r[0], r[1], r[2], r[3]
+        iso = normalize_reach_date(raw_date)
+        if iso == raw_date:
+            continue
+        dup = conn.execute(
+            "SELECT id FROM video_reach_daily "
+            "WHERE channel_id=? AND yt_video_id=? AND date=? AND id!=?",
+            (cid, vid, iso, src_id),
+        ).fetchone()
+        if not dup:
+            conn.execute("UPDATE video_reach_daily SET date=? WHERE id=?", (iso, src_id))
+            continue
+        dst = conn.execute(
+            "SELECT id," + ",".join(_COLS) + " FROM video_reach_daily WHERE id=?",
+            (dup[0],),
+        ).fetchone()
+        src = conn.execute(
+            "SELECT " + ",".join(_COLS) + " FROM video_reach_daily WHERE id=?",
+            (src_id,),
+        ).fetchone()
+        d = dict(zip(_COLS, dst[1:]))
+        s = dict(zip(_COLS, src))
+        imp = float(d["impressions"] or 0) + float(s["impressions"] or 0)
+        clicks = (float(d["impressions"] or 0) * float(d["impressions_ctr"] or 0)
+                  + float(s["impressions"] or 0) * float(s["impressions_ctr"] or 0))
+        watch = float(d["watch_minutes"] or 0) + float(s["watch_minutes"] or 0)
+        ret = (float(d["retention_pct"] or 0) * float(d["watch_minutes"] or 0)
+               + float(s["retention_pct"] or 0) * float(s["watch_minutes"] or 0))
+        conn.execute(
+            """UPDATE video_reach_daily SET
+                 impressions=?, impressions_ctr=?, retention_pct=?,
+                 watch_minutes=?, subs_gained=?, views=?, engaged_views=?,
+                 subs_lost=?, date=?
+               WHERE id=?""",
+            (
+                int(imp),
+                round(clicks / imp, 6) if imp else 0,
+                round(ret / watch, 2) if watch else max(
+                    float(d["retention_pct"] or 0), float(s["retention_pct"] or 0)
+                ),
+                watch,
+                int(d["subs_gained"] or 0) + int(s["subs_gained"] or 0),
+                int(d["views"] or 0) + int(s["views"] or 0),
+                int(d["engaged_views"] or 0) + int(s["engaged_views"] or 0),
+                int(d["subs_lost"] or 0) + int(s["subs_lost"] or 0),
+                iso, dst[0],
+            ),
+        )
+        conn.execute("DELETE FROM video_reach_daily WHERE id=?", (src_id,))
+        merged += 1
+    if merged:
+        logger.info("Migration v66: fusionadas %d fila(s) de fecha duplicada", merged)
     conn.commit()
 
 
@@ -6945,6 +7081,8 @@ class ExtendedDatabase(Database):
         retention_pct: float | None = None,
         watch_minutes: float | None = None,
         subs_gained: int | None = None,
+        subs_lost: int | None = None,
+        engaged_views: int | None = None,
         views: int | None = None,
         traffic_source: str | None = None,
         source: str = "reporting_api",
@@ -6954,32 +7092,39 @@ class ExtendedDatabase(Database):
         Los campos no aportados se conservan (COALESCE con el valor existente):
         el reach report solo trae impresiones/CTR y el basic report trae
         retención/watch/subs, así que se escriben en pasadas distintas.
+
+        La fecha se normaliza a ISO (``YYYYMMDD`` → ``YYYY-MM-DD``) para que los
+        filtros por ventana del embudo apliquen de verdad.
         """
+        date = normalize_reach_date(date)
         with self._connect() as conn:
             conn.execute(
                 """INSERT INTO video_reach_daily
                      (channel_id, yt_video_id, date, impressions, impressions_ctr,
-                      retention_pct, watch_minutes, subs_gained, views,
-                      traffic_source, source, fetched_at)
+                      retention_pct, watch_minutes, subs_gained, subs_lost,
+                      engaged_views, views, traffic_source, source, fetched_at)
                    VALUES (?, ?, ?, COALESCE(?,0), COALESCE(?,0), COALESCE(?,0),
-                           COALESCE(?,0), COALESCE(?,0), COALESCE(?,0), ?, ?,
-                           CURRENT_TIMESTAMP)
+                           COALESCE(?,0), COALESCE(?,0), COALESCE(?,0), COALESCE(?,0),
+                           COALESCE(?,0), ?, ?, CURRENT_TIMESTAMP)
                    ON CONFLICT(channel_id, yt_video_id, date) DO UPDATE SET
                      impressions = COALESCE(?, video_reach_daily.impressions),
                      impressions_ctr = COALESCE(?, video_reach_daily.impressions_ctr),
                      retention_pct = COALESCE(?, video_reach_daily.retention_pct),
                      watch_minutes = COALESCE(?, video_reach_daily.watch_minutes),
                      subs_gained = COALESCE(?, video_reach_daily.subs_gained),
+                     subs_lost = COALESCE(?, video_reach_daily.subs_lost),
+                     engaged_views = COALESCE(?, video_reach_daily.engaged_views),
                      views = COALESCE(?, video_reach_daily.views),
                      traffic_source = COALESCE(?, video_reach_daily.traffic_source),
                      source = ?,
                      fetched_at = CURRENT_TIMESTAMP""",
                 (
                     channel_id, yt_video_id, date, impressions, impressions_ctr,
-                    retention_pct, watch_minutes, subs_gained, views,
-                    traffic_source, source,
+                    retention_pct, watch_minutes, subs_gained, subs_lost,
+                    engaged_views, views, traffic_source, source,
                     impressions, impressions_ctr, retention_pct, watch_minutes,
-                    subs_gained, views, traffic_source, source,
+                    subs_gained, subs_lost, engaged_views, views,
+                    traffic_source, source,
                 ),
             )
             conn.commit()
@@ -7097,6 +7242,53 @@ class ExtendedDatabase(Database):
             bucket["ctr"].append(round(clk / imp * 100, 2) if imp else 0)
             bucket["views"].append(int(r["views"] or 0))
         return out
+
+    # ── Fuentes de tráfico por vídeo/día (F1) ────────────────
+
+    def upsert_video_reach_traffic_daily(
+        self, channel_id: int, yt_video_id: str, date: str, traffic_source: str,
+        *, views: int = 0, watch_minutes: float = 0.0,
+        avg_view_duration_pct: float = 0.0,
+    ) -> None:
+        """Persiste la fuente de tráfico agregada por vídeo/día/fuente.
+
+        El informe ``channel_traffic_source_a3`` es la fuente de verdad de esa
+        fecha: se reemplaza (no se acumula) para que reprocesarlo sea idempotente.
+        """
+        if not traffic_source:
+            return
+        date = normalize_reach_date(date)
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO video_reach_traffic_daily
+                     (channel_id, yt_video_id, date, traffic_source, views,
+                      watch_minutes, avg_view_duration_pct, fetched_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                   ON CONFLICT(channel_id, yt_video_id, date, traffic_source)
+                   DO UPDATE SET views=excluded.views,
+                                 watch_minutes=excluded.watch_minutes,
+                                 avg_view_duration_pct=excluded.avg_view_duration_pct,
+                                 fetched_at=CURRENT_TIMESTAMP""",
+                (channel_id, yt_video_id, date, traffic_source,
+                 int(views or 0), float(watch_minutes or 0),
+                 float(avg_view_duration_pct or 0)),
+            )
+            conn.commit()
+
+    def get_channel_traffic_sources(self, channel_id: int, days: int = 30) -> list[dict]:
+        """Vistas por fuente de tráfico del canal en la ventana (ISO dates)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT traffic_source,
+                          SUM(views) AS views,
+                          ROUND(SUM(watch_minutes), 1) AS watch_minutes
+                   FROM video_reach_traffic_daily
+                   WHERE channel_id = ? AND date >= date('now', ?)
+                   GROUP BY traffic_source
+                   ORDER BY views DESC""",
+                (channel_id, f"-{int(days)} days"),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     # ── Growth Data for Charts ───────────────────────────────
 
