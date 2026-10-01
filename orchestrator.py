@@ -573,6 +573,11 @@ class PipelineOrchestrator:
         # retorno temprano y quedaban sin señal de demanda ni trazabilidad.
         self._seed_topics_from_demand()
 
+        # ── Fase 3/7: directiva de retención en TODAS las rutas (fail-open) ──
+        # Antes solo se aplicaba en la ruta normal; viral y maratón no recibían
+        # la corrección de retención.
+        self._apply_retention_directive()
+
         if self.source_mode == "viral":
             _res = self._phase_generate_script_viral(start)
             if self._defer_if_off_niche(_res):
@@ -729,9 +734,6 @@ class PipelineOrchestrator:
         content_text = content_item.get("text", "")
         content_title = content_item.get("title", "")
         self._extract_and_set_theme(content_text, content_title)
-
-        # ── Fase 3: directiva de retención desde el histórico (fail-open) ──
-        self._apply_retention_directive()
 
         self._emit_progress(15, "script", "Eligiendo mejor contenido y generando guion con IA...")
         result = self.script_gen.generate(content_item)
