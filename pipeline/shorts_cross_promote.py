@@ -33,13 +33,17 @@ PER_VIDEO_PLAYLIST_SUFFIX = "| Shorts"
 def get_best_longform_link(
     channel_id: int,
     source_video_id: int | None = None,
+    topic: str = "",
 ) -> str | None:
     """Find the best long-form video URL to link from a short.
 
     Priority:
-      1. If source_video_id is set (clip short), link to that video.
-      2. Otherwise link to the most recent long-form video with a yt_video_id.
+      1. If source_video_id is set (clip short) AND is publicly available, link
+         to that video.
+      2. Otherwise link to the most thematically relevant public long-form
+         (token overlap with ``topic``); si no hay tema, el más reciente.
 
+    F8: nunca enlaza a un vídeo privado/programado (evita un link muerto).
     Returns a full YouTube watch URL or None.
     """
     import sqlite3
@@ -47,32 +51,77 @@ def get_best_longform_link(
     conn = sqlite3.connect(str(DATABASE_PATH), timeout=60)
 
     try:
-        # Priority 1: explicit source video
+        # Priority 1: explicit source video, solo si es público
         if source_video_id:
             row = conn.execute(
-                "SELECT yt_video_id FROM videos WHERE id = ? AND yt_video_id IS NOT NULL AND yt_video_id != ''",
+                """SELECT yt_video_id FROM videos
+                   WHERE id = ? AND yt_video_id IS NOT NULL AND yt_video_id != ''
+                     AND status IN ('published', 'uploaded')
+                     AND (privacy_status IS NULL OR privacy_status = 'public')""",
                 (source_video_id,),
             ).fetchone()
             if row and row[0]:
                 return f"https://www.youtube.com/watch?v={row[0]}"
 
-        # Priority 2: most recent long-form video for the channel
-        row = conn.execute(
-            """SELECT yt_video_id FROM videos
+        # Priority 2: públicos recientes del canal
+        rows = conn.execute(
+            """SELECT yt_video_id, titulo_final FROM videos
                WHERE channel_id = ?
                  AND yt_video_id IS NOT NULL AND yt_video_id != ''
                  AND status IN ('published', 'uploaded')
                  AND (privacy_status IS NULL OR privacy_status = 'public')
                ORDER BY created_at DESC
-               LIMIT 1""",
+               LIMIT 30""",
             (channel_id,),
-        ).fetchone()
-        if row and row[0]:
-            return f"https://www.youtube.com/watch?v={row[0]}"
+        ).fetchall()
+        if not rows:
+            return None
 
-        return None
+        # Relevancia temática (F8): mejor solapamiento; si no hay, el reciente.
+        if topic:
+            try:
+                from pipeline.topic_dedup import topic_tokens
+                seed = topic_tokens(topic)
+                best_score, best_id = -1, None
+                for r in rows:
+                    score = len(seed & topic_tokens(r[1] or "")) if seed else 0
+                    if score > best_score:
+                        best_score, best_id = score, r[0]
+                if best_id and best_score > 0:
+                    return f"https://www.youtube.com/watch?v={best_id}"
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("longform relevance ranking failed: %s", exc)
+
+        return f"https://www.youtube.com/watch?v={rows[0][0]}"
     finally:
         conn.close()
+
+
+def attributable_conversion(db, short_id: int) -> dict:
+    """Conversión atribuible de un short, o ``unknown`` si no hay dato fiable.
+
+    YouTube no expone clics en enlaces de descripciones de Shorts, así que no se
+    inventa una tasa: se devuelve ``unknown`` salvo que existan stats del short.
+    """
+    try:
+        with db._connect() as conn:
+            row = conn.execute(
+                "SELECT subscribers_gained, views FROM short_stats "
+                "WHERE short_id=? ORDER BY id DESC LIMIT 1",
+                (short_id,),
+            ).fetchone()
+        if not row:
+            return {"status": "unknown", "reason": "sin stats"}
+        subs, views = int(row[0] or 0), int(row[1] or 0)
+        return {
+            "status": "known",
+            "subs_gained": subs,
+            "views": views,
+            "conversion_pct": round(subs / views * 100, 3) if views else None,
+            "note": "subs ganados atribuidos al short; no aislables de otros vídeos",
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "unknown", "reason": str(exc)[:120]}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -84,6 +133,7 @@ def build_short_description(
     hashtags: list[str] | None = None,
     longform_url: str | None = None,
     channel_url: str = "",
+    subscribe_reason: str = "",
 ) -> str:
     """Build a YouTube short description with cross-promotion links.
 
@@ -122,7 +172,12 @@ def build_short_description(
 
     if channel_url:
         short_channel = channel_url.replace("https://www.youtube.com/", "")
-        parts.append(f"🔔 Suscríbete: {short_channel}")
+        # F8: una razón concreta convierte más que un "suscríbete" genérico.
+        if subscribe_reason:
+            parts.append(f"🔔 Suscríbete para más: {subscribe_reason}")
+            parts.append(f"   {short_channel}")
+        else:
+            parts.append(f"🔔 Suscríbete: {short_channel}")
 
     return "\n".join(parts).strip()
 
