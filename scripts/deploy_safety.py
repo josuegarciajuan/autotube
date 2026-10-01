@@ -67,9 +67,15 @@ def running_longform_jobs(db_path: Optional[str] = None) -> Optional[list[int]]:
         path = db_path or DATABASE_PATH
         conn = sqlite3.connect(path)
         try:
-            rows = conn.execute(
-                "SELECT id FROM generation_jobs WHERE status = 'running'"
-            ).fetchall()
+            # Excluir los centinelas de la pausa de generación (phase='hold'):
+            # no son un render en curso, pero sin esta exclusión se
+            # clasificarían como in-process y bloquearían el deploy.
+            # Compatibilidad: esquemas antiguos (tests) pueden no tener `phase`.
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(generation_jobs)")}
+            sql = "SELECT id FROM generation_jobs WHERE status = 'running'"
+            if "phase" in cols:
+                sql += " AND (phase IS NULL OR phase != 'hold')"
+            rows = conn.execute(sql).fetchall()
         finally:
             conn.close()
         return [int(r[0]) for r in rows]

@@ -35,6 +35,7 @@ logger = logging.getLogger("experiment_tracker")
 
 EXPERIMENT_ID = "recuperacion-alcance"
 BASELINE_KEY = "experiment_baseline"
+RECONCILED_KEY = "experiment_baseline_reconciled"
 STARTED_KEY = "experiment_started_at"
 CHECKPOINTS_KEY = "experiment_checkpoints"
 
@@ -213,6 +214,53 @@ def store_baseline(db) -> dict:
     return baseline
 
 
+def store_reconciled_baseline(db) -> dict:
+    """Guarda una versión reconciliada del baseline **sin pisar** la original.
+
+    La original es referencia histórica y no se reescribe. La reconciliada añade
+    notas de anomalías (p. ej. suscriptores actuales por debajo del baseline,
+    señal de una fila corrupta) para que la evaluación no compare contra un dato
+    erróneo. Ejemplo real: canal3 quedó con 274 en el baseline cuando el día
+    anterior había 287.
+    """
+    reconciled = compute_baseline(db)
+    reconciled["reconciled_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    reconciled["reconciliation_version"] = 1
+
+    original: dict = {}
+    try:
+        raw = db.get_system_state(BASELINE_KEY)
+        original = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        original = {}
+    orig_by = {c.get("slug"): c for c in (original.get("channels") or [])}
+
+    notes: list[dict] = []
+    for ch in reconciled["channels"]:
+        o = orig_by.get(ch["slug"])
+        if not o:
+            continue
+        o_subs = int(o.get("subscribers") or 0)
+        n_subs = int(ch.get("subscribers") or 0)
+        if o_subs and n_subs < o_subs:
+            notes.append({
+                "slug": ch["slug"],
+                "type": "subscribers_below_baseline",
+                "baseline": o_subs,
+                "current": n_subs,
+                "detail": (
+                    "Los suscriptores actuales están por debajo del baseline "
+                    "original; es probable que el baseline esté corrupto. Evaluar "
+                    "contra la versión reconciliada."
+                ),
+            })
+    reconciled["reconciliation_notes"] = notes
+    reconciled["original_baseline_captured_at"] = original.get("captured_at")
+    db.set_system_state(RECONCILED_KEY, json.dumps(reconciled, ensure_ascii=False))
+    logger.info("Baseline reconciliado guardado (%d nota(s))", len(notes))
+    return reconciled
+
+
 def _checkpoint_due_at(start_iso: str, days: int) -> str:
     """Fecha de vencimiento = start (fecha) + `days` días a las 09:00 UTC."""
     start_date = start_iso[:10]
@@ -340,6 +388,7 @@ def main(argv: list[str] | None = None) -> int:
     p_sched.add_argument("--start", default=None, help="YYYY-MM-DD (default: hoy UTC)")
 
     sub.add_parser("status", help="Muestra baseline y checkpoints")
+    sub.add_parser("reconcile", help="Guarda el baseline reconciliado (no pisa el original)")
 
     args = parser.parse_args(argv)
 
@@ -359,6 +408,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "status":
         print_status(db)
+        return 0
+    if args.cmd == "reconcile":
+        rec = store_reconciled_baseline(db)
+        print(f"Baseline reconciliado: {len(rec['channels'])} canales, "
+              f"{len(rec['reconciliation_notes'])} nota(s)")
+        for n in rec["reconciliation_notes"]:
+            print(f"  ⚠ {n['slug']}: {n['detail']}")
         return 0
     return 1
 

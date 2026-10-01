@@ -580,6 +580,15 @@ NICHE_ANCHORS = [
     "inexplicable", "misterio", "destino", "premonicion", "paranormal",
     "espiritual", "universo",
 ]
+# F4: preferir diferir antes que publicar fuera de nicho.
+NICHE_GUARD_STRICT = True
+# F4: series de contenido (coherencia de audiencia + ocupación de búsquedas).
+CONTENT_SERIES = [
+    {"name": "Sincronías documentadas",
+     "seed_queries": ["sincronicidades reales", "coincidencias imposibles documentadas"]},
+    {"name": "El azar que cambió la historia",
+     "seed_queries": ["casualidades que cambiaron la historia", "premoniciones documentadas"]},
+]
 SEO_SECONDARY_KEYWORDS = [
     "casualidades imposibles", "coincidencias inexplicables",
     "sincronías del universo", "fenómenos inexplicables reales",

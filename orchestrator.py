@@ -568,17 +568,30 @@ class PipelineOrchestrator:
         """
         start = time.time()
 
+        # ── Fase 2/3: seeding de demanda en TODAS las rutas (0 cuota) ──
+        # Antes solo se ejecutaba en la ruta normal; viral y maratón salían por
+        # retorno temprano y quedaban sin señal de demanda ni trazabilidad.
+        self._seed_topics_from_demand()
+
+        # ── Fase 3/7: directiva de retención en TODAS las rutas (fail-open) ──
+        # Antes solo se aplicaba en la ruta normal; viral y maratón no recibían
+        # la corrección de retención.
+        self._apply_retention_directive()
+
         if self.source_mode == "viral":
-            return self._phase_generate_script_viral(start)
+            _res = self._phase_generate_script_viral(start)
+            if self._defer_if_off_niche(_res):
+                return None
+            self._record_selection_provenance(_res, route="viral")
+            return _res
 
         # ── Marathon mode: long-form deep script generation ──
         if self.is_marathon:
-            return self._phase_generate_script_marathon(start)
-
-        # ── Fase 2: seeding de temas por demanda de búsqueda (0 cuota) ──
-        # Recolecta y persiste candidatos de autocompletado ANTES de elegir
-        # tema, para que la selección se apoye en lo que la gente busca.
-        self._seed_topics_from_demand()
+            _res = self._phase_generate_script_marathon(start)
+            if self._defer_if_off_niche(_res):
+                return None
+            self._record_selection_provenance(_res, route="marathon")
+            return _res
 
         content_items = self.db.get_unused_content(canal=self.canal, limit=5)
         if not content_items:
@@ -629,11 +642,20 @@ class PipelineOrchestrator:
         # menos una fuente on-niche (evita la inanición del canal).
         try:
             from pipeline.niche_guard import filter_on_niche
+            _strict_niche = bool(getattr(self, "config", None)
+                                 and getattr(self.config, "NICHE_GUARD_STRICT", False))
             content_items, _niche_dropped = filter_on_niche(
                 content_items,
                 lambda ci: f"{ci.get('title') or ''} {ci.get('text') or ''}"[:400],
                 getattr(self, "config", None),
+                strict=_strict_niche,
             )
+            if _strict_niche and not content_items:
+                logger.warning(
+                    "[%s] niche-guard estricto: sin fuentes on-niche — difiriendo "
+                    "la selección en vez de publicar fuera de nicho", self.canal)
+                self._emit_niche_defer_alert("sin fuentes on-niche")
+                return None
             if _niche_dropped:
                 logger.info(
                     "[%s] niche-guard: %d fuente(s) fuera de nicho descartadas",
@@ -713,9 +735,6 @@ class PipelineOrchestrator:
         content_title = content_item.get("title", "")
         self._extract_and_set_theme(content_text, content_title)
 
-        # ── Fase 3: directiva de retención desde el histórico (fail-open) ──
-        self._apply_retention_directive()
-
         self._emit_progress(15, "script", "Eligiendo mejor contenido y generando guion con IA...")
         result = self.script_gen.generate(content_item)
 
@@ -784,7 +803,102 @@ class PipelineOrchestrator:
         else:
             _safe_log_error(self.db, self.canal, "script", "Script generation failed")
             # Note: duration_ms logging lost in error path, but safety-first
+        if result and self._defer_if_off_niche(result):
+            return None
+        if result:
+            self._record_selection_provenance(result, route="original")
         return result
+
+    def _record_selection_provenance(self, result, route: str) -> None:
+        """F3: registra por qué se eligió el tema (auditable, fail-open)."""
+        if not result or self.db is None:
+            return
+        try:
+            cid = self._get_channel_id()
+            topic = ""
+            for key in ("viral_original_title", "titulo_selected", "titulo"):
+                if result.get(key):
+                    topic = str(result[key])
+                    break
+
+            best_q, best_score = "", 0.0
+            try:
+                from pipeline.topic_dedup import topic_tokens
+                t_tokens = topic_tokens(topic) if topic else set()
+                for c in (getattr(self, "_demand_candidates", []) or []):
+                    q = c.get("query", "")
+                    sc = float(c.get("demand_score") or 0)
+                    if t_tokens and (t_tokens & topic_tokens(q)):
+                        if sc > best_score:
+                            best_q, best_score = q, sc
+                    elif not best_q and sc > best_score:
+                        best_q, best_score = q, sc
+            except Exception:  # noqa: BLE001
+                pass
+
+            niche = 0.0
+            try:
+                from pipeline.niche_guard import niche_fit_score
+                niche = float(niche_fit_score(topic, self.config))
+            except Exception:  # noqa: BLE001
+                pass
+
+            self.db.record_selection_provenance(
+                channel_id=cid, entity_type="script", entity_id=result.get("id"),
+                route=route, topic=topic, demand_query=best_q,
+                source="autocomplete", demand_score=best_score, niche_fit=niche,
+                reason=f"ruta={route}; demanda={'sí' if best_q else 'no'}; "
+                       f"nicho={niche:.2f}",
+            )
+            if best_q and cid:
+                self.db.mark_topic_demand_used(cid, best_q)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[%s] selection provenance error (fail-open): %s",
+                         self.canal, exc)
+
+    def _emit_niche_defer_alert(self, reason: str) -> None:
+        """Alerta de sistema cuando se difiere por coherencia de nicho (F4)."""
+        try:
+            from api.services.lifecycle_monitor import emit_alert
+            emit_alert(
+                db=self.db, entity_type="system", entity_id=0,
+                channel_id=self._get_channel_id(),
+                alert_type="topic_off_niche_deferred", severity="warning",
+                title=f"[{self.canal}] Selección diferida por nicho",
+                message=(f"No hay tema que encaje con el nicho del canal ({reason}). "
+                         "Se difiere en vez de publicar contenido fuera de nicho."),
+                metadata={"reason": reason, "channel": self.canal},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[%s] niche-defer alert failed: %s", self.canal, exc)
+
+    def _defer_if_off_niche(self, result) -> bool:
+        """F4: en modo estricto, difiere un guion cuyo tema no encaja en el nicho.
+
+        Se aplica a TODAS las rutas (original/viral/maratón): el guard previo de
+        candidatos solo cubría la ruta normal, por eso aparecían temas ajenos.
+        Fail-open: cualquier error de scoring no bloquea.
+        """
+        if not result or self.db is None:
+            return False
+        if not bool(getattr(self.config, "NICHE_GUARD_STRICT", False)):
+            return False
+        title = (result.get("viral_original_title")
+                 or result.get("titulo")
+                 or (result.get("titulo_options") or [None])[0] or "")
+        if not title:
+            return False
+        try:
+            from pipeline.niche_guard import is_on_niche
+            if is_on_niche(str(title), self.config):
+                return False
+        except Exception:  # noqa: BLE001
+            return False
+        logger.warning(
+            "[%s] Tema fuera de nicho (estricto) — guion diferido: '%s'",
+            self.canal, str(title)[:90])
+        self._emit_niche_defer_alert("tema fuera de nicho")
+        return True
 
     def _get_viral_scraper(self):
         """Get or create the YouTubeViralScraper instance for on-demand use.
@@ -2574,6 +2688,26 @@ class PipelineOrchestrator:
                             metadata["selected_title"] = _clean
             except Exception as _title_exc:
                 logger.debug("[%s] title sanitize skipped: %s", self.canal, _title_exc)
+
+            # ── F5: garantizar título COMPLETO (sin frases cortadas a medias) ──
+            # No basta con sanear separadores: títulos como "...dejar sin cura a
+            # toda" llegan truncados. Se finaliza en frontera de palabra y sin
+            # conectores colgantes antes de subir.
+            try:
+                from pipeline.packaging_brief import finalize_title
+                _final = finalize_title(
+                    title, int(getattr(self.config, "TITLE_MAX_CHARS", 100) or 100)
+                )
+                if _final and _final != title:
+                    logger.warning(
+                        "[%s] Título finalizado (completitud): '%s' → '%s'",
+                        self.canal, title[:60], _final[:60],
+                    )
+                    title = _final
+                    if metadata is not None:
+                        metadata["selected_title"] = _final
+            except Exception as _ft_exc:
+                logger.debug("[%s] finalize_title skipped: %s", self.canal, _ft_exc)
 
             # ── Thumbnail: resolver desde la DB si el checkpoint no lo trae ──
             # Un upload_only reencolado puede tener un checkpoint sin

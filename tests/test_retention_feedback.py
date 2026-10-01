@@ -196,13 +196,17 @@ def test_signal_picks_weakest_phase_and_caches():
     db = FakeDB(conn)
     sig = rf.compute_channel_signal(db, {"id": 1, "slug": "canalx"}, cfg=_cfg())
     assert sig is not None
-    assert sig["weak_phases"][0]["phase_id"] == "desarrollo"
-    assert sig["weak_phases"][0]["label"] == "EL DESARROLLO"
-    assert "EL DESARROLLO" in sig["directive"]
+    # F7: la fase débil es la que MÁS audiencia pierde (salida del gancho,
+    # 0.55→0.20), no la de menor retención absoluta. El cierre reaparece como
+    # segunda fase por retención absoluta (0.35).
+    assert sig["weak_phases"][0]["phase_id"] == "gancho"
+    assert "drop_pp" in sig["weak_phases"][0]
+    weak_ids = [w["phase_id"] for w in sig["weak_phases"]]
+    assert "desarrollo" in weak_ids or "cierre" in weak_ids
     assert sig["retention_pct"] == pytest.approx(28.0, abs=1.0)
     assert "retention_feedback_canalx" in db.state
     cached = rf.load_cached_signal(db, "canalx")
-    assert cached["weak_phases"][0]["phase_id"] == "desarrollo"
+    assert cached["weak_phases"][0]["phase_id"] == "gancho"
 
 
 def test_phase_directives_use_channel_anchors():
@@ -272,7 +276,9 @@ def test_weak_phases_exclude_default_when_real_phases_exist():
     assert sig is not None
     weak_ids = [w["phase_id"] for w in sig["weak_phases"]]
     assert "default" not in weak_ids
-    assert weak_ids and weak_ids[0] == "cierre"  # 0.30 vs gancho 0.50
+    # F7: la mayor caída ocurre al salir del gancho (0.50→0.05); se cita esa
+    # transición y nunca la pseudo-fase 'default'.
+    assert weak_ids and weak_ids[0] == "gancho"
 
 
 def test_signal_insufficient_data_returns_none():

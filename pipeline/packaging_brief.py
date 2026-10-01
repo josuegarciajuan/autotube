@@ -269,3 +269,62 @@ def validate_overlay_spec(spec: OverlaySpec, title: str, cfg) -> tuple[list[str]
             reasons.append("credibility_stamp")
 
     return reasons, warnings
+
+
+# ── F5: completitud del título (sin frases cortadas a medias) ────────────────
+
+# Conectores/determinantes que NUNCA deben cerrar un título: si el título acaba
+# aquí es que quedó truncado a medias (p. ej. "...dejar sin cura a toda").
+_DANGLING_TAIL = frozenset(normalize(w) for w in (
+    "de", "del", "la", "el", "los", "las", "un", "una", "unos", "unas",
+    "que", "y", "o", "a", "en", "con", "por", "para", "sin", "sobre",
+    "entre", "desde", "hacia", "al", "su", "sus", "como", "mas", "muy",
+    "toda", "todo", "todos", "todas", "este", "esta", "estos", "estas",
+    "ese", "esa", "esos", "esas", "aquel", "aquella", "mi", "tu", "nuestro",
+    "nuestra", "vuestro", "vuestra", "cada", "otro", "otra",
+    "the", "of", "to", "in", "and", "or",
+))
+
+_TERMINAL_PUNCT = "¿?¡!.:…"
+
+
+def title_is_complete(title: str, max_chars: int | None = None) -> bool:
+    """True si el título no está cortado a medias ni acaba en conector colgante."""
+    text = " ".join(str(title or "").split())
+    if not text:
+        return False
+    if max_chars and len(text) > int(max_chars):
+        return False
+    if text[-1] in _TERMINAL_PUNCT:
+        return True
+    return normalize(text.split()[-1]) not in _DANGLING_TAIL
+
+
+def finalize_title(title: str, max_chars: int = 100) -> str:
+    """Recorta en frontera de palabra y elimina conectores colgantes (F5).
+
+    A diferencia de un ``title[:N]``, nunca deja una palabra a medias ni un
+    título que termina en preposición/artículo/determinante.
+    """
+    text = " ".join(str(title or "").replace("|", " ").split())
+    if not text:
+        return text
+    limit = max(20, int(max_chars or 100))
+    if len(text) <= limit and title_is_complete(text):
+        return text
+
+    out = ""
+    for word in text.split():
+        cand = (out + " " + word).strip()
+        if out and len(cand) > limit:
+            break
+        out = cand
+    if not out:
+        out = text[:limit].rstrip()
+
+    words = out.split()
+    while words and words[-1][-1] not in _TERMINAL_PUNCT \
+            and normalize(words[-1]) in _DANGLING_TAIL:
+        words.pop()
+    final = " ".join(words).strip()
+    return final or text[:limit].rstrip()

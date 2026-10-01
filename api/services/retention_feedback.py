@@ -176,6 +176,52 @@ def _curve_by_phase(curve: list[dict], timeline: list[dict],
     return {pid: d["sum"] / d["n"] for pid, d in acc.items() if d["n"] > 0}
 
 
+def _phase_drops(curve: list[dict], timeline: list[dict],
+                 duration: float) -> dict[str, float]:
+    """F7: caída de audiencia atribuida a cada fase (puntos consecutivos).
+
+    Una fase puede tener poca audiencia simplemente porque es tardía; lo que
+    importa es cuánta audiencia **se pierde** dentro de ella.
+    """
+    drops: dict[str, float] = {}
+    prev: tuple[str, float] | None = None
+    for p in curve:
+        try:
+            t = float(p["elapsed"]) * duration
+            val = float(p["watch_ratio"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        pid = _phase_at(timeline, t)
+        if prev is not None:
+            loss = prev[1] - val
+            if loss > 0:
+                drops[prev[0]] = drops.get(prev[0], 0.0) + loss
+        prev = (pid, val)
+    return drops
+
+
+def _early_retention(curve: list[dict], duration: float) -> dict[str, float]:
+    """F7: retención a 30/60/90 s (fraction 0-1) como señal del gancho."""
+    out: dict[str, float] = {}
+    if duration <= 0 or not curve:
+        return out
+    points = []
+    for p in curve:
+        try:
+            points.append((float(p["elapsed"]), float(p["watch_ratio"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not points:
+        return out
+    for sec in (30, 60, 90):
+        if sec > duration:
+            continue
+        target = sec / duration
+        best = min(points, key=lambda pt: abs(pt[0] - target))
+        out[f"r{sec}"] = best[1]
+    return out
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Queries
 # ─────────────────────────────────────────────────────────────────────
@@ -300,7 +346,18 @@ def _build_phase_directives(cfg, weak: list[dict]) -> list[dict]:
 
 def _build_directive(overall_pct: float, target: float, trend: str,
                      weak: list[dict],
-                     phase_directives: list[dict] | None = None) -> str:
+                     phase_directives: list[dict] | None = None,
+                     early_retention: dict | None = None) -> str:
+    early = early_retention or {}
+    r60 = early.get("r60")
+    early_line = ""
+    if r60 is not None and r60 < 60:
+        early_line = (
+            f"GANCHO DEBIL: solo {r60}% sigue al minuto. Abre con un hecho, un "
+            "conflicto y una prueba concreta en los primeros 20 s; elimina "
+            "introduccion, contexto generico y promesas que tardan en cumplirse. "
+            "Usa mapas, rutas, cronologias o diagramas cuando ayuden a explicar."
+        )
     if overall_pct >= target:
         return (
             f"Retencion media reciente {overall_pct}% (objetivo {target}%). "
@@ -328,6 +385,8 @@ def _build_directive(overall_pct: float, target: float, trend: str,
             "Refuerza esas fases: cliffhanger antes de su ecuador, sin relleno, "
             "y acortalas si no aportan un hecho nuevo."
         )
+    if early_line:
+        parts.insert(1, early_line)
     parts.append(
         "Manten la promesa explicita del payoff en los primeros 90 segundos y "
         "un reset (recapitulacion corta) hacia la mitad."
@@ -366,6 +425,8 @@ def compute_channel_signal(db, channel: dict, cfg=None,
         return None
 
     phase_acc: dict[str, list[float]] = {}
+    drop_acc: dict[str, float] = {}
+    early_acc: dict[str, list[float]] = {}
     all_points: list[float] = []
     video_areas: list[tuple[str, float]] = []
     used = 0
@@ -385,6 +446,12 @@ def compute_channel_signal(db, channel: dict, cfg=None,
         used += 1
         for pid, val in _curve_by_phase(curve, tl, duration).items():
             phase_acc.setdefault(pid, []).append(val)
+        # F7: la fase "débil" es la que MÁS audiencia pierde, no la que menos
+        # conserva (el cierre siempre conserva poco aunque no sea el problema).
+        for pid, d in _phase_drops(curve, tl, duration).items():
+            drop_acc[pid] = drop_acc.get(pid, 0.0) + d
+        for k, val in _early_retention(curve, duration).items():
+            early_acc.setdefault(k, []).append(val)
         area = sum(float(p["watch_ratio"]) for p in curve) / len(curve)
         all_points.extend(float(p["watch_ratio"]) for p in curve)
         video_areas.append(
@@ -399,6 +466,11 @@ def compute_channel_signal(db, channel: dict, cfg=None,
     }
     if not phase_avg:
         return None
+
+    early_retention = {
+        k: round(sum(vals) / len(vals) * 100, 1)
+        for k, vals in early_acc.items() if vals
+    }
 
     overall = sum(all_points) / len(all_points) if all_points else 0.0
     overall_pct = round(overall * 100, 1)
@@ -422,16 +494,34 @@ def compute_channel_signal(db, channel: dict, cfg=None,
         p.get("id") for p in (getattr(cfg, "SCRIPT_STRUCTURE", []) or [])
         if isinstance(p, dict) and p.get("id")
     }
-    ranked = sorted(phase_avg.items(), key=lambda kv: kv[1])
-    ranked_known = [(pid, val) for pid, val in ranked if pid in known]
-    ranked_sel = (ranked_known if ranked_known else ranked)[:max_phases]
+    # F7: priorizar la caída REAL (mayor pérdida primero), pero completar hasta
+    # `max_phases` con las de menor retención absoluta. Así no se omiten fases
+    # como el cierre (retención baja aunque sin caída brusca) cuando una fase
+    # anterior pierde audiencia de golpe.
+    ranked: list[tuple[str, float]] = []
+    seen: set[str] = set()
+    for pid, drop in sorted(drop_acc.items(), key=lambda kv: kv[1], reverse=True):
+        if pid in known and pid not in seen:
+            ranked.append((pid, drop))
+            seen.add(pid)
+    for pid, val in sorted(phase_avg.items(), key=lambda kv: kv[1]):
+        if pid in known and pid not in seen:
+            ranked.append((pid, 0.0))
+            seen.add(pid)
+    if not ranked:
+        if drop_acc:
+            ranked = sorted(drop_acc.items(), key=lambda kv: kv[1], reverse=True)
+        else:
+            ranked = sorted(phase_avg.items(), key=lambda kv: kv[1])
+    ranked_sel = ranked[:max_phases]
 
     labels = _phase_labels(cfg, [pid for pid, _ in ranked_sel])
     weak = [
         {
             "phase_id": pid,
             "label": labels.get(pid, pid),
-            "watch_ratio_pct": round(val * 100, 1),
+            "watch_ratio_pct": round(phase_avg.get(pid, 0.0) * 100, 1),
+            "drop_pp": round(val * 100, 1),
         }
         for pid, val in ranked_sel
     ]
@@ -452,8 +542,9 @@ def compute_channel_signal(db, channel: dict, cfg=None,
         },
         "weak_phases": weak,
         "phase_directives": phase_directives,
+        "early_retention_pct": early_retention,
         "directive": _build_directive(
-            overall_pct, target, trend, weak, phase_directives
+            overall_pct, target, trend, weak, phase_directives, early_retention
         ),
     }
 

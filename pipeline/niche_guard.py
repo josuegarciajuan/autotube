@@ -101,15 +101,20 @@ def is_on_niche(text: str, cfg) -> bool:
         return True
 
 
-def filter_on_niche(items: list, text_getter, cfg) -> tuple[list, int]:
+def filter_on_niche(items: list, text_getter, cfg,
+                    strict: bool = False) -> tuple[list, int]:
     """Drop off-niche items only when at least one on-niche item remains.
 
-    Returns ``(kept, dropped_count)``. Never starves the caller: if nothing is
-    on-niche, the original list is returned unchanged.
+    Returns ``(kept, dropped_count)``. Con ``strict=False`` nunca deja al
+    llamador sin contenido (si no hay nada on-niche, devuelve la lista original).
+    Con ``strict=True`` (F4) se prefiere **diferir** antes que publicar fuera de
+    nicho: si nada encaja, devuelve ``([], len(items))``.
     """
     if not is_guard_enabled(cfg) or not items:
         return list(items), 0
     on_niche = [it for it in items if is_on_niche(text_getter(it), cfg)]
     if not on_niche:
+        if strict:
+            return [], len(items)
         return list(items), 0
     return on_niche, len(items) - len(on_niche)

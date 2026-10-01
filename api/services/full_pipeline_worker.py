@@ -395,6 +395,43 @@ def _check_memory_before_video(logger: logging.Logger, min_free_gb: float = 2.5,
 
 # ── FFmpeg orphan cleanup ────────────────────────────────────────
 
+def _ensure_ab_row(db, video_id, channel_id, title_v1, variant_paths, strategies) -> None:
+    """F6: crea/actualiza la fila A/B del vídeo de forma idempotente.
+
+    Se llama en la GENERACIÓN (con yt_video_id aún desconocido) y en la SUBIDA
+    (para fijar el yt_video_id). Evita duplicados en el flujo F1→F2.
+    """
+    try:
+        with db._connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM video_ab_tests WHERE video_id=? ORDER BY id DESC LIMIT 1",
+                (video_id,),
+            ).fetchone()
+            paths_json = json.dumps([str(p) for p in (variant_paths or [])])
+            strat_json = json.dumps(strategies or [])
+            if row:
+                conn.execute(
+                    "UPDATE video_ab_tests SET thumbnail_variant_paths=?, "
+                    "thumbnail_variant_strategies=?, "
+                    "title_v1=COALESCE(NULLIF(title_v1,''), ?), "
+                    "updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (paths_json, strat_json, (title_v1 or "")[:100], row[0]),
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO video_ab_tests
+                       (video_id, channel_id, phase, title_v1,
+                        thumbnail_variant_paths, thumbnail_variant_strategies,
+                        thumbnail_variant_active)
+                       VALUES (?, ?, 'pending', ?, ?, ?, 1)""",
+                    (video_id, channel_id, (title_v1 or "")[:100],
+                     paths_json, strat_json),
+                )
+            conn.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[AB] _ensure_ab_row failed for video %s: %s", video_id, exc)
+
+
 def _kill_orphaned_ffmpeg() -> None:
     """Kill orphaned ffmpeg processes before worker exits.
 
@@ -1588,7 +1625,15 @@ def run_job(
         # Fase 1.3: upload_only NO genera variantes A/B (la miniatura ya existe en F1).
         # Antes el upload in-process (start_upload_job_from_scheduler) tampoco lo hacía —
         # evitamos consumir créditos Pollo/LLM en cada subida F2.
-        if ENABLE_AB_TESTING and not skip_upload and action not in ("generate_only", "upload_only"):
+        # F6: preparar variantes en la GENERACIÓN (acción generate_only), que es
+        # el flujo real F1→F2. Antes se excluían generate_only y upload_only, así
+        # que ningún vídeo entraba en A/B. upload_only reutiliza las variantes ya
+        # persistidas; no vuelve a gastar créditos.
+        _run_ab_variants = ENABLE_AB_TESTING and (
+            action == "generate_only"
+            or (not skip_upload and action != "upload_only")
+        )
+        if _run_ab_variants:
             db.update_video(video_id, progress=88, progress_phase="ab_test_thumbnails")
             logger.info("Phase 5.8/7: Generating A/B thumbnail variants...")
             
@@ -1646,6 +1691,12 @@ def run_job(
                     logger.info(
                         "[AB] Generated %d thumbnail variants for video %s",
                         len(ab_test_variant_paths), video_id,
+                    )
+                    # F6: persistir la fila A/B ya en la generación (yt_video_id
+                    # se fija en la subida). Así el flujo F1→F2 conserva variantes.
+                    _ensure_ab_row(
+                        db, video_id, channel_id, title_for_thumb,
+                        ab_test_variant_paths, ab_test_variant_strategies,
                     )
             except Exception as ab_exc:
                 logger.warning("[AB] Thumbnail variant generation failed (non-fatal): %s", ab_exc)
@@ -1872,21 +1923,19 @@ def run_job(
                             metadata.get("selected_title") if metadata else
                             (video_data.get("titulo", titulo) if video_data else titulo)
                         )
+                        # F6: idempotente — la fila puede existir ya desde la
+                        # generación; ahora se fija el yt_video_id.
+                        _ensure_ab_row(db, video_id, channel_id, title_v1,
+                                       ab_test_variant_paths, ab_test_variant_strategies)
                         with db._connect() as conn:
-                            conn.execute("""
-                                INSERT INTO video_ab_tests
-                                (video_id, yt_video_id, channel_id, phase, title_v1,
-                                 thumbnail_variant_paths, thumbnail_variant_strategies,
-                                 thumbnail_variant_active)
-                                VALUES (?, ?, ?, 'pending', ?, ?, ?, 1)
-                            """, (
-                                video_id, yt_video_id, channel_id,
-                                (title_v1 or "")[:100],
-                                json.dumps([str(p) for p in ab_test_variant_paths]),
-                                json.dumps(ab_test_variant_strategies),
-                            ))
+                            conn.execute(
+                                "UPDATE video_ab_tests SET yt_video_id=? "
+                                "WHERE video_id=? AND (yt_video_id IS NULL OR yt_video_id='')",
+                                (yt_video_id, video_id),
+                            )
                             conn.commit()
-                        logger.info("[AB] A/B test record created for video %s (3 thumbnail variants)", video_id)
+                        logger.info("[AB] A/B test record ready for video %s (%d variants)",
+                                    video_id, len(ab_test_variant_paths))
                     except Exception as ab_record_exc:
                         logger.warning("[AB] Failed to create A/B test record: %s", ab_record_exc)
 

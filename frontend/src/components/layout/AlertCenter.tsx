@@ -18,6 +18,7 @@ import {
 } from 'lucide-react'
 import { api, parseApiDate, formatApiDate, formatTime } from '../../lib/api'
 import { useQuotaStatus, useChannelRestrictions } from '../../hooks/useQueries'
+import ImprovementStatusStrip from '../monitor/ImprovementStatusStrip'
 
 // Persistencia del plegado: guardamos el CONJUNTO de identidades de los avisos
 // presentes cuando el usuario colapsó la tira. La auto-expansión solo se dispara
@@ -482,6 +483,10 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
       {/* ── Panel expandido ── */}
       {expanded && (
         <div className="px-4 pb-3 pt-1 space-y-3 max-h-[60vh] overflow-y-auto animate-fade-in">
+
+          {/* Avisos de estado de las mejoras del plan (F9): informativo, no
+              son strikes ni enforcement. */}
+          <ImprovementStatusStrip />
 
           {/* Registro de señales: cada origen tiene una etiqueta propia. En
               particular, una retirada observada nunca se presenta como strike. */}

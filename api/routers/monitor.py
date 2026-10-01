@@ -589,6 +589,22 @@ def resolve_reminder(reminder_id: int):
         return {"ok": False, "error": str(exc)}
 
 
+@router.get("/monitor/improvements")
+def list_improvements():
+    """Avisos de estado de las mejoras del plan (centro de estado del panel).
+
+    Plano informativo: NO son strikes ni enforcement. Resolver una alerta de
+    mejora no cambia este estado.
+    """
+    db = get_db()
+    try:
+        from api.services.improvement_feedback import get_status
+        return {"ok": True, **get_status(db)}
+    except Exception as exc:
+        logger.error("List improvements error: %s", exc)
+        return {"ok": False, "items": [], "error": str(exc)}
+
+
 @router.get("/monitor/alerts/silenced-types")
 def get_silenced_types():
     """Get the alert types silenced by the operator."""

@@ -224,9 +224,27 @@ def build_report(db=None, days_now: int = 14) -> dict:
                     "generated_at": sig.get("generated_at"),
                 }
 
+    # ── F2: baseline reconciliado (no pisa el original) ──
+    reconciled_baseline = None
+    try:
+        raw_rec = db.get_system_state("experiment_baseline_reconciled")
+        reconciled_baseline = json.loads(raw_rec) if raw_rec else None
+    except (TypeError, ValueError):
+        reconciled_baseline = None
+
+    # ── F2: monetización (horas Analytics aprox. vs YPP confirmado) ──
+    monetization = None
+    try:
+        from api.services.monetization import monetization_status
+        monetization = monetization_status(db)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("monetization_status failed: %s", exc)
+
     return {
         "experiment_started_at": started_raw or None,
         "generated_at": now.strftime("%Y-%m-%dT%H:%M:%S"),
+        "baseline_reconciled": reconciled_baseline,
+        "monetization": monetization,
         "windows": {
             "now": {"from": now_start, "days": win},
             "pre": {"from": pre_start, "to": pre_end, "days": win},

@@ -49,6 +49,14 @@ def seeds_from_config(cfg) -> list[str]:
         for k in (getattr(cfg, "NICHE_KEYWORDS_ENG", []) or [])[:5]:
             if str(k).strip():
                 seeds.append(str(k).strip())
+    # F4: series de contenido → coherencia de audiencia y ocupación sostenida.
+    try:
+        from pipeline.topic_series import series_seed_queries
+        for q in series_seed_queries(cfg):
+            if str(q).strip():
+                seeds.append(str(q).strip())
+    except Exception:  # noqa: BLE001
+        pass
     seen: set[str] = set()
     out: list[str] = []
     for s in seeds:

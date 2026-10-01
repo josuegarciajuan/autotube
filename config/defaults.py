@@ -84,6 +84,10 @@ TITLE_KEYWORD_SUFFIXES = ["explicado", "caso", "documental"]
 NICHE_GUARD_ENABLED = True
 TITLE_NICHE_FIT_MIN = 0.3
 NICHE_ANCHORS = []
+# F4 — coherencia editorial: preferir DIFERIR antes que publicar fuera de nicho.
+NICHE_GUARD_STRICT = False
+# F4 — series de contenido del canal: [{name, seed_queries, episodes}]
+CONTENT_SERIES = []
 
 THUMBNAIL_MAX_OVERLAY_CHARS = 32
 THUMBNAIL_BANNED_OVERLAY_CLAIMS = ["oculto", "real", "prohibido"]
