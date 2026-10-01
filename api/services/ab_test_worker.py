@@ -449,6 +449,43 @@ class ABTestWorker:
         yt_video_id = row["yt_video_id"]
         channel_slug = row.get("channel_slug", "")
 
+        # ── Post-cambio: medir SOLO la ventana posterior a la rotación ──
+        # La lectura local de video_stats_history es acumulativa (vida del
+        # vídeo); usarla para "después del cambio" compararía la vida completa
+        # contra la ventana previa. Para post_change se va directo al Reporting
+        # API filtrado por fecha.
+        if post_change:
+            conn = self._get_db_conn()
+            where = "yt_video_id = ?"
+            params: list = [yt_video_id]
+            change_time = (row.get("thumbnail_rotated_at")
+                           or row.get("title_rotated_at")
+                           or row.get("first_checked_at") or "")
+            since = str(change_time)[:10]
+            if len(since) == 10 and since[4] == "-":
+                where += " AND date >= ?"
+                params.append(since)
+            try:
+                rr = conn.execute(
+                    f"""SELECT COALESCE(SUM(impressions), 0) AS imp,
+                               COALESCE(SUM(impressions * impressions_ctr / 100.0), 0) AS clicks
+                        FROM video_reach_daily WHERE {where}""",
+                    tuple(params),
+                ).fetchone()
+                imp = int(rr["imp"]) if rr and rr["imp"] else 0
+                if imp > 0:
+                    return {
+                        "ctr": round(float(rr["clicks"] or 0) / imp * 100, 2),
+                        "impressions": imp,
+                        "avg_duration": 0.0,
+                    }
+            except Exception as exc:
+                logger.debug("Windowed reach CTR fetch failed for %s: %s", video_id, exc)
+            # Sin datos de la ventana post-cambio NO se puede comparar: no usar
+            # métricas acumulativas (darían una comparación inválida). Se espera
+            # a que el Reporting API publique la ventana.
+            return {"ctr": 0.0, "impressions": 0, "avg_duration": 0.0}
+
         # ── Try local DB (video_stats_history) first ──────────
         try:
             conn = self._get_db_conn()
