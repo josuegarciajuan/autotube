@@ -334,6 +334,15 @@ NICHE_ANCHORS = [
     "rescate", "tragedia", "hielo", "artic", "antartid", "montan",
     "desierto", "ocean", "travesia", "aislamiento", "desapareci",
 ]
+# F4: preferir diferir antes que publicar fuera de nicho.
+NICHE_GUARD_STRICT = True
+# F4: series de contenido.
+CONTENT_SERIES = [
+    {"name": "Expediciones polares",
+     "seed_queries": ["expediciones polares", "naufragios en la antartida"]},
+    {"name": "Supervivencia extrema",
+     "seed_queries": ["historias reales de supervivencia", "expediciones fallidas"]},
+]
 SEO_SECONDARY_KEYWORDS = [
     "exploraciones que salieron mal", "tragedias en expediciones", "supervivencia extrema documental",
     "naufragios historicos documental", "expediciones fallidas reales",

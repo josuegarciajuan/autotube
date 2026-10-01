@@ -332,6 +332,15 @@ NICHE_ANCHORS = [
     "tumor", "alergia", "sueno", "dormir", "memoria", "hospital",
     "tratamiento", "sindrom", "trastorno", "genetic",
 ]
+# F4: preferir diferir antes que publicar fuera de nicho.
+NICHE_GUARD_STRICT = True
+# F4: series de contenido.
+CONTENT_SERIES = [
+    {"name": "Síndromes extraordinarios",
+     "seed_queries": ["sindromes raros documental", "enfermedades geneticas raras"]},
+    {"name": "Casos clínicos inexplicables",
+     "seed_queries": ["casos medicos inexplicables", "anomalias medicas reales"]},
+]
 SEO_SECONDARY_KEYWORDS = [
     "casos medicos inexplicables", "anomalias medicas reales", "sindromes extraños documental",
     "enfermedades misteriosas", "fenomenos medicos inexplicables",

@@ -406,6 +406,15 @@ NICHE_ANCHORS = [
     "piramid", "faraon", "egipto", "maya", "aztec", "inca", "manuscrito",
     "reliquia", "artefacto", "prehistori", "imperio", "excavacion",
 ]
+# F4: preferir diferir antes que publicar fuera de nicho.
+NICHE_GUARD_STRICT = True
+# F4: series de contenido.
+CONTENT_SERIES = [
+    {"name": "Misterios arqueológicos",
+     "seed_queries": ["civilizaciones perdidas", "hallazgos arqueologicos recientes"]},
+    {"name": "Enigmas de la antigüedad",
+     "seed_queries": ["tecnologia antigua inexplicable", "ciudades antiguas desaparecidas"]},
+]
 SEO_SECONDARY_KEYWORDS = [
     "civilizaciones perdidas", "secretos de la historia", "ciudades antiguas misterios",
     "civilizaciones olvidadas", "ruinas misteriosas del mundo",

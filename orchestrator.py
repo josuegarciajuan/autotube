@@ -575,12 +575,16 @@ class PipelineOrchestrator:
 
         if self.source_mode == "viral":
             _res = self._phase_generate_script_viral(start)
+            if self._defer_if_off_niche(_res):
+                return None
             self._record_selection_provenance(_res, route="viral")
             return _res
 
         # ── Marathon mode: long-form deep script generation ──
         if self.is_marathon:
             _res = self._phase_generate_script_marathon(start)
+            if self._defer_if_off_niche(_res):
+                return None
             self._record_selection_provenance(_res, route="marathon")
             return _res
 
@@ -633,11 +637,20 @@ class PipelineOrchestrator:
         # menos una fuente on-niche (evita la inanición del canal).
         try:
             from pipeline.niche_guard import filter_on_niche
+            _strict_niche = bool(getattr(self, "config", None)
+                                 and getattr(self.config, "NICHE_GUARD_STRICT", False))
             content_items, _niche_dropped = filter_on_niche(
                 content_items,
                 lambda ci: f"{ci.get('title') or ''} {ci.get('text') or ''}"[:400],
                 getattr(self, "config", None),
+                strict=_strict_niche,
             )
+            if _strict_niche and not content_items:
+                logger.warning(
+                    "[%s] niche-guard estricto: sin fuentes on-niche — difiriendo "
+                    "la selección en vez de publicar fuera de nicho", self.canal)
+                self._emit_niche_defer_alert("sin fuentes on-niche")
+                return None
             if _niche_dropped:
                 logger.info(
                     "[%s] niche-guard: %d fuente(s) fuera de nicho descartadas",
@@ -788,6 +801,8 @@ class PipelineOrchestrator:
         else:
             _safe_log_error(self.db, self.canal, "script", "Script generation failed")
             # Note: duration_ms logging lost in error path, but safety-first
+        if result and self._defer_if_off_niche(result):
+            return None
         if result:
             self._record_selection_provenance(result, route="original")
         return result
@@ -838,6 +853,50 @@ class PipelineOrchestrator:
         except Exception as exc:  # noqa: BLE001
             logger.debug("[%s] selection provenance error (fail-open): %s",
                          self.canal, exc)
+
+    def _emit_niche_defer_alert(self, reason: str) -> None:
+        """Alerta de sistema cuando se difiere por coherencia de nicho (F4)."""
+        try:
+            from api.services.lifecycle_monitor import emit_alert
+            emit_alert(
+                db=self.db, entity_type="system", entity_id=0,
+                channel_id=self._get_channel_id(),
+                alert_type="topic_off_niche_deferred", severity="warning",
+                title=f"[{self.canal}] Selección diferida por nicho",
+                message=(f"No hay tema que encaje con el nicho del canal ({reason}). "
+                         "Se difiere en vez de publicar contenido fuera de nicho."),
+                metadata={"reason": reason, "channel": self.canal},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[%s] niche-defer alert failed: %s", self.canal, exc)
+
+    def _defer_if_off_niche(self, result) -> bool:
+        """F4: en modo estricto, difiere un guion cuyo tema no encaja en el nicho.
+
+        Se aplica a TODAS las rutas (original/viral/maratón): el guard previo de
+        candidatos solo cubría la ruta normal, por eso aparecían temas ajenos.
+        Fail-open: cualquier error de scoring no bloquea.
+        """
+        if not result or self.db is None:
+            return False
+        if not bool(getattr(self.config, "NICHE_GUARD_STRICT", False)):
+            return False
+        title = (result.get("viral_original_title")
+                 or result.get("titulo")
+                 or (result.get("titulo_options") or [None])[0] or "")
+        if not title:
+            return False
+        try:
+            from pipeline.niche_guard import is_on_niche
+            if is_on_niche(str(title), self.config):
+                return False
+        except Exception:  # noqa: BLE001
+            return False
+        logger.warning(
+            "[%s] Tema fuera de nicho (estricto) — guion diferido: '%s'",
+            self.canal, str(title)[:90])
+        self._emit_niche_defer_alert("tema fuera de nicho")
+        return True
 
     def _get_viral_scraper(self):
         """Get or create the YouTubeViralScraper instance for on-demand use.
