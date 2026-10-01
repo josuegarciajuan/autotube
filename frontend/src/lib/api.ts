@@ -510,6 +510,8 @@ export const api = {
     const qs = params.toString()
     return request<{alerts: any[]}>(`/monitor/alerts${qs ? `?${qs}` : ''}`)
   },
+  // Avisos de estado de las mejoras del plan (F9). Plano informativo.
+  getImprovements: () => request<{ok: boolean; items: any[]; updated_at?: string}>('/monitor/improvements'),
   getMonitorEvents: (entityType?: string, entityId?: number, channelId?: number, limit?: number) => {
     const params = new URLSearchParams()
     if (entityType) params.set('entity_type', entityType)
