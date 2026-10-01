@@ -403,7 +403,8 @@ class ReachReportClient:
 
     # ── Sync ───────────────────────────────────────────────────
 
-    def sync(self, db, *, max_reports_per_job: int = 10) -> dict:
+    def sync(self, db, *, max_reports_per_job: int = 10,
+             ignore_seen: bool = False) -> dict:
         """Sincroniza reach + basic: crea jobs y procesa reportes nuevos.
 
         Args:
@@ -411,6 +412,10 @@ class ReachReportClient:
                 pasada. 0 (o negativo) = backfill completo (tope duro
                 ``_MAX_REPORTS_HARD_CAP``), útil para bajar de una vez los 30 días
                 históricos que el Reporting API genera al crear un job nuevo.
+            ignore_seen: reprocesa informes ya vistos (reproceso histórico F2).
+                Es idempotente porque los upserts son deterministas; sirve para
+                corregir filas escritas por la agregación antigua (segmentos que
+                se sobrescribían).
 
         Returns:
             Resumen con estado explícito del Reporting API:
@@ -479,7 +484,7 @@ class ReachReportClient:
             processed = 0
             for rep in reports:
                 report_id = rep.get("id", "")
-                if not report_id or db.reach_report_seen(report_id):
+                if not report_id or (not ignore_seen and db.reach_report_seen(report_id)):
                     continue
                 # Informe nuevo no descargado: cuenta como pendiente aunque el
                 # tope de esta pasada impida bajarlo (se bajará en la siguiente).
