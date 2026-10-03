@@ -546,6 +546,13 @@ async def lifespan(app: FastAPI):
         else asyncio.create_task(_media_retention_loop())
     )
 
+    # ── Refresco del hold de generación (panel "Pausar generación") ──
+    # Mantiene vivo el hold mientras el operador lo deje activo (0 cuota).
+    # Ver api/routers/system.py: /api/system/generation-pause.
+    generation_hold_refresh_task = _supervised_loop(
+        "generation_hold_refresh", _generation_hold_refresh_loop
+    )
+
     yield
     
     # Shutdown
@@ -568,6 +575,7 @@ async def lifespan(app: FastAPI):
         ia_mark_reconcile_task,
         playwright_reaper_task,
         media_retention_task,
+        generation_hold_refresh_task,
     ]
     if _startup_tasks is not None:
         _shutdown_tasks.append(_startup_tasks)
@@ -974,6 +982,39 @@ async def _media_retention_loop():
             logger.warning("Media retention sweep error: %s", exc)
 
         await asyncio.sleep(getattr(_settings, "MEDIA_RETENTION_SWEEP_INTERVAL_S", 21600))
+
+
+async def _generation_hold_refresh_loop():
+    """Background loop: mantiene vivo el hold de generación activado por el panel.
+
+    Mientras el operador mantenga la pausa de generación
+    (``system_state["generation_hold"] == true``), re-asegura periódicamente los
+    centinelas ``phase='hold'`` (heartbeat +2 días) para que el hold no caduque
+    aunque la API lleve semanas sin reiniciarse. Si no hay intención de pausa, no
+    hace nada. Sustituye al timer systemd externo ``autotube-hold-refresh``.
+    0 cuota; pausa SOLO creación (long-form + shorts), nunca subidas.
+    """
+    import asyncio, logging
+    logger = logging.getLogger("autotube.generation_hold")
+    from database.db_extended import ExtendedDatabase
+
+    await asyncio.sleep(120)  # Let API + other loops stabilize first
+
+    while True:
+        try:
+            from api.services.lifecycle_monitor import touch_task_heartbeat as _tth
+            _tth("generation_hold_refresh")
+            from api.services import generation_hold as gh
+            db = ExtendedDatabase()
+            if gh.hold_intent(db):
+                result = await asyncio.to_thread(
+                    gh.ensure_hold, db, "self-heal periódico",
+                )
+                logger.info("Hold de generación refrescado (%s)", result)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Generation hold refresh error: %s", exc)
+
+        await asyncio.sleep(21600)  # Every 6 hours
 
 
 async def _ia_mark_reconcile_loop():

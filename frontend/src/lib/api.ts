@@ -63,6 +63,10 @@ export const api = {
   clearChannelDeliveryOverride: (channelId: number) =>
     request<any>(`/pacing/channels/${channelId}/override`, { method: 'DELETE' }),
   getFactoryStatus: () => request<any>(`/pacing/factory-status`),
+  // Generación pausada (solo creación; las subidas siguen siempre activas)
+  getGenerationPause: () => request<any>(`/system/generation-pause`),
+  setGenerationPause: (enabled: boolean, reason?: string) =>
+    request<any>(`/system/generation-pause`, { method: 'POST', body: JSON.stringify({ enabled, reason }) }),
   // Channels
   getChannels: (activeOnly = false) => request<any[]>(`/channels?active_only=${activeOnly}`),
   getChannel: (id: number) => request<any>(`/channels/${id}`),
