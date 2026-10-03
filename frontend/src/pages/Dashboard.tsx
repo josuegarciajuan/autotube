@@ -475,31 +475,7 @@ export default function Dashboard() {
       )}
 
       {/* Toolbar: Refresh Dashboard + Refresh Stats + Stabilize */}
-      <div className="flex items-center justify-end gap-2">
-        {/* Interruptor de GENERACIÓN (long-form + shorts). Las subidas no se tocan. */}
-        <button
-          onClick={handleToggleGeneration}
-          disabled={togglingGen}
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border transition-all text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed ${
-            generationPaused
-              ? 'border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20'
-              : 'border-green-500/20 bg-green-500/5 text-green-400 hover:bg-green-500/10 hover:border-green-500/40'
-          }`}
-          title={generationPaused
-            ? 'Reanudar la creación de vídeos y shorts (las subidas ya siguen activas)'
-            : 'Pausar la creación de vídeos y shorts (las subidas siguen activas)'}
-        >
-          {togglingGen
-            ? <Loader2 size={13} className="animate-spin" />
-            : generationPaused ? <PlayCircle size={13} /> : <PauseCircle size={13} />}
-          <span>
-            {togglingGen
-              ? 'Aplicando...'
-              : generationPaused
-                ? (confirmResume ? '⚠ Confirmar reanudar' : 'Reanudar generación')
-                : 'Pausar generación'}
-          </span>
-        </button>
+      <div className="flex flex-wrap items-center justify-end gap-2">
         <span className="text-[10px] text-gray-600 tabular-nums">
           {dataUpdatedAt ? formatTimeAgo(dataUpdatedAt) : ''}
         </span>
@@ -547,6 +523,31 @@ export default function Dashboard() {
         >
           {recalculatingSlots ? <Loader2 size={13} className="animate-spin" /> : <Zap size={13} />}
           <span>{recalculatingSlots ? 'Calculando...' : 'Optimizar franjas'}</span>
+        </button>
+        {/* Interruptor de GENERACIÓN (long-form + shorts). Las subidas no se tocan. */}
+        {/* Al final de la fila (derecha) para que nunca quede recortado al desbordar. */}
+        <button
+          onClick={handleToggleGeneration}
+          disabled={togglingGen}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border transition-all text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed ${
+            generationPaused
+              ? 'border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20'
+              : 'border-green-500/20 bg-green-500/5 text-green-400 hover:bg-green-500/10 hover:border-green-500/40'
+          }`}
+          title={generationPaused
+            ? 'Reanudar la creación de vídeos y shorts (las subidas ya siguen activas)'
+            : 'Pausar la creación de vídeos y shorts (las subidas siguen activas)'}
+        >
+          {togglingGen
+            ? <Loader2 size={13} className="animate-spin" />
+            : generationPaused ? <PlayCircle size={13} /> : <PauseCircle size={13} />}
+          <span>
+            {togglingGen
+              ? 'Aplicando...'
+              : generationPaused
+                ? (confirmResume ? '⚠ Confirmar reanudar' : 'Reanudar generación')
+                : 'Pausar generación'}
+          </span>
         </button>
       </div>
 
