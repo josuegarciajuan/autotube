@@ -54,6 +54,7 @@ for NODE in "$@"; do
         printf '%s' '{\"bloques\":[{\"tipo\":\"hook\",\"texto\":\"Prueba de sintesis.\"}],\"voice_config\":{\"kokoro_voice\":\"em_santa\"},\"output_base\":\"narration_smoke\",\"rid\":\"smoke\"}' > \$T/in/request.json
         docker run --rm --network=none -e HF_HUB_OFFLINE=1 -e OMP_NUM_THREADS=1 \
             -e OPENBLAS_NUM_THREADS=1 -e MKL_NUM_THREADS=1 -e KOKORO_INLINE=1 \
+            -e KOKORO_MP3_SNDFILE=1 \
             -v $DST:/app:ro -v $DST/.hfcache:/hfcache:ro -v \$T:/work -w /work $IMG \
             python /app/api/services/tts_worker.py --request /work/in/request.json --out-dir /work/out >/dev/null 2>&1 || true
         grep -q '\"ok\": true' \$T/out/estado.json && echo '  smoke: OK' || { echo '  smoke: FALLO'; cat \$T/out/estado.json 2>/dev/null; exit 1; }
