@@ -33,6 +33,34 @@ Enrutado por `Host` + path:
 Para autotube se elimina el prefijo `/autotube` al proxear
 (`/autotube/assets/x.js` → `/assets/x.js`); `/api` y `/ws` pasan intactos.
 
+### Assets PWA públicos (instalabilidad en Chrome)
+
+Chrome descarga el *web app manifest* **sin credenciales** (y los iconos igual).
+Si el gate los protege, recibe la pantalla de patrón (HTML) en lugar del
+manifiesto: la PWA **no es instalable** y el acceso directo en Android usa la
+letra del host en vez del logo. Por eso el gate deja pasar, **sin sesión**, solo
+GET/HEAD que:
+
+1. caen bajo un prefijo con PWA, y
+2. su nombre es un manifiesto (`manifest.json` / `manifest.webmanifest`) o un
+   icono convencional (`icon*.{png,svg,ico,webp}`, `apple-touch-icon*.…`,
+   `favicon*.…`).
+
+Prefijos públicos actuales:
+
+| Prefijo | App |
+|---|---|
+| `/autotube/` | Autotube |
+| `/superserver/` | SuperServer (TailDeck) |
+| `/trading/` | Trading |
+| `/reconocimientoFacial/` | Reconocimiento facial (local) |
+| `/rf/` | Reconocimiento facial (panel de PRODUCCIÓN) |
+
+El resto (la SPA, las APIs, media y ficheros de usuario como
+`/reconocimientoFacial/…/files/<captura>`) **sigue exigiendo `pg_session`**.
+Para una app nueva con PWA: añadir su prefijo a `PUBLIC_PWA_PREFIXES` en
+`server.js` y reiniciar el gate.
+
 ## Variables de entorno (`/root/panel-gate/.env`, chmod 600, NO versionado)
 
 ```dotenv
