@@ -459,12 +459,19 @@ class KokoroTTSEngine:
                     seg.get("pause_after_ms", 0), len(clean),
                 )
 
-                # Generate audio for this segment (timeout in separate thread)
+                # Generate audio for this segment (timeout in separate thread).
+                # En nodos-contenedor con hilos restringidos ("can't start new
+                # thread") se puede forzar la ruta inline con KOKORO_INLINE=1,
+                # sin ThreadPoolExecutor (sin timeout por bloque).
                 t0 = time.time()
+                _inline = os.environ.get("KOKORO_INLINE", "").lower() in ("1", "true", "yes")
                 try:
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _exec:
-                        _future = _exec.submit(_run_block, clean, self.kokoro_voice, speed)
-                        audio_chunks = _future.result(timeout=_BLOCK_TIMEOUT)
+                    if _inline:
+                        audio_chunks = _run_block(clean, self.kokoro_voice, speed)
+                    else:
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _exec:
+                            _future = _exec.submit(_run_block, clean, self.kokoro_voice, speed)
+                            audio_chunks = _future.result(timeout=_BLOCK_TIMEOUT)
                 except concurrent.futures.TimeoutError:
                     logger.error("Kokoro seg %d.%d timed out after %ds — skipping",
                                  i, si, _BLOCK_TIMEOUT)
