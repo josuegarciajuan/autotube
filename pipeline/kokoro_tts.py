@@ -39,6 +39,17 @@ def _ms_to_srt_time(ms: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
 
 
+def _export_mp3(tmp_wav: str, audio_path: str) -> None:
+    """Exporta WAV→MP3. Con ``KOKORO_MP3_SNDFILE=1`` usa libsndfile (sin ffmpeg),
+    necesario en nodos-contenedor que no pueden crear hilos (ffmpeg/pydub fallan
+    con ``pthread_create() failed: Operation not permitted``)."""
+    if os.environ.get("KOKORO_MP3_SNDFILE", "").lower() in ("1", "true", "yes"):
+        data, sr = sf.read(tmp_wav, dtype="float32")
+        sf.write(audio_path, data, sr, format="MP3")
+    else:
+        AudioSegment.from_wav(tmp_wav).export(audio_path, format="mp3", bitrate="192k")
+
+
 # ── Default block speed profiles (can be overridden per channel) ──
 
 DEFAULT_BLOCK_SPEEDS: dict[str, float] = {
@@ -315,7 +326,7 @@ class KokoroTTSEngine:
         # Save as MP3 via pydub
         tmp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         sf.write(tmp_wav.name, audio, self.sample_rate)
-        AudioSegment.from_wav(tmp_wav.name).export(audio_path, format="mp3", bitrate="192k")
+        _export_mp3(tmp_wav.name, audio_path)
         os.unlink(tmp_wav.name)
 
         with open(json_path, "w", encoding="utf-8") as f:
@@ -558,7 +569,7 @@ class KokoroTTSEngine:
         logger.info("Exporting %.1fs audio to MP3…", total_dur)
         tmp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         sf.write(tmp_wav.name, final_audio, self.sample_rate)
-        AudioSegment.from_wav(tmp_wav.name).export(audio_path, format="mp3", bitrate="192k")
+        _export_mp3(tmp_wav.name, audio_path)
         os.unlink(tmp_wav.name)
 
         # Save timestamps and SRT
