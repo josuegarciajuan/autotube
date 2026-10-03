@@ -296,8 +296,36 @@ app.use('/__gate', (req, res) => {
   res.status(404).json({ ok: false, error: 'not found' });
 });
 
+// ── Assets PWA públicos ─────────────────────────────────────────────────────
+// Chrome descarga el web manifest SIN credenciales (y los iconos igual), así que
+// si el gate los protege recibe la pantalla de patrón en lugar del JSON/PNG: la
+// app no es instalable y el acceso directo usa la letra del host.
+// Se dejan públicos SOLO manifiestos e iconos con nombres convencionales, y solo
+// bajo los prefijos de apps con PWA. Nunca media, fotos ni datos de usuario
+// (p. ej. /reconocimientoFacial/.../files/<captura>).
+// Añadir una app nueva = añadir su prefijo aquí.
+const PUBLIC_PWA_PREFIXES = [
+  '/autotube/',
+  '/superserver/',
+  '/trading/',
+  '/reconocimientoFacial/',
+  '/rf/',
+];
+const PWA_ASSET_RE =
+  /^(?:.*\/)?(?:manifest\.(?:json|webmanifest)|(?:icon(?:-[a-z0-9]+)*|apple-touch-icon|favicon(?:-[0-9]+)?)\.(?:png|svg|ico|webp))$/i;
+
+function isPublicPwaAsset(req) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return false;
+  const path = String(req.url || '').split('?')[0];
+  return (
+    PUBLIC_PWA_PREFIXES.some((prefix) => path.startsWith(prefix)) &&
+    PWA_ASSET_RE.test(path)
+  );
+}
+
 // ── Session gate: any other unauthenticated request gets the unlock screen ──
 app.use((req, res, next) => {
+  if (isPublicPwaAsset(req)) return next();
   if (sessionFromReq(req)) return next();
   return serveUnlock(req, res);
 });
