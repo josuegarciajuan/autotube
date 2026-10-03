@@ -1,0 +1,37 @@
+# autotube-worker:1 — entorno hermético para trabajo distribuido identity-preserving.
+#
+# Objetivo (requisito duro): que una operación ejecutada en un nodo produzca un
+# artefacto **bit-a-bit idéntico** al que produce el control plane. Para eso el
+# contenedor trae el **mismo ffmpeg** que el host de referencia, en vez de usar
+# el del nodo (la flota es heterogénea: 3.2 / 3.4 / 4.2 / sin ffmpeg).
+#
+# Referencia local (control plane):
+#   - system ffmpeg : 7:4.4.2-0ubuntu0.22.04.1
+#   - imageio-ffmpeg: 0.6.0 (binario 7.0.2-static)  [render MoviePy]
+#   - moviepy 2.2.1 / imageio 2.37.3
+#
+# Nota: el código de autotube se empuja desde el control plane (`push app`);
+# la imagen solo aporta toolchain determinista.
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LC_ALL=C.UTF-8 LANG=C.UTF-8
+
+# ffmpeg pineado a la MISMA versión del control plane (concat + pre-transcode).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg=7:4.4.2-0ubuntu0.22.04.1 \
+        python3 \
+        python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Dependencias Python pineadas (render de segmento vía MoviePy).
+RUN pip3 install --no-cache-dir \
+        imageio-ffmpeg==0.6.0 \
+        imageio==2.37.3 \
+        moviepy==2.2.1 \
+        numpy==2.2.6 \
+        Pillow==11.1.0 \
+        opencv-contrib-python-headless==4.13.0.92
+
+# ffmpeg del sistema: comprobación de versión en build (falla si no coincide).
+RUN ffmpeg -version | head -1
