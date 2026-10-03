@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Optional
 
 from pipeline.title_enricher import enforce_power_words, resolve_title_max_chars
+from pipeline.render_gate import evaluate_render_gate
 
 logger = logging.getLogger(__name__)
 
@@ -367,6 +368,34 @@ class VideoValidator:
                     "Audio track present", "blocking",
                 )
             )
+
+        # ── 3b. Render gate: escenas negras / silencios largos (BLOCKING) ──
+        # Fail-open ante errores de herramienta; bloquea solo con evidencia.
+        # Kill-switch por canal/global: RENDER_GATE_ENABLED=False.
+        gate = evaluate_render_gate(video_path, channel_config=self.config)
+        if gate.get("blocking"):
+            for msg in gate["blocking"]:
+                checks.append(ValidationCheck("render_gate", False, msg, "blocking"))
+                blocking.append(msg)
+            return PostValidationResult(
+                passed=False,
+                checks=checks,
+                blocking_errors=blocking,
+                warnings=warnings,
+                duration_seconds=duration_sec,
+                title=updated_title,
+                description=updated_description,
+                tags=updated_tags,
+            )
+        checks.append(
+            ValidationCheck(
+                "render_gate", True,
+                f"Sin negro/silencio anómalo (negro={gate.get('black_sec', 0.0):.1f}s, "
+                f"silencio={gate.get('silence_sec', 0.0):.1f}s)",
+                "blocking",
+            )
+        )
+        warnings.extend(gate.get("warnings") or [])
 
         # ── 4. Duration range (WARNING only — NEVER blocks) ───────
         if duration_sec < self.duration_min_sec:
