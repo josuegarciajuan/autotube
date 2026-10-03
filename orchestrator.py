@@ -1407,6 +1407,13 @@ class PipelineOrchestrator:
                 # v2: segmented synthesis with per-block voice
                 logger.info("[%s] Using segmented TTS with %d blocks", self.canal, len(bloques))
 
+                # ── SuperServer (M3): delegar la síntesis al pool si el proyecto
+                # está encendido. Si no aplica, devuelve None y sigue la ruta local
+                # intacta. En caso de fallo del pool, aborta la fase (no duplica).
+                _res_del = self._tts_delegado(script, bloques, start)
+                if _res_del is not None:
+                    return _res_del
+
                 # ── Heartbeat emitter (prevents orphan timeout during long synthesis) ──
                 _hb_stop = threading.Event()
                 _hb_thread = None
@@ -1530,6 +1537,72 @@ class PipelineOrchestrator:
             logger.error(f"[{self.canal}] TTS failed: {e}")
             _safe_log_error(self.db, self.canal, "tts", str(e))
             return None
+
+    def _tts_delegado(self, script: dict, bloques: list, start: float) -> Optional[dict]:
+        """Ruta SuperServer de TTS (opción A, sin DB en el worker).
+
+        Devuelve el mismo ``result`` que la ruta local, o ``None`` si la
+        delegación no aplica (modo local o motor no Kokoro). Si el proyecto está
+        encendido y la delegación falla, **aborta** la fase (no cae a local: evita
+        que el mismo audio se genere dos veces).
+        """
+        try:
+            from api.services import tts_bridge
+        except Exception:
+            return None
+        if tts_bridge.modo() != "superserver":
+            return None
+        if type(self.tts).__name__ != "KokoroTTSEngine":
+            logger.info("[%s] TTS engine no es Kokoro — no se delega", self.canal)
+            return None
+
+        from config.settings import AUDIO_DIR
+
+        voice_config = {
+            "kokoro_voice": getattr(self.tts, "kokoro_voice", None),
+            "block_speeds": getattr(self.tts, "block_speeds", None),
+            "pause_between_blocks": getattr(self.tts, "pause_between", None),
+            "unload_every_n_blocks": getattr(self.tts, "unload_every_n_blocks", 0),
+            "expressive": getattr(self.tts, "expressive", False),
+            "prosody_profiles": getattr(self.tts, "prosody_profiles", {}),
+            "tono_default": getattr(self.tts, "tono_default", "neutro"),
+            "max_segments": getattr(self.tts, "max_segments", 3),
+            "rate_base": getattr(self.tts, "rate_base", 0.9),
+        }
+        cta_obj = script.get("cta", {})
+        cta_text = ""
+        if isinstance(cta_obj, dict):
+            cta_text = (cta_obj.get("texto") or "").strip()
+
+        self._emit_progress(31, "tts", "Generando voz en la flota (Kokoro)...")
+        logger.info("[%s] TTS delegado al pool (%d bloques, cta=%s)",
+                    self.canal, len(bloques), bool(cta_text))
+        try:
+            res = tts_bridge.delegar(
+                bloques, voice_config,
+                video_id=script.get("video_id"),
+                out_dir=str(AUDIO_DIR),
+                cta_text=cta_text or None,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.error("[%s] TTS delegado al pool falló: %s", self.canal, e)
+            _safe_log_error(self.db, self.canal, "tts", f"pool: {e}")
+            raise
+
+        timestamps = res.get("timestamps") or []
+        audio_dur = int(timestamps[-1]["end_ms"] / 1000) if timestamps and "end_ms" in timestamps[-1] else len(timestamps)
+        self._emit_progress(38, "tts", f"Audio generado (flota): {audio_dur}s")
+        duration_ms = int((time.time() - start) * 1000)
+        self._timing["phases"]["tts"] = duration_ms
+        self.db.log_pipeline(self.canal, "tts", "success",
+                             f"Audio (pool): {res['audio_path']}",
+                             content_id=script.get("id"), duration_ms=duration_ms)
+        return {
+            "audio_path": res["audio_path"],
+            "timestamps_path": res["timestamps_path"],
+            "timestamps": timestamps,
+            "cta_audio_path": res.get("cta_audio_path"),
+        }
 
     def phase_media(self, script: dict, audio_data: Optional[dict] = None, job_id: int = None) -> Optional[list[dict]]:
         """Fetch media (video/image) for each enforceable scene range.
