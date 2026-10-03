@@ -67,7 +67,14 @@ def test_delegar_copia_artefactos(tmp_path, monkeypatch):
     assert len(spool) == 1
     req = json.loads(spool[0].read_text())
     assert req["project"] == "autotube" and req["process"] == "tts_kokoro"
-    assert req["params"]["requestFile"]
+    # Contrato con el adaptador: un dir por rid con `request.json` dentro.
+    req_file = req["params"]["requestFile"]
+    assert os.path.basename(req_file) == "request.json"
+    assert os.path.exists(req_file)
+    assert os.path.dirname(req_file) != str(tmp_path / "in")
+    payload = json.loads(open(req_file, encoding="utf-8").read())
+    assert payload["rid"] == req["id"]
+    assert payload["output_base"] == base
 
 
 def test_delegar_sin_resultado_ok_falla(tmp_path, monkeypatch):

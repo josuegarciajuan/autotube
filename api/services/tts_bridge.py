@@ -11,8 +11,10 @@ orquestador (`phase_tts`) recibe el mismo diccionario que en modo local y sigue
 actualizando la DB como siempre.
 
 Contrato:
-  - Escribe `<IN_DIR>/<rid>.json` (payload que el worker lee) y
-    `<SPOOL_DIR>/<rid>.json` (petición del pool).
+  - Escribe `<IN_DIR>/<rid>/request.json` (payload que el worker lee) y
+    `<SPOOL_DIR>/<rid>.json` (petición del pool). El directorio por petición es
+    el contrato real con el adaptador (`server/adapters/autotube.js`), que
+    empuja ese dir a `push/in` y ejecuta `--request /work/push/in/<name>`.
   - Espera `returns/autotube/<jobId>/result/estado.json` con `rid` coincidente.
   - Copia los artefactos a `out_dir` (AUDIO_DIR) y escribe el ACK.
 """
@@ -100,7 +102,12 @@ def delegar(bloques: list, voice_config: dict, video_id=None, out_dir: str = "."
         "rid": rid,
         "cta_text": cta_text or "",
     }
-    req_file = os.path.join(IN_DIR, f"{rid}.json")
+    # Un DIRECTORIO por petición: el adaptador empuja ese dir a push/in y el
+    # worker lee el `request.json` que contiene. Un fichero plano hacía que el
+    # adaptador empujara TODO el IN_DIR y el worker buscara un request.json
+    # inexistente (bug de contrato, jobs mursepju-…/musahgfx-…/musfqiya-…).
+    req_dir = os.path.join(IN_DIR, rid)
+    req_file = os.path.join(req_dir, "request.json")
     _write_json_atomic(req_file, payload)
 
     request = {
