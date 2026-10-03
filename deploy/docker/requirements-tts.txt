@@ -1,0 +1,10 @@
+# Runtime TTS Kokoro para el pool de SuperServer (worker sin DB).
+# Versiones alineadas con la casa (ver projects/autotube.md, inventario M1).
+kokoro==0.9.4
+soundfile==0.14.0
+misaki==0.9.4
+espeakng-loader==0.2.4
+pydub==0.25.1
+numpy==2.2.6
+scipy==1.15.3
+python-dotenv==1.0.1
