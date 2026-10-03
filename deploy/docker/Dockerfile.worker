@@ -35,3 +35,6 @@ RUN pip3 install --no-cache-dir \
 
 # ffmpeg del sistema: comprobación de versión en build (falla si no coincide).
 RUN ffmpeg -version | head -1
+
+# Workers horneados en la imagen (thin executors; el control plane manda el spec).
+COPY pipeline_dist/concat_worker.py /app/pipeline_dist/concat_worker.py

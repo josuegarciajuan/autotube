@@ -17,6 +17,9 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import subprocess
+import tempfile
+import uuid
 import zlib
 from pathlib import Path
 from typing import Optional
@@ -24,7 +27,7 @@ from typing import Optional
 from config import settings as settings_mod
 from orchestrator import PipelineOrchestrator
 from . import dsl_client
-from .model import sanitize_id
+from .model import atomic_write_json, sanitize_id
 from .scene_plan import (
     DuplicateAssetError,
     MissingAssetError,
@@ -72,9 +75,150 @@ class DistributedOrchestrator(PipelineOrchestrator):
                     "Se renderiza en local como hasta ahora.",
                     self.canal, type(exc).__name__, exc,
                 )
+        if _env_flag("AUTOTUBE_DIST_CONCAT", False):
+            self._install_dist_concat()
         return super().phase_video(script, audio_data, media_assets, job_id=job_id)
 
+    # ── Concat de batches distribuido con fallback local ────────────────────
+    def _install_dist_concat(self) -> None:
+        """Envuelve ``video_editor._concat_body_batched`` para repartir batches.
+
+        La salida local se mantiene idéntica: el nodo ejecuta EXACTAMENTE el
+        mismo comando ffmpeg (mismo filter_complex/encoding) en el contenedor
+        hermético; ante cualquier fallo, cae al método local original.
+        """
+        ve = self.video_editor
+        if getattr(ve, "_dist_concat_installed", False):
+            return
+        orig = ve._concat_body_batched
+
+        def _wrapped(segment_paths, block_ranges, output_path, batch_size=25):
+            try:
+                if self._dist_concat_body_batched(
+                    segment_paths, block_ranges, output_path, batch_size,
+                ):
+                    return output_path
+            except Exception as exc:  # noqa: BLE001 — fallback local
+                logger.warning(
+                    "[%s] Concat distribuido no aplicable (%s: %s); local.",
+                    self.canal, type(exc).__name__, exc,
+                )
+            return orig(segment_paths, block_ranges, output_path, batch_size)
+
+        ve._concat_body_batched = _wrapped
+        ve._dist_concat_installed = True
+
     # ── Implementación ──────────────────────────────────────────────────────
+    def _dist_concat_body_batched(self, segment_paths, block_ranges,
+                                  output_path, batch_size=25) -> bool:
+        """Reparte el concat por batches a la flota. True si lo hizo todo."""
+        n = len(segment_paths)
+        if n <= batch_size:
+            return False  # listas pequeñas: local (no merece repartir)
+        ve = self.video_editor
+        canal = ve.canal
+        film = float(canal.get("FILM_GRAIN_OPACITY", 0) or 0)
+        vig = float(canal.get("VIGNETTE_INTENSITY", 0) or 0)
+        preset = str(canal.get("FFMPEG_PRESET", settings_mod.FFMPEG_PRESET_DEFAULT))
+
+        staging = Path(tempfile.mkdtemp(prefix="autotube_concat_dist_"))
+        batches = []
+        for bi, start in enumerate(range(0, n, batch_size)):
+            segs = segment_paths[start:start + batch_size]
+            bdir = staging / f"batch_{start:04d}"
+            bdir.mkdir(parents=True, exist_ok=True)
+            names = []
+            for j, sp in enumerate(segs):
+                name = f"seg_{j:04d}{Path(sp).suffix or '.mp4'}"
+                dst = bdir / name
+                try:
+                    os.link(sp, dst)
+                except OSError:
+                    shutil.copy2(sp, dst)
+                names.append(name)
+            filt, label = ve._build_duration_preserving_concat_filter(
+                len(names), film_grain_opacity=film, vignette_intensity=vig,
+            )
+            spec = {
+                "inputs": names, "filter_complex": filt, "map_label": label,
+                "codec": settings_mod.VIDEO_CODEC, "preset": preset,
+                "bitrate": settings_mod.VIDEO_BITRATE, "pix_fmt": "yuv420p",
+                "output": f"batch_{start:04d}.mp4",
+                "timeout": max(900, len(names) * 15),
+            }
+            atomic_write_json(str(bdir / "spec.json"), spec)
+            batches.append({"key": f"b{bi:04d}", "dir": bdir.name,
+                            "output": spec["output"]})
+
+        nonce = os.environ.get("AUTOTUBE_DIST_EXEC_NONCE", "").strip()
+        base = f"atube-concat-{self.canal}-{self.db_video_id or 'x'}"
+        exec_id = sanitize_id(
+            f"{base}-{nonce}" if nonce else f"{base}-{uuid.uuid4().hex[:8]}"
+        )
+        tags = [t.strip() for t in
+                os.environ.get("AUTOTUBE_ASSEMBLE_TAGS", "render").split(",")
+                if t.strip()]
+        params = {
+            "stagingDir": str(staging),
+            "batches": batches,
+            "image": os.environ.get("AUTOTUBE_WORKER_IMAGE", "autotube-worker:1"),
+            "worker": "pipeline_dist/concat_worker.py",
+            "requiresTags": tags,
+            "memMb": int(os.environ.get("AUTOTUBE_DIST_MEM_MB", "2048") or 2048),
+        }
+        self._emit_progress(70, "video", f"Concat distribuido: {len(batches)} batches")
+        eid = dsl_client.submit(
+            "autotube-concat-batch", params, exec_id=exec_id,
+            label=f"autotube concat {self.canal}",
+            max_inflight=min(4, len(batches)), max_attempts=2,
+            max_units=len(batches) + 8, req={"cores": 4, "memMb": 2048},
+        )
+        logger.info("[%s] Concat distribuido exec=%s (%d batches)",
+                    self.canal, eid, len(batches))
+        summary = dsl_client.wait(
+            eid,
+            timeout=float(os.environ.get("AUTOTUBE_DIST_TIMEOUT_SEC", "1800")) + 120,
+            poll=2.0,
+        )
+        if summary.get("status") != "done":
+            raise ScenePlanError(
+                f"concat distribuido {summary.get('status')}: {summary.get('error')}"
+            )
+        items = (summary.get("result") or {}).get("batches") or []
+        if len(items) != len(batches):
+            raise ScenePlanError(
+                f"concat devolvió {len(items)} batches, esperaba {len(batches)}"
+            )
+        merged = staging / "merged"
+        merged.mkdir(parents=True, exist_ok=True)
+        order = []
+        for it in items:
+            out_dir, fn = it.get("outDir"), it.get("filename")
+            if not out_dir or not fn:
+                raise ScenePlanError("batch sin outDir/filename")
+            dst = merged / str(fn)
+            shutil.copy2(os.path.join(str(out_dir), str(fn)), dst)
+            order.append(dst)
+
+        # Unión final LOCAL con demuxer (-c copy): idéntica a la local.
+        concat_list = staging / "concat_list.txt"
+        with open(concat_list, "w", encoding="utf-8") as fh:
+            for p in order:
+                fh.write(f"file '{os.path.abspath(p)}'\n")
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0",
+             "-i", str(concat_list), "-c", "copy", "-movflags", "+faststart",
+             str(output_path)],
+            capture_output=True, text=True, timeout=300,
+        )
+        if r.returncode != 0:
+            raise ScenePlanError(
+                f"unión de batches falló (rc={r.returncode}): {(r.stderr or '')[-300:]}"
+            )
+        logger.info("[%s] Concat distribuido OK: %d batches → %s",
+                    self.canal, len(batches), output_path)
+        return True
+
     def _pre_render_scenes(self, script: dict, audio_data: dict,
                            media_assets: list, job_id: Optional[int]) -> bool:
         scene_ranges = getattr(self, "_last_scene_ranges", None)
