@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api, API_TIME_ZONE } from '../lib/api'
-import { useDashboard, useRecentEvents, useQuotaStatus } from '../hooks/useQueries'
-import { Users, Eye, Heart, Clock, Cog, Wrench, Loader2, RefreshCw, X, CheckCircle2, AlertCircle, SkipForward, Zap, Share2, BarChart2, MousePointerClick } from 'lucide-react'
+import { useDashboard, useRecentEvents, useQuotaStatus, useGenerationPause } from '../hooks/useQueries'
+import { Users, Eye, Heart, Clock, Cog, Wrench, Loader2, RefreshCw, X, CheckCircle2, AlertCircle, SkipForward, Zap, Share2, BarChart2, MousePointerClick, PauseCircle, PlayCircle } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useChannelFilter } from '../context/ChannelFilterContext'
 import { useEasterEgg } from '../context/EasterEggContext'
@@ -78,6 +78,14 @@ export default function Dashboard() {
   // YouTube API quota status (for disabling stats collection button)
   const { data: quotaStatus } = useQuotaStatus()
   const quotaExhausted = quotaStatus?.exhausted ?? false
+
+  // Pausa de generación (solo creación; las subidas siguen siempre activas)
+  const { data: genPause, refetch: refetchGenPause } = useGenerationPause()
+  const [togglingGen, setTogglingGen] = useState(false)
+  const [confirmResume, setConfirmResume] = useState(false)
+  const [genPauseMsg, setGenPauseMsg] = useState<string | null>(null)
+  const [genPauseError, setGenPauseError] = useState(false)
+  const generationPaused = genPause?.active ?? false
 
   const [deepDiveChannel, setDeepDiveChannel] = useState<any>(null)
 
@@ -235,6 +243,30 @@ export default function Dashboard() {
       setStabilizeError(e.message || 'Error desconocido al estabilizar')
     } finally {
       setStabilizing(false)
+    }
+  }
+
+  async function handleToggleGeneration() {
+    if (togglingGen) return
+    // Reanudar es sensible (puede reanudar la fábrica): confirmación inline.
+    if (generationPaused && !confirmResume) {
+      setConfirmResume(true)
+      return
+    }
+    setTogglingGen(true)
+    setConfirmResume(false)
+    setGenPauseError(false)
+    try {
+      const res = await api.setGenerationPause(!generationPaused)
+      setGenPauseMsg(res?.message || (generationPaused ? 'Generación reanudada' : 'Generación pausada'))
+      await refetchGenPause()
+      queryClient.invalidateQueries({ queryKey: ['generation-pause'] })
+      refetchDashboard()
+    } catch (e: any) {
+      setGenPauseError(true)
+      setGenPauseMsg(`Error: ${e.message || 'desconocido'}`)
+    } finally {
+      setTogglingGen(false)
     }
   }
 
@@ -444,6 +476,30 @@ export default function Dashboard() {
 
       {/* Toolbar: Refresh Dashboard + Refresh Stats + Stabilize */}
       <div className="flex items-center justify-end gap-2">
+        {/* Interruptor de GENERACIÓN (long-form + shorts). Las subidas no se tocan. */}
+        <button
+          onClick={handleToggleGeneration}
+          disabled={togglingGen}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border transition-all text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed ${
+            generationPaused
+              ? 'border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20'
+              : 'border-green-500/20 bg-green-500/5 text-green-400 hover:bg-green-500/10 hover:border-green-500/40'
+          }`}
+          title={generationPaused
+            ? 'Reanudar la creación de vídeos y shorts (las subidas ya siguen activas)'
+            : 'Pausar la creación de vídeos y shorts (las subidas siguen activas)'}
+        >
+          {togglingGen
+            ? <Loader2 size={13} className="animate-spin" />
+            : generationPaused ? <PlayCircle size={13} /> : <PauseCircle size={13} />}
+          <span>
+            {togglingGen
+              ? 'Aplicando...'
+              : generationPaused
+                ? (confirmResume ? '⚠ Confirmar reanudar' : 'Reanudar generación')
+                : 'Pausar generación'}
+          </span>
+        </button>
         <span className="text-[10px] text-gray-600 tabular-nums">
           {dataUpdatedAt ? formatTimeAgo(dataUpdatedAt) : ''}
         </span>
@@ -493,6 +549,24 @@ export default function Dashboard() {
           <span>{recalculatingSlots ? 'Calculando...' : 'Optimizar franjas'}</span>
         </button>
       </div>
+
+      {/* Estado de la pausa de generación */}
+      {generationPaused && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 flex items-center gap-2 text-xs text-amber-300 animate-fade-in">
+          <PauseCircle size={14} />
+          <span className="font-medium">Generación pausada</span>
+          <span className="text-amber-400/80">— la creación de vídeos y shorts está detenida. Las subidas siguen activas.</span>
+        </div>
+      )}
+      {genPauseMsg && !generationPaused && (
+        <div className={`rounded-lg border px-3 py-2 flex items-center gap-2 text-xs animate-fade-in ${
+          genPauseError ? 'border-amber-500/20 bg-amber-500/5 text-amber-400'
+                        : 'border-green-500/20 bg-green-500/5 text-green-400'
+        }`}>
+          {genPauseError ? <AlertCircle size={14} /> : <CheckCircle2 size={14} />}
+          <span>{genPauseMsg}</span>
+        </div>
+      )}
 
       {/* Stats collection feedback */}
       {collectStatsMsg && (

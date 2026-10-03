@@ -33,6 +33,17 @@ export function useQuotaStatus() {
   })
 }
 
+// ── Pausa de generación (solo creación; subidas siempre activas) ──
+export function useGenerationPause() {
+  return useQuery({
+    queryKey: ['generation-pause'],
+    queryFn: () => api.getGenerationPause(),
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+  })
+}
+
 // ── Reanudación gradual post-strike (poll every 60s) ──
 export function useResumeStatus(channelId?: number) {
   return useQuery({

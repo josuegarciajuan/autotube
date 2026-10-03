@@ -316,6 +316,105 @@ def scheduler_resume():
     return {"ok": True, "scheduler_paused": False, "message": "Scheduler reanudado. Subidas activas."}
 
 
+# ── Generación pausada (generation_hold) — solo creación, subidas activas ──
+# A diferencia de /system/scheduler-pause (pausa TODO, incluidas subidas), este
+# toggle pausa ÚNICAMENTE la generación (long-form + shorts) vía el servicio
+# `generation_hold`: 2 filas centinela phase='hold' que ocupan los guards de
+# concurrencia. La subida/publicación sigue siempre activa. Sobrevive a
+# reinicios (reconcile_on_startup) y la API refresca el hold por sí misma.
+from pydantic import BaseModel as _BaseModel
+
+
+class _GenerationPauseUpdate(_BaseModel):
+    enabled: bool
+    reason: str | None = None
+
+
+def _generation_pause_status(db) -> dict:
+    """Snapshot del estado de la pausa de generación (solo lectura)."""
+    from api.services import generation_hold as gh
+    try:
+        raw = db.get_system_state(gh.STATE_KEY)
+        published = json.loads(raw) if raw else {}
+    except Exception:
+        published = {}
+    return {
+        "active": gh.is_generation_hold_active(db),
+        "intent": gh.hold_intent(db),
+        "reason": db.get_system_state("generation_hold_reason")
+                  or published.get("reason") or "",
+        "sentinels": published.get("sentinels", []),
+        "blocks": {"longform": True, "shorts": True},
+        "short_drain_mode": db.get_system_state("short_drain_mode") == "true",
+        "ttl_hours": gh.DEFAULT_TTL_DAYS * 24,
+        "updated_at": published.get("updated_at"),
+    }
+
+
+@router.get("/system/generation-pause")
+def get_generation_pause():
+    """Estado de la pausa de generación (solo creación; subidas intactas)."""
+    db = get_db()
+    status = _generation_pause_status(db)
+    status["ok"] = True
+    return status
+
+
+@router.post("/system/generation-pause")
+def set_generation_pause(body: _GenerationPauseUpdate):
+    """Pausar/reanudar la GENERACIÓN (long-form + shorts) sin tocar las subidas.
+
+    - enabled=true  → crea/refresca los centinelas de hold (pausa generación).
+    - enabled=false → libera el hold y sale del modo drenaje de shorts.
+    """
+    from fastapi import HTTPException
+    db = get_db()
+    from api.services import generation_hold as gh
+
+    if body.enabled:
+        reason = (body.reason or "pausa manual desde el panel").strip()
+        gh.set_hold_intent(db, True, reason=reason)
+        result = gh.ensure_hold(db, reason=reason)
+        try:
+            from api.services.lifecycle_monitor import log_event as _le
+            _le(db, entity_type="system", entity_id=0, channel_id=None,
+                event="generation_hold", status="info",
+                message=f"Generación pausada desde el panel: {reason}")
+        except Exception:
+            pass
+        logger.warning("Generación pausada vía panel (centinelas=%s)", result)
+        message = "Generación pausada. Las subidas siguen activas."
+    else:
+        try:
+            gh.release_hold(db, gh.RELEASE_CONFIRM, actor="panel")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # Al reanudar, salir del modo drenaje de shorts (decisión del operador).
+        db.set_system_state("short_drain_mode", "false")
+        try:
+            with db._connect() as conn:
+                conn.execute(
+                    "UPDATE pipeline_alerts SET resolved=1, resolved_at=datetime('now') "
+                    "WHERE alert_type='generation_hold' AND resolved=0"
+                )
+                conn.commit()
+        except Exception:
+            pass
+        try:
+            from api.services.lifecycle_monitor import log_event as _le
+            _le(db, entity_type="system", entity_id=0, channel_id=None,
+                event="generation_resume", status="info",
+                message="Generación reanudada desde el panel")
+        except Exception:
+            pass
+        logger.warning("Generación reanudada vía panel")
+        message = "Generación reanudada. Las subidas siguen activas."
+
+    status = _generation_pause_status(db)
+    status.update({"ok": True, "message": message})
+    return status
+
+
 @router.get("/system/quota-status")
 def quota_status():
     """Estado actual de la cuota YouTube Data API v3.

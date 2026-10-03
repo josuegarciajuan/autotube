@@ -532,6 +532,31 @@ la subida libera).
   (NO el perfil de pacing). Tras los strikes quedó en 2; el techo `normal` del
   perfil es 3. Alinear a 3 para drenar a 3/canal/día (12/día global).
 
+### ⏸️ Pausa de generación desde el panel (`generation_hold`) — oct 2026
+
+Botón en el Dashboard que **enciende/apaga la CREACIÓN** (long-form + shorts) sin
+tocar las subidas. Es el interruptor operativo para liberar potencia de cálculo.
+
+- **Servicio:** `api/services/generation_hold.py`. La pausa se representa con 2
+  filas centinela en `generation_jobs` (`phase='hold'`, actions `generate_only` y
+  `generate_native_short`) que ocupan los guards de concurrencia → bloquean
+  long-form y shorts respectivamente. **Nunca** bloquean subidas
+  (`_process_upload_slots` y la válvula de shorts no consultan el hold).
+- **Intención persistida:** `system_state["generation_hold"]` (sobrevive a
+  reinicios vía `reconcile_on_startup` en `generation_service.py`). Estado
+  publicado en `system_state["generation_hold_state"]` (lo lee el panel).
+- **Endpoints:** `GET /api/system/generation-pause` (estado) y
+  `POST /api/system/generation-pause` `{"enabled": bool, "reason": str?}`.
+  - `enabled=true` → `set_hold_intent` + `ensure_hold` (crea/refresca centinelas).
+  - `enabled=false` → `release_hold(confirm=REANUDAR_GENERACION)` y **pone
+    `short_drain_mode=false`** (al reanudar se sale del modo drenaje).
+- **Refresco interno:** loop `generation_hold_refresh` (`api/main.py`, cada 6h,
+  0 cuota) re-asegura el hold mientras la intención siga activa. Sustituye al
+  timer systemd externo `autotube-hold-refresh` (retirado).
+- **Distinto de `scheduler_paused`:** ese pausa TODO (incluidas subidas); el hold
+  pausa solo generación. NO usar `shorts_paused` para esto (frenaría también la
+  válvula de subida de shorts).
+
 ## 📌 Planificación: públicos vs. subidas (regla dura, sep 2026)
 > **Spec completo:** `specs/planificacion-publicos-subidas.md`. Cualquier cambio
 > futuro en planificación/subida/publicación/reprogramación DEBE respetarlo.
