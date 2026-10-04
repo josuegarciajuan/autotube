@@ -111,6 +111,19 @@ class DistributedOrchestrator(PipelineOrchestrator):
                     out[k] = list(v)
         return out
 
+    @staticmethod
+    def _json_safe(obj):
+        """Convierte recursivamente a tipos JSON-serializables (Path→str, etc.)."""
+        if isinstance(obj, dict):
+            return {str(k): DistributedOrchestrator._json_safe(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple, set)):
+            return [DistributedOrchestrator._json_safe(v) for v in obj]
+        if isinstance(obj, Path):
+            return str(obj)
+        if isinstance(obj, (str, int, float, bool)) or obj is None:
+            return obj
+        return str(obj)
+
     def _pre_render_scenes_v2(self, script, audio_data, media_assets, job_id) -> bool:
         scene_ranges = getattr(self, "_last_scene_ranges", None)
         if not scene_ranges or not media_assets or len(scene_ranges) != len(media_assets):
@@ -145,7 +158,9 @@ class DistributedOrchestrator(PipelineOrchestrator):
                 shutil.copy2(ap, d / base)
             manifest = {
                 "config": cfg_json, "seed_base": seed_base, "index": i,
-                "block_range": br, "asset": asset, "plan": plan,
+                "block_range": self._json_safe(br),
+                "asset": self._json_safe(asset),
+                "plan": self._json_safe(plan),
             }
             atomic_write_json(str(d / "manifest.json"), manifest)
             scenes_params.append({"key": f"{i:04d}", "dir": d.name,

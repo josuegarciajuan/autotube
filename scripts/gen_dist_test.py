@@ -3,8 +3,7 @@
 
 Lanza UN run distribuido (render v2 + concat en la flota) y conserva el vídeo
 resultante para validación manual, con su id interno, nodos participantes y gate.
-No compara con local: el objetivo es verificar que el pipeline distribuido genera
-el vídeo correctamente.
+Siempre escribe el informe (incluso si algo falla).
 
 Artefactos:
   /root/autotube_mini_test/final/<video>.mp4   (vídeo generado, SE CONSERVA)
@@ -36,6 +35,7 @@ RUN_ID = os.environ.get("GEN_RUN_ID") or ("gen-dist-" + time.strftime("%Y%m%d-%H
 ENV = dict(os.environ)
 ENV["AUTOTUBE_CONCAT_BATCH_SIZE"] = os.environ.get("AUTOTUBE_CONCAT_BATCH_SIZE", "6")
 ENV["AUTOTUBE_PRODUCTION_DB"] = os.environ.get("AUTOTUBE_PRODUCTION_DB", "/root/autotube/autotube.db")
+ENV["AUTOTUBE_DIST_TIMEOUT_SEC"] = os.environ.get("AUTOTUBE_DIST_TIMEOUT_SEC", "900")
 ENV["PYTHONUNBUFFERED"] = "1"
 
 
@@ -47,19 +47,9 @@ def _sha(p: Path) -> str:
     return h.hexdigest()
 
 
-def main() -> int:
-    OUT.mkdir(parents=True, exist_ok=True)
-    FINAL.mkdir(parents=True, exist_ok=True)
-    rep = [f"mini test distribuido @ {time.strftime('%Y-%m-%d %H:%M:%S')}",
-           f"RUN_ID={RUN_ID}"]
-
-    args = [sys.executable, str(RUNNER), "--canal", "canal2", "--mode", "quarter",
-            "--skip-scrape", "--media-fast", "--run-id", RUN_ID]
-    t0 = time.time()
-    with open(OUT / "run.log", "w", encoding="utf-8") as fh:
-        rc = subprocess.run(args, cwd=str(WT), env=ENV, stdout=fh, stderr=subprocess.STDOUT).returncode
+def _collect(rep: list[str], rc, dt: float) -> None:
     rep.append(f"rc={rc}")
-    rep.append(f"duracion_run_sec={time.time() - t0:.0f}")
+    rep.append(f"duracion_run_sec={dt:.0f}")
 
     vp = None
     tj = WT / "output" / "dist_test" / RUN_ID / "timings.json"
@@ -102,7 +92,7 @@ def main() -> int:
             try:
                 d = json.loads(Path(f).read_text(encoding="utf-8"))
                 rep.append(f"{kind}: status={d.get('status')} perNode={d.get('perNode')} "
-                           f"stats={d.get('stats')}")
+                           f"stats={d.get('stats')} error={str(d.get('error'))[:160]}")
             except Exception as exc:  # noqa: BLE001
                 rep.append(f"{kind}_err={exc}")
 
@@ -119,9 +109,28 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001
         rep.append(f"gate_error={exc}")
 
-    text = "\n".join(rep) + "\n"
-    (OUT / "final_video.txt").write_text(text, encoding="utf-8")
-    print(text)
+
+def main() -> int:
+    OUT.mkdir(parents=True, exist_ok=True)
+    FINAL.mkdir(parents=True, exist_ok=True)
+    rep = [f"mini test distribuido @ {time.strftime('%Y-%m-%d %H:%M:%S')}", f"RUN_ID={RUN_ID}"]
+    rc = 99
+    dt = 0.0
+    try:
+        args = [sys.executable, str(RUNNER), "--canal", "canal2", "--mode", "quarter",
+                "--skip-scrape", "--media-fast", "--run-id", RUN_ID]
+        t0 = time.time()
+        with open(OUT / "run.log", "w", encoding="utf-8") as fh:
+            rc = subprocess.run(args, cwd=str(WT), env=ENV,
+                                stdout=fh, stderr=subprocess.STDOUT).returncode
+        dt = time.time() - t0
+        _collect(rep, rc, dt)
+    except Exception as exc:  # noqa: BLE001
+        rep.append(f"EXCEPTION_runner={exc!r}")
+    finally:
+        text = "\n".join(rep) + "\n"
+        (OUT / "final_video.txt").write_text(text, encoding="utf-8")
+        print(text)
     return 0 if rc == 0 else 1
 
 
