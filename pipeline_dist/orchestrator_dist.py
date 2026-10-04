@@ -56,12 +56,14 @@ class DistributedOrchestrator(PipelineOrchestrator):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Parches de estabilidad del LLM, aditivos y solo en este proceso.
-        try:
-            from .llm_patch import apply_llm_stability_patches
-            apply_llm_stability_patches()
-        except Exception as exc:  # nunca impedir la construcción
-            logger.warning("[%s] No se pudieron aplicar parches LLM: %s", self.canal, exc)
+        # Parches de estabilidad del LLM: opt-in (por defecto OFF en producción
+        # para no alterar la generación de guion; el piloto los activa).
+        if _env_flag("AUTOTUBE_DIST_LLM_PATCH", False):
+            try:
+                from .llm_patch import apply_llm_stability_patches
+                apply_llm_stability_patches()
+            except Exception as exc:  # nunca impedir la construcción
+                logger.warning("[%s] No se pudieron aplicar parches LLM: %s", self.canal, exc)
 
     # ── Fase 4 sustituida: render distribuido con fallback local ────────────
     def phase_video(self, script: dict, audio_data: dict,

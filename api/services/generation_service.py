@@ -1512,7 +1512,7 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
     metadata = checkpoint.get("metadata")
     
     try:
-        from orchestrator import PipelineOrchestrator
+        from orchestrator import make_orchestrator as PipelineOrchestrator
         
         loop = asyncio.get_running_loop()
         
@@ -2338,7 +2338,7 @@ async def start_upload_job(job_id: int, video_id: int, force_immediate: bool = F
         await _broadcast_progress(job_id, 10, "upload", "Autenticando con YouTube...",
                                    video_id=video_id, detail="Verificando credenciales OAuth")
         
-        from orchestrator import PipelineOrchestrator
+        from orchestrator import make_orchestrator as PipelineOrchestrator
         loop = asyncio.get_running_loop()
 
         def _progress_cb(percent: int, phase: str, message: str, **kwargs):
@@ -2588,7 +2588,7 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
         await _broadcast_progress(job_id, 10, "upload", "Autenticando con YouTube...",
                                    video_id=video_id)
 
-        from orchestrator import PipelineOrchestrator
+        from orchestrator import make_orchestrator as PipelineOrchestrator
         loop = asyncio.get_running_loop()
 
         def _progress_cb(percent: int, phase: str, message: str, **kwargs):

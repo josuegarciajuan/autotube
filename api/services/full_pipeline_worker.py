@@ -994,7 +994,7 @@ def run_job(
     orch = None
 
     try:
-        from orchestrator import PipelineOrchestrator
+        from orchestrator import make_orchestrator as PipelineOrchestrator
 
         # ── Detect marathon mode from video record ──
         is_marathon = False

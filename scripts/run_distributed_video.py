@@ -322,6 +322,8 @@ def main() -> int:
     # Nonce de ejecución: evita que el engine reutilice un resultado previo
     # (p. ej. un `failed` cacheado) con el exec-id determinista del render.
     os.environ["AUTOTUBE_DIST_EXEC_NONCE"] = run_id
+    # El piloto sí usa los parches de estabilidad de guion (opt-in).
+    os.environ.setdefault("AUTOTUBE_DIST_LLM_PATCH", "1")
 
     # Override opcional del tamaño de batch de concat (para que un mini vídeo con
     # pocas escenas ejercite el concat distribuido). Mismo valor local y nodo.
