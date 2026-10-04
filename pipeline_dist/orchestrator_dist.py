@@ -15,6 +15,7 @@ Garantías:
 from __future__ import annotations
 
 import logging
+import json
 import os
 import shutil
 import subprocess
@@ -28,6 +29,7 @@ from config import settings as settings_mod
 from orchestrator import PipelineOrchestrator
 from . import dsl_client
 from .model import atomic_write_json, sanitize_id
+from .render_plan import build_scene_plans
 from .scene_plan import (
     DuplicateAssetError,
     MissingAssetError,
@@ -64,7 +66,18 @@ class DistributedOrchestrator(PipelineOrchestrator):
     # ── Fase 4 sustituida: render distribuido con fallback local ────────────
     def phase_video(self, script: dict, audio_data: dict,
                     media_assets: list, job_id: int = None) -> Optional[dict]:
-        if _env_flag("AUTOTUBE_DIST_RENDER", False):
+        if _env_flag("AUTOTUBE_DIST_RENDER_V2", False):
+            try:
+                if self._pre_render_scenes_v2(script, audio_data, media_assets, job_id):
+                    logger.info("[%s] Render v2 distribuido completo; ensamblado local.",
+                                self.canal)
+            except Exception as exc:  # noqa: BLE001 — all-or-nothing => local
+                logger.warning(
+                    "[%s] Render v2 distribuido no aplicable (%s: %s). "
+                    "Render local completo (identidad garantizada).",
+                    self.canal, type(exc).__name__, exc,
+                )
+        elif _env_flag("AUTOTUBE_DIST_RENDER", False):
             try:
                 if self._pre_render_scenes(script, audio_data, media_assets, job_id):
                     logger.info("[%s] Render distribuido completo; ensamblado local.",
@@ -78,6 +91,126 @@ class DistributedOrchestrator(PipelineOrchestrator):
         if _env_flag("AUTOTUBE_DIST_CONCAT", False):
             self._install_dist_concat()
         return super().phase_video(script, audio_data, media_assets, job_id=job_id)
+
+    # ── Render v2: mismo código, estado congelado, todo-o-nada ──────────────
+    @staticmethod
+    def _json_safe_config(config) -> Optional[dict]:
+        try:
+            raw = dict(vars(config)) if hasattr(config, "__dict__") else dict(config)
+        except Exception:  # noqa: BLE001
+            return None
+        out = {}
+        for k, v in raw.items():
+            if k.startswith("_") or callable(v):
+                continue
+            try:
+                json.dumps(v)
+                out[k] = v
+            except TypeError:
+                if isinstance(v, (tuple, set)):
+                    out[k] = list(v)
+        return out
+
+    def _pre_render_scenes_v2(self, script, audio_data, media_assets, job_id) -> bool:
+        scene_ranges = getattr(self, "_last_scene_ranges", None)
+        if not scene_ranges or not media_assets or len(scene_ranges) != len(media_assets):
+            raise ScenePlanError("scene_ranges/media_assets no alineados")
+        ve = self.video_editor
+        seed_base = int(self.db_video_id or job_id or 0)
+        ve._video_seed = seed_base
+        plans = build_scene_plans(ve, scene_ranges, media_assets)
+        if not all(p.get("reproducible") for p in plans):
+            raise ScenePlanError("alguna escena no reproducible → render local completo")
+
+        seg_dir = (Path(settings_mod.VIDEOS_DIR) / "segments" /
+                   str(self.db_video_id or job_id or "adhoc")).resolve()
+        seg_dir.mkdir(parents=True, exist_ok=True)
+        staging = seg_dir / "_dist_staging_v2"
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True, exist_ok=True)
+
+        cfg_json = self._json_safe_config(self.config)
+        scenes_params = []
+        for i, (br, asset, plan) in enumerate(zip(scene_ranges, media_assets, plans)):
+            ap = str(asset.get("path") or "")
+            if not ap or not Path(ap).exists():
+                raise ScenePlanError(f"asset inexistente en escena {i}")
+            d = staging / f"scene_{i:04d}"
+            d.mkdir(parents=True, exist_ok=True)
+            base = Path(ap).name
+            try:
+                os.link(ap, d / base)
+            except OSError:
+                shutil.copy2(ap, d / base)
+            manifest = {
+                "config": cfg_json, "seed_base": seed_base, "index": i,
+                "block_range": br, "asset": asset, "plan": plan,
+            }
+            atomic_write_json(str(d / "manifest.json"), manifest)
+            scenes_params.append({"key": f"{i:04d}", "dir": d.name,
+                                  "manifest": "manifest.json", "index": i})
+
+        nonce = os.environ.get("AUTOTUBE_DIST_EXEC_NONCE", "").strip()
+        base_id = f"atube-render2-{self.canal}-{self.db_video_id or 'x'}"
+        exec_id = sanitize_id(f"{base_id}-{nonce}" if nonce else f"{base_id}-{uuid.uuid4().hex[:8]}")
+        tags = [t.strip() for t in
+                os.environ.get("AUTOTUBE_RENDER_TAGS", "render").split(",") if t.strip()]
+        params = {
+            "stagingDir": str(staging),
+            "scenes": scenes_params,
+            "image": os.environ.get("AUTOTUBE_WORKER_IMAGE", "autotube-worker:1"),
+            "worker": "pipeline_dist/render_worker.py",
+            "threads": int(os.environ.get("AUTOTUBE_DIST_THREADS", "2") or 2),
+            "memMb": int(os.environ.get("AUTOTUBE_DIST_MEM_MB", "2048") or 2048),
+            "requiresTags": tags,
+        }
+        self._emit_progress(38, "video", f"Render v2 distribuido: {len(scenes_params)} escenas")
+        eid = dsl_client.submit(
+            "autotube-render-scene", params, exec_id=exec_id,
+            label=f"autotube render v2 {self.canal}",
+            max_inflight=int(os.environ.get("AUTOTUBE_DIST_MAX_INFLIGHT", "0") or 0) or None,
+            max_attempts=3, max_units=len(scenes_params) + 16,
+            req={"cores": 2, "memMb": 2048},
+        )
+        logger.info("[%s] Render v2 exec=%s (%d escenas)",
+                    self.canal, eid, len(scenes_params))
+        summary = dsl_client.wait(
+            eid,
+            timeout=float(os.environ.get("AUTOTUBE_DIST_TIMEOUT_SEC", "1800")) + 120,
+            poll=2.0,
+        )
+        if summary.get("status") != "done":
+            raise ScenePlanError(
+                f"render v2 {summary.get('status')}: {summary.get('error')}"
+            )
+        scenes = dsl_client.accepted_scenes(summary)
+        if len(scenes) != len(scenes_params):
+            raise ScenePlanError(
+                f"render v2 devolvió {len(scenes)} escenas, esperaba {len(scenes_params)}"
+            )
+        placed = []
+        try:
+            for entry in scenes:
+                key = str(entry.get("key"))
+                out_dir, fn = entry.get("outDir"), entry.get("filename") or "scene.mp4"
+                if not out_dir:
+                    raise ScenePlanError(f"escena {key} sin outDir")
+                src = os.path.join(str(out_dir), str(fn))
+                if not os.path.exists(src) or os.path.getsize(src) < 1024:
+                    raise ScenePlanError(f"escena {key} inválida o vacía")
+                dest = seg_dir / f"scene_{int(key):04d}.mp4"
+                tmp = dest.with_suffix(".mp4.part")
+                shutil.copy2(src, tmp)
+                os.replace(tmp, dest)
+                placed.append(dest)
+        except Exception:
+            for p in placed:
+                p.unlink(missing_ok=True)
+            raise
+        logger.info("[%s] Render v2 OK: %d segmentos en %s",
+                    self.canal, len(placed), seg_dir)
+        return True
 
     # ── Concat de batches distribuido con fallback local ────────────────────
     def _install_dist_concat(self) -> None:
