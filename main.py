@@ -55,7 +55,7 @@ def setup_logging():
 
 def cmd_run(args):
     """Run the full pipeline once."""
-    from orchestrator import PipelineOrchestrator
+    from orchestrator import make_orchestrator as PipelineOrchestrator
     from database.db_extended import ExtendedDatabase
 
     canal = args.canal or ACTIVE_CHANNELS[0]
@@ -90,7 +90,7 @@ def cmd_run(args):
 
 def cmd_serve(args):
     """Run the pipeline in scheduled (daemon) mode."""
-    from orchestrator import PipelineOrchestrator
+    from orchestrator import make_orchestrator as PipelineOrchestrator
 
     canal = args.canal or ACTIVE_CHANNELS[0]
     orch = PipelineOrchestrator(canal=canal)
@@ -115,7 +115,7 @@ def cmd_serve(args):
 
 def cmd_scrape(args):
     """Scrape content only and save to database."""
-    from orchestrator import PipelineOrchestrator
+    from orchestrator import make_orchestrator as PipelineOrchestrator
 
     canal = args.canal or ACTIVE_CHANNELS[0]
     orch = PipelineOrchestrator(canal=canal)
@@ -128,7 +128,7 @@ def cmd_scrape(args):
 
 def cmd_generate(args):
     """Generate scripts from existing scraped content."""
-    from orchestrator import PipelineOrchestrator
+    from orchestrator import make_orchestrator as PipelineOrchestrator
 
     canal = args.canal or ACTIVE_CHANNELS[0]
     orch = PipelineOrchestrator(canal=canal)
@@ -143,7 +143,7 @@ def cmd_generate(args):
 
 def cmd_upload(args):
     """Upload a video file to YouTube."""
-    from orchestrator import PipelineOrchestrator
+    from orchestrator import make_orchestrator as PipelineOrchestrator
 
     canal = args.canal or ACTIVE_CHANNELS[0]
     orch = PipelineOrchestrator(canal=canal)

@@ -25,6 +25,7 @@ from config.settings import (
     VIDEO_BITRATE,
     VIDEO_CODEC,
     FFMPEG_PRESET_DEFAULT,
+    FFMPEG_THREADS,
     RENDER_TIMEOUT_MULTIPLIER,
     RENDER_TIMEOUT_MIN_SEC,
     RENDER_TIMEOUT_MAX_SEC,
@@ -261,6 +262,8 @@ class VideoEditor:
         # When reusing an image, vary Ken Burns focus to avoid visual repetition
         self._image_reuse_count: dict[str, int] = {}  # path → how many times reused
         self._last_ken_burns_profile: str | None = None
+        # Deterministic per-scene RNG seed base (identity local↔distribuido).
+        self._video_seed: int = 0
         # On-demand image fetcher callback (set by orchestrator before build_video)
         self._on_demand_fetcher: Optional[callable] = None
 
@@ -357,6 +360,10 @@ class VideoEditor:
         self._current_clip_idx = 0
         self._image_reuse_count.clear()
         self._last_ken_burns_profile = None
+        # Semilla determinista por vídeo (reproducibilidad local↔distribuido).
+        # El color grade, el zoom de vídeo y el Ken Burns usan `random`; sembrar
+        # por escena los hace independientes del orden de ejecución.
+        self._video_seed = int(video_id or 0)
 
         # ── Compute block time ranges ──────────────────────────
         if scene_ranges:
@@ -3589,6 +3596,15 @@ class VideoEditor:
 
     # ── Segment-based rendering (RAM-bounded per scene) ──────────
 
+    def _scene_seed(self, clip_idx: int) -> int:
+        """Semilla determinista para una escena (base del vídeo + índice)."""
+        return (int(self._video_seed) * 1000003 + int(clip_idx)) & 0xFFFFFFFF
+
+    def _seed_scene_rng(self, clip_idx: int) -> None:
+        """Siembra el RNG para que la escena sea reproducible de forma aislada."""
+        import random as _random
+        _random.seed(self._scene_seed(clip_idx))
+
     def _render_scene_segment(
         self, block_range: dict, asset: dict, seg_path: str,
         clip_idx: int, fallback_pool: list,
@@ -3608,6 +3624,10 @@ class VideoEditor:
         """
         seg_path = Path(seg_path)
         seg_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Semilla determinista por escena: hace el render de la escena
+        # reproducible e independiente del orden (necesario para distribuirlo).
+        self._seed_scene_rng(clip_idx)
 
         # Collision avoidance
         if seg_path.exists():
@@ -3838,6 +3858,7 @@ class VideoEditor:
             "-preset", self.canal.get("FFMPEG_PRESET", FFMPEG_PRESET_DEFAULT),
             "-b:v", VIDEO_BITRATE,
             "-pix_fmt", "yuv420p",
+            "-threads", str(FFMPEG_THREADS),  # pineado: identidad local↔nodo
             "-an",  # no audio in body segment
             "-movflags", "+faststart",
             str(output_path),

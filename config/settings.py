@@ -203,6 +203,13 @@ VIDEO_MAX_DURATION = int(os.getenv("VIDEO_MAX_DURATION", "840"))   # seconds (14
 # "fast" gives ~2x speed over "medium" with negligible quality loss
 FFMPEG_PRESET_DEFAULT = os.getenv("FFMPEG_PRESET_DEFAULT", "fast")
 
+# Hilos ffmpeg PINeados para operaciones compartidas local↔nodo.
+# x264 NO es reproducible con el nº de hilos auto: distinto nº de CPUs (o el
+# propio auto-detect) produce bitstreams distintos. Para que el render
+# distribuido sea bit-a-bit igual al local, TODOS los comandos ffmpeg
+# compartidos (concat de batches, pre-transcode) fijan el MISMO -threads.
+FFMPEG_THREADS = int(os.getenv("FFMPEG_THREADS", "4"))
+
 # ── Memory guard thresholds (MB) ───────────────────────────────
 # Subidos el 2026-08-19 tras OOM kills reales: ffmpeg exact-concat consume
 # ~3 GB por batch de 50 segmentos y Kokoro/torch ~2.8 GB. Umbrales previos

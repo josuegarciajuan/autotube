@@ -1059,3 +1059,17 @@ EDITORIAL_RECOVERY_REVIEW = {
     "min_ctr_percent": 4.0,
     "min_retention_percent": 35.0,
 }
+
+# ── Render gate (anti-escenas vacías/negras/silenciosas) ──────────────
+# Bloqueante: si el vídeo tiene negro o silencio por encima del umbral, no se
+# sube (validation_failed). Kill-switch: RENDER_GATE_ENABLED=False por canal.
+# Lo consume pipeline/render_gate.py vía VideoValidator.post_validate.
+RENDER_GATE_ENABLED = True
+RENDER_GATE_BLACK_PIX_TH = 0.10
+RENDER_GATE_BLACK_MIN_SEC = 2.0
+RENDER_GATE_MAX_BLACK_SEC = 5.0
+RENDER_GATE_SILENCE_DB = -40
+RENDER_GATE_SILENCE_MIN_SEC = 3.0
+RENDER_GATE_MAX_SILENCE_SEC = 8.0
+RENDER_GATE_TIMEOUT_SEC = 300
+

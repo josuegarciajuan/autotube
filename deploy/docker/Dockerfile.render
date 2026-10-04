@@ -1,0 +1,27 @@
+# Imagen del worker de render de escena (Autotube distribuido).
+#
+# Solo contiene Python + ffmpeg y el worker. El manifiesto y el asset de cada
+# escena se empujan por unidad (push) al sandbox; el contenedor se ejecuta con
+# `--network=none`, por lo que NO hay egress desde los nodos.
+#
+# Base `bullseye` (glibc 2.31, Python 3.9) a propósito: es compatible con
+# nodos de kernel antiguo (Debian 8/9, kernel 3.16/4.9) y docker 18/19, donde
+# una glibc 2.36 (bookworm) podía fallar. El worker solo usa stdlib + ffmpeg.
+#
+# Build (contexto = raíz del repo):
+#   docker build -f deploy/docker/Dockerfile.render -t autotube-render:1 .
+FROM python:3.9-slim-bullseye
+
+# El repo `bullseye-security` del CDN devuelve 404 para varias versiones
+# (inconsistencia del mirror). ffmpeg y sus deps están en `main`, así que
+# usamos main + updates, que son estables.
+RUN printf "deb http://deb.debian.org/debian bullseye main\ndeb http://deb.debian.org/debian bullseye-updates main\n" > /etc/apt/sources.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY pipeline_dist/scene_worker.py /app/pipeline_dist/scene_worker.py
+
+ENV PYTHONUNBUFFERED=1
+ENTRYPOINT []

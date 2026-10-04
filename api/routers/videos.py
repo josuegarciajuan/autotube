@@ -374,7 +374,7 @@ def set_video_privacy(video_id: int, data: dict):
     if not canal:
         raise HTTPException(400, "Video has no channel assigned")
     
-    from orchestrator import PipelineOrchestrator
+    from orchestrator import make_orchestrator as PipelineOrchestrator
     orch = PipelineOrchestrator(canal=canal)
     
     if not orch.uploader.authenticate():
@@ -933,7 +933,7 @@ def publish_video_now(video_id: int):
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
 
-    from orchestrator import PipelineOrchestrator
+    from orchestrator import make_orchestrator as PipelineOrchestrator
     ch = db.get_channel(v["channel_id"]) if v.get("channel_id") else None
     canal = ch["slug"] if ch else v.get("canal")
     if not canal:

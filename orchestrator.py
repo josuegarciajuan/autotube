@@ -3570,3 +3570,25 @@ def run_scheduled(canal: str):
         logger.info("Scheduler stopped.")
 
     return 0
+
+
+def make_orchestrator(*args, **kwargs):
+    """Crea el orquestador adecuado según los flags de distribución.
+
+    Devuelve ``DistributedOrchestrator`` (render v2 + concat repartidos en la
+    flota) cuando ``AUTOTUBE_DIST_RENDER_V2`` o ``AUTOTUBE_DIST_CONCAT`` están
+    activos; si no —o ante cualquier problema de import— devuelve el clásico
+    (local). Fail-open: nunca rompe la creación por el hecho de distribuir.
+    """
+    import os as _os
+
+    def _on(name: str) -> bool:
+        return str(_os.environ.get(name, "")).strip().lower() in ("1", "true", "yes", "on")
+
+    if _on("AUTOTUBE_DIST_RENDER_V2") or _on("AUTOTUBE_DIST_CONCAT"):
+        try:
+            from pipeline_dist.orchestrator_dist import DistributedOrchestrator
+            return DistributedOrchestrator(*args, **kwargs)
+        except Exception:
+            logger.exception("No se pudo instanciar DistributedOrchestrator — uso local")
+    return PipelineOrchestrator(*args, **kwargs)

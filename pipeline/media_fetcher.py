@@ -2291,6 +2291,7 @@ class MediaFetcher:
                 ["ffmpeg", "-y", "-i", str(path),
                  "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2",
                  "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                 "-threads", str(getattr(settings, "FFMPEG_THREADS", 4)),  # pineado: identidad local↔nodo
                  "-c:a", "aac", "-b:a", "128k",
                  "-movflags", "+faststart",
                  str(tmp)],
