@@ -314,6 +314,16 @@ def main() -> int:
     # (p. ej. un `failed` cacheado) con el exec-id determinista del render.
     os.environ["AUTOTUBE_DIST_EXEC_NONCE"] = run_id
 
+    # Override opcional del tamaño de batch de concat (para que un mini vídeo con
+    # pocas escenas ejercite el concat distribuido). Mismo valor local y nodo.
+    _xb = os.environ.get("AUTOTUBE_CONCAT_BATCH_SIZE")
+    if _xb:
+        try:
+            setattr(orch.config, "XFADE_BATCH_SIZE", int(_xb))
+            logging_info.info("XFADE_BATCH_SIZE=%s (override)", _xb)
+        except (TypeError, ValueError):
+            logging_info.warning("AUTOTUBE_CONCAT_BATCH_SIZE inválido: %r", _xb)
+
     t_start = time.time()
     timings: dict[str, float] = {}
 
