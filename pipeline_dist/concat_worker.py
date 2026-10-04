@@ -63,6 +63,7 @@ def main() -> int:
         "-preset", str(spec.get("preset") or "fast"),
         "-b:v", str(spec.get("bitrate") or "6000k"),
         "-pix_fmt", str(spec.get("pix_fmt") or "yuv420p"),
+        "-threads", str(int(spec.get("threads") or 4)),  # pineado (identidad)
         "-an",
         "-movflags", "+faststart",
         out_path,

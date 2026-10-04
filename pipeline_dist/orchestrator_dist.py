@@ -276,6 +276,7 @@ class DistributedOrchestrator(PipelineOrchestrator):
                 "inputs": names, "filter_complex": filt, "map_label": label,
                 "codec": settings_mod.VIDEO_CODEC, "preset": preset,
                 "bitrate": settings_mod.VIDEO_BITRATE, "pix_fmt": "yuv420p",
+                "threads": int(getattr(settings_mod, "FFMPEG_THREADS", 4) or 4),
                 "output": f"batch_{start:04d}.mp4",
                 "timeout": max(900, len(names) * 15),
             }

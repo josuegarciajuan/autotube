@@ -25,6 +25,7 @@ from config.settings import (
     VIDEO_BITRATE,
     VIDEO_CODEC,
     FFMPEG_PRESET_DEFAULT,
+    FFMPEG_THREADS,
     RENDER_TIMEOUT_MULTIPLIER,
     RENDER_TIMEOUT_MIN_SEC,
     RENDER_TIMEOUT_MAX_SEC,
@@ -3857,6 +3858,7 @@ class VideoEditor:
             "-preset", self.canal.get("FFMPEG_PRESET", FFMPEG_PRESET_DEFAULT),
             "-b:v", VIDEO_BITRATE,
             "-pix_fmt", "yuv420p",
+            "-threads", str(FFMPEG_THREADS),  # pineado: identidad local↔nodo
             "-an",  # no audio in body segment
             "-movflags", "+faststart",
             str(output_path),

@@ -43,7 +43,7 @@ def test_worker_concat_ok_and_identity(tmp_path, segs):
         "filter_complex": filt,
         "map_label": "[concat]",
         "codec": "libx264", "preset": "fast", "bitrate": "6000k",
-        "pix_fmt": "yuv420p", "output": "batch_0000.mp4", "timeout": 120,
+        "pix_fmt": "yuv420p", "threads": 4, "output": "batch_0000.mp4", "timeout": 120,
     }
     spec_path = tmp_path / "spec.json"
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
@@ -59,7 +59,7 @@ def test_worker_concat_ok_and_identity(tmp_path, segs):
     ref = tmp_path / "ref.mp4"
     rr = _run(["ffmpeg", "-y", "-v", "error", "-i", str(segs[0]), "-i", str(segs[1]),
                "-filter_complex", filt, "-map", "[concat]",
-               "-c:v", "libx264", "-preset", "fast", "-b:v", "6000k",
+               "-c:v", "libx264", "-preset", "fast", "-b:v", "6000k", "-threads", "4",
                "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart", str(ref)])
     assert rr.returncode == 0, rr.stderr
     assert result["sha256"] == _sha(ref)

@@ -63,16 +63,16 @@ def _make_4k_input(tmp: Path) -> Path:
 def _local_pretranscode(tmp: Path, src: Path) -> Path:
     out = tmp / "pre_local.mp4"
     _run(["ffmpeg", "-y", "-v", "error", "-i", str(src), "-vf", PRETRANSCODE_VF,
-          "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+          "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-threads", "4",
           "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(out)], timeout=180)
     return out
 
 
 def _docker_pretranscode(tmp: Path, src: Path) -> Path:
     out = tmp / "pre_docker.mp4"
-    _run(["docker", "run", "--rm", "-v", f"{tmp}:/work", IMAGE, "sh", "-c",
+    _run(["docker", "run", "--rm", "--security-opt", "seccomp=unconfined", "-v", f"{tmp}:/work", IMAGE, "sh", "-c",
           f'ffmpeg -y -v error -i /work/{src.name} -vf "{PRETRANSCODE_VF}" '
-          f'-c:v libx264 -preset ultrafast -crf 23 -c:a aac -b:a 128k '
+          f'-c:v libx264 -preset ultrafast -crf 23 -threads 4 -c:a aac -b:a 128k '
           f'-movflags +faststart /work/{out.name}'], timeout=180)
     return out
 
@@ -89,7 +89,7 @@ def _docker_mp_render(tmp: Path) -> Path:
     out = "mp_docker.mp4"
     script = tmp / "mp_render.py"
     script.write_text("import sys\n" + MP_RENDER_SNIPPET, encoding="utf-8")
-    r = _run(["docker", "run", "--rm", "-v", f"{tmp}:/work", IMAGE,
+    r = _run(["docker", "run", "--rm", "--security-opt", "seccomp=unconfined", "-v", f"{tmp}:/work", IMAGE,
               "python3", f"/work/{script.name}", f"/work/{out}"], timeout=180)
     if r.returncode != 0:
         raise RuntimeError(f"moviepy docker falló: {r.stderr[-400:]}")
@@ -110,11 +110,11 @@ def _node_docker_sha(node: str, state: dict, tmp: Path) -> dict:
     _run(["scp", "-q", str(script_local), f"{dst}:{remote}/mp_render.py"])
     cmd = (
         f"cd {remote} && "
-        f"docker run --rm -v {remote}:/work {IMAGE} sh -c "
+        f"docker run --rm --security-opt seccomp=unconfined -v {remote}:/work {IMAGE} sh -c "
         f"'ffmpeg -y -v error -i /work/in4k.mp4 -vf \"{PRETRANSCODE_VF}\" "
-        f"-c:v libx264 -preset ultrafast -crf 23 -c:a aac -b:a 128k "
+        f"-c:v libx264 -preset ultrafast -crf 23 -threads 4 -c:a aac -b:a 128k "
         f"-movflags +faststart /work/pre_node.mp4' && "
-        f"docker run --rm -v {remote}:/work {IMAGE} python3 /work/mp_render.py /work/mp_node.mp4 && "
+        f"docker run --rm --security-opt seccomp=unconfined -v {remote}:/work {IMAGE} python3 /work/mp_render.py /work/mp_node.mp4 && "
         f"sha256sum pre_node.mp4 mp_node.mp4"
     )
     r = _run(ssh + [cmd], timeout=300)
