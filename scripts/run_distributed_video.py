@@ -139,6 +139,8 @@ def main() -> int:
                     help="Guardar bundle (script/audio/media/scene_ranges) en DIR para A/B")
     ap.add_argument("--from-freeze", dest="from_freeze", default=None,
                     help="Cargar bundle de DIR (omite scrape/script/tts/media) → inputs idénticos")
+    ap.add_argument("--freeze-only", action="store_true",
+                    help="Con --freeze: guarda el bundle y termina (no renderiza)")
     ap.add_argument("--media-fast", action="store_true",
                     help="Media rápida para el piloto: sin IA lenta (local SD ~13 min/img) "
                          "ni Pollo AI; si la IA no está disponible, usa stock images/video.")
@@ -384,6 +386,9 @@ def main() -> int:
                 json.dumps(getattr(orch, "_last_scene_ranges", []) or [], ensure_ascii=False),
                 encoding="utf-8")
             logging_info.info("Bundle congelado guardado en %s", freeze_dir)
+            if args.freeze_only:
+                _log("Bundle congelado guardado; fin (--freeze-only).")
+                return 0
 
     video_data = _timed("video", orch.phase_video, script, audio_data, media_assets, job_id=job_id)
     if not video_data:
