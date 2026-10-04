@@ -215,6 +215,23 @@ def main() -> int:
     _settings.DATABASE_PATH = str(db_path)
     os.environ["DATABASE_PATH"] = str(db_path)
 
+    # ── Aislamiento total de la salida (F7) ───────────────────────────────
+    # TODA la salida del piloto va bajo output/dist_test/<run_id>/output, nunca
+    # al output/ de producción, aunque se lance desde el árbol principal. Se fija
+    # ANTES de importar orchestrator/VideoEditor (que copian los valores).
+    _out_root = Path(db_path).parent / "output"
+    for _name, _sub in (("OUTPUT_DIR", ""), ("VIDEOS_DIR", "videos"),
+                        ("AUDIO_DIR", "audio"), ("IMAGES_DIR", "images"),
+                        ("THUMBNAILS_DIR", "thumbnails")):
+        _val = _out_root if not _sub else _out_root / _sub
+        try:
+            _val.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        setattr(_settings, _name, _val)
+    _settings.OUTPUT_DIR = _out_root
+    logging_info.info("Salida aislada del piloto: %s", _out_root)
+
     from config.test_profile import apply_test_profile
     from database.db import init_db
     from database.db_extended import ExtendedDatabase, migrate_v2
@@ -242,7 +259,7 @@ def main() -> int:
 
     job_id = None
     try:
-        job_id = ext_db.create_job(channel_id, "generate_and_upload", None)
+        job_id = ext_db.create_job(channel_id, "generate_only", None)
     except Exception as exc:
         logging_info.warning("No pude registrar job de panel: %s", exc)
 
@@ -364,6 +381,12 @@ def main() -> int:
         )
     except Exception as exc:
         logging_info.warning("No pude escribir timings.json: %s", exc)
+
+    if job_id:
+        try:
+            ext_db.update_job(job_id, status="completed", progress=100, phase="done")
+        except Exception:
+            pass
 
     _log("=" * 60)
     _log(f"VÍDEO PILOTO LISTO: {video_path}")
