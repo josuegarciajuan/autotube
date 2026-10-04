@@ -244,6 +244,13 @@ def main() -> int:
     _settings.OUTPUT_DIR = _out_root
     logging_info.info("Salida aislada del piloto: %s", _out_root)
 
+    # Guard anti-silencio: sin claves LLM el generador cae a un fallback en
+    # inglés y aborta más tarde con un error confuso. Mejor fallar claro aquí.
+    if not (os.environ.get("OPENAI_API_KEY") or os.environ.get("LLM_API_KEY")):
+        _log("ABORTADO: no hay claves LLM (OPENAI_API_KEY/LLM_API_KEY). "
+             "¿Falta el .env en el worktree? (ln -s /root/autotube/.env .env)")
+        return 2
+
     from config.test_profile import apply_test_profile
     from database.db import init_db
     from database.db_extended import ExtendedDatabase, migrate_v2
