@@ -188,9 +188,15 @@ def main() -> int:
     if running < 0:
         _log("Aviso: no pude comprobar generaciones activas en producción (DB ocupada).")
 
-    os.environ["AUTOTUBE_DIST_RENDER"] = "0" if args.no_dist else "1"
     if args.no_dist:
-        _log("Render distribuido DESACTIVADO (--no-dist): control A/B local.")
+        os.environ["AUTOTUBE_DIST_RENDER"] = "0"
+        os.environ["AUTOTUBE_DIST_RENDER_V2"] = "0"
+        os.environ["AUTOTUBE_DIST_CONCAT"] = "0"
+        _log("Distribución DESACTIVADA (--no-dist): control A/B local.")
+    else:
+        os.environ["AUTOTUBE_DIST_RENDER"] = "0"      # v1 (reimplementado) OFF
+        os.environ["AUTOTUBE_DIST_RENDER_V2"] = "1"   # render identity-preserving
+        os.environ["AUTOTUBE_DIST_CONCAT"] = "1"      # concat por batches
 
     # Imports tardíos (dependen de DATABASE_PATH).
     from config.settings import LOGS_DIR
