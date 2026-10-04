@@ -135,6 +135,10 @@ def main() -> int:
     ap.add_argument("--max-wait-min", type=int, default=720,
                     help="Tiempo máximo de espera con --wait-for-idle (min)")
     ap.add_argument("--run-id", default=None)
+    ap.add_argument("--freeze", default=None,
+                    help="Guardar bundle (script/audio/media/scene_ranges) en DIR para A/B")
+    ap.add_argument("--from-freeze", dest="from_freeze", default=None,
+                    help="Cargar bundle de DIR (omite scrape/script/tts/media) → inputs idénticos")
     ap.add_argument("--media-fast", action="store_true",
                     help="Media rápida para el piloto: sin IA lenta (local SD ~13 min/img) "
                          "ni Pollo AI; si la IA no está disponible, usa stock images/video.")
@@ -320,31 +324,56 @@ def main() -> int:
         finally:
             timings[name] = round(time.time() - t0, 2)
 
-    if not args.skip_scrape:
-        logging_info.info("Fase scrape...")
-        _timed("scrape", orch.phase_scrape)
+    freeze_dir = Path(args.freeze).resolve() if args.freeze else None
+    load_dir = Path(args.from_freeze).resolve() if args.from_freeze else None
+
+    if load_dir:
+        # Inputs congelados → A/B justo (mismo script/audio/media en local y dist).
+        logging_info.info("Bundle congelado cargado: %s (se omiten scrape/script/tts/media)", load_dir)
+        script = json.loads((load_dir / "script.json").read_text(encoding="utf-8"))
+        audio_data = json.loads((load_dir / "audio.json").read_text(encoding="utf-8"))
+        media_assets = json.loads((load_dir / "media.json").read_text(encoding="utf-8"))
+        orch._last_scene_ranges = json.loads((load_dir / "scene_ranges.json").read_text(encoding="utf-8"))
+        orch._last_media_assets = media_assets
     else:
-        logging_info.info("Fase scrape omitida (--skip-scrape)")
+        if not args.skip_scrape:
+            logging_info.info("Fase scrape...")
+            _timed("scrape", orch.phase_scrape)
+        else:
+            logging_info.info("Fase scrape omitida (--skip-scrape)")
 
-    items = ext_db.get_unused_content(canal=args.canal, limit=10)
-    if not items:
-        _log("ABORTADO: no hay contenido unused en la DB clonada. Ejecuta sin --skip-scrape.")
-        return 1
-    script = _timed("script", orch.script_gen.generate, items[0])
-    if not script:
-        _log("ABORTADO: no se generó guion.")
-        return 1
-    _timed("pre_validate", orch.phase_pre_validate, script)
+        items = ext_db.get_unused_content(canal=args.canal, limit=10)
+        if not items:
+            _log("ABORTADO: no hay contenido unused en la DB clonada. Ejecuta sin --skip-scrape.")
+            return 1
+        script = _timed("script", orch.script_gen.generate, items[0])
+        if not script:
+            _log("ABORTADO: no se generó guion.")
+            return 1
+        _timed("pre_validate", orch.phase_pre_validate, script)
 
-    audio_data = _timed("tts", orch.phase_tts, script)
-    if not audio_data:
-        _log("ABORTADO: TTS falló.")
-        return 1
+        audio_data = _timed("tts", orch.phase_tts, script)
+        if not audio_data:
+            _log("ABORTADO: TTS falló.")
+            return 1
 
-    media_assets = _timed("media", orch.phase_media, script, audio_data)
-    if not media_assets:
-        _log("ABORTADO: media falló.")
-        return 1
+        media_assets = _timed("media", orch.phase_media, script, audio_data)
+        if not media_assets:
+            _log("ABORTADO: media falló.")
+            return 1
+
+        if freeze_dir:
+            freeze_dir.mkdir(parents=True, exist_ok=True)
+            (freeze_dir / "script.json").write_text(
+                json.dumps(script, ensure_ascii=False), encoding="utf-8")
+            (freeze_dir / "audio.json").write_text(
+                json.dumps(audio_data, ensure_ascii=False), encoding="utf-8")
+            (freeze_dir / "media.json").write_text(
+                json.dumps(media_assets, ensure_ascii=False), encoding="utf-8")
+            (freeze_dir / "scene_ranges.json").write_text(
+                json.dumps(getattr(orch, "_last_scene_ranges", []) or [], ensure_ascii=False),
+                encoding="utf-8")
+            logging_info.info("Bundle congelado guardado en %s", freeze_dir)
 
     video_data = _timed("video", orch.phase_video, script, audio_data, media_assets, job_id=job_id)
     if not video_data:
