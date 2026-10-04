@@ -38,3 +38,12 @@ RUN ffmpeg -version | head -1
 
 # Workers horneados en la imagen (thin executors; el control plane manda el spec).
 COPY pipeline_dist/concat_worker.py /app/pipeline_dist/concat_worker.py
+COPY pipeline_dist/render_worker.py /app/pipeline_dist/render_worker.py
+
+# Código de autotube necesario para ejecutar el MISMO render que local
+# (pipeline.video_editor importado por render_worker).
+COPY pipeline /app/pipeline
+COPY config /app/config
+COPY prompts /app/prompts
+COPY pipeline_dist /app/pipeline_dist
+ENV PYTHONPATH=/app
