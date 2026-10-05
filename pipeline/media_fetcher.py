@@ -109,6 +109,12 @@ class MediaFetcher:
         # P3: Theme context for enriched search queries
         self._theme_context = None
 
+        # Fase 3: the scene list currently being fetched, used to resolve the
+        # previous/next narration snippets for each scene context.  Reset per
+        # ``fetch_for_script`` call; empty means "no neighbour information".
+        self._current_scenes: list[dict] = []
+        self._current_scene_idx: int = -1
+
         # Fase 0 (calidad-coherencia): structured per-scene asset decision log.
         # Observability only; never alters the fetch chain. Default True.
         self._asset_decision_log_enabled = bool(
@@ -617,6 +623,11 @@ class MediaFetcher:
         scenes = scene_ranges
         n_scenes = len(scenes)
 
+        # Fase 3: expose the current scene list so ``_scene_context`` can
+        # resolve prev/next narration snippets for every scene.
+        self._current_scenes = scenes
+        self._current_scene_idx = -1
+
         # ── Phase 2: Classify scenes (video_priority vs stock_image vs ai_image) ──
         video_scenes, stock_image_scenes, scene_types = self._classify_scenes(scenes)
 
@@ -701,6 +712,7 @@ class MediaFetcher:
         _MAX_CONSECUTIVE_BLACK = 3
 
         for i, scene in enumerate(scenes):
+            self._current_scene_idx = i
             scene_tipo = scene.get("tipo", "desarrollo")
             target_dur = scene.get("duration", 5)
             is_video_priority = i in video_scenes
@@ -2588,8 +2600,32 @@ class MediaFetcher:
             return cfg.get("SCRIPT_STRUCTURE", []) or []
         return getattr(cfg, "SCRIPT_STRUCTURE", []) or []
 
+    @staticmethod
+    def _scene_snippet(scene: object) -> str:
+        """Narration text of a scene range (fragment first, then full text)."""
+        if not isinstance(scene, dict):
+            return ""
+        return (
+            scene.get("fragment_text")
+            or scene.get("texto")
+            or scene.get("search_query_en")
+            or ""
+        )
+
     def _scene_context(self, scene: dict, scene_idx: int = 0) -> "SceneVisualContext":
         from pipeline.scene_context import build_scene_context
+
+        # Fase 3: resolve neighbouring narration snippets from the scene list
+        # currently being fetched.  Missing list → empty snippets (fail-open).
+        prev_snippet = ""
+        next_snippet = ""
+        scenes = getattr(self, "_current_scenes", []) or []
+        if scenes and 0 <= scene_idx < len(scenes):
+            if scene_idx - 1 >= 0:
+                prev_snippet = self._scene_snippet(scenes[scene_idx - 1])
+            if scene_idx + 1 < len(scenes):
+                next_snippet = self._scene_snippet(scenes[scene_idx + 1])
+
         return build_scene_context(
             scene,
             scene_idx=scene_idx,
@@ -2597,7 +2633,17 @@ class MediaFetcher:
             visual_bible=getattr(self, "_visual_bible", None),
             structure=self._scene_structure(),
             script_title=scene.get("video_title", ""),
+            prev_snippet=prev_snippet,
+            next_snippet=next_snippet,
+            temporal_overrides_enabled=self._temporal_overrides_enabled(),
         )
+
+    def _temporal_overrides_enabled(self) -> bool:
+        """Channel kill-switch for Fase 3 temporal segments (default True)."""
+        cfg = getattr(self, "_config", None)
+        if isinstance(cfg, dict):
+            return bool(cfg.get("THEME_TEMPORAL_OVERRIDES_ENABLED", True))
+        return bool(getattr(cfg, "THEME_TEMPORAL_OVERRIDES_ENABLED", True))
 
     def _build_query_pool(self, scene: dict, ctx, scene_idx: int = 0) -> list[str]:
         """Build an ordered list of query variations for a scene.

@@ -56,6 +56,10 @@ class VisualBible:
         and append ``scene variation {i}/{N}`` for prompt uniqueness.  Reusing
         a non-empty literal here would collapse every scene to the same prompt
         → Pollinations cache returns the same image for all of them.
+
+        Fase 3 adds the per-scene filmable-intent fields (empty by default);
+        ``from_dict`` fills them from the scene text when alignment padding
+        is applied.
         """
         return {
             "scene": scene_idx,
@@ -65,10 +69,38 @@ class VisualBible:
             "has_protagonist": False,
             "bridge_from_prev": None,
             "visual_density": "balanced",
+            # ── Fase 3: filmable intent (empty → derived from scene text) ──
+            "subject": "",
+            "action": "",
+            "object": "",
+            "setting": "",
+            "must_show": [],
+            "must_avoid": [],
+            "depiction_mode": "",
         }
 
+    @staticmethod
+    def _derive_intent(scene_text_item: Any) -> dict:
+        """Best-effort intent derived from a scene text/range (fail-open)."""
+        if scene_text_item is None:
+            return {}
+        try:
+            from pipeline.scene_context import derive_scene_intent
+
+            intent = derive_scene_intent(scene_text_item)
+        except Exception:
+            return {}
+        if not isinstance(intent, dict):
+            return {}
+        return {k: v for k, v in intent.items() if v}
+
     @classmethod
-    def from_dict(cls, data: dict, num_scenes: int = 0) -> "VisualBible":
+    def from_dict(
+        cls,
+        data: dict,
+        num_scenes: int = 0,
+        scene_texts: list | None = None,
+    ) -> "VisualBible":
         """Parse a raw LLM JSON dict into a ``VisualBible``, with fallbacks.
 
         If the LLM returned fewer ``scene_visual_map`` entries than
@@ -76,6 +108,13 @@ class VisualBible:
         the missing entries are padded with ``_empty_scene_entry`` so the
         fetcher never runs out of per-scene concepts — the empty entries fall
         back to the scene query with a unique ``scene variation`` suffix.
+
+        Fase 3 strict alignment: when ``scene_texts`` is provided (the final
+        scene ranges, one per scene, as ``str`` or ``dict``), each padded
+        entry derives its filmable intent (subject/action/must_show/
+        depiction_mode) from its own scene text so the scene is never left
+        without direction.  ``visual_concept`` stays empty on purpose (prompt
+        uniqueness is delegated to the fetcher).
         """
         if not isinstance(data, dict):
             logger.warning("Visual bible LLM returned non-dict; using fallback")
@@ -83,12 +122,33 @@ class VisualBible:
 
         scene_map = list(data.get("scene_visual_map") or [])
         if num_scenes > 0 and len(scene_map) < num_scenes:
+            missing = num_scenes - len(scene_map)
             logger.warning(
                 "Visual bible returned %d/%d scene entries — padding %d with empty concepts",
-                len(scene_map), num_scenes, num_scenes - len(scene_map),
+                len(scene_map), num_scenes, missing,
             )
+            texts = list(scene_texts or [])
+            derived_count = 0
             for i in range(len(scene_map), num_scenes):
-                scene_map.append(cls._empty_scene_entry(i))
+                entry = cls._empty_scene_entry(i)
+                text_item = texts[i] if i < len(texts) else None
+                intent = cls._derive_intent(text_item)
+                if intent:
+                    entry.update(intent)
+                    derived_count += 1
+                scene_map.append(entry)
+            logger.warning(
+                "Visual bible alignment: padded %d entries; derived intent from "
+                "scene text for %d/%d (visual_concept left empty by design)",
+                missing, derived_count, len(texts),
+            )
+
+        # Normalise every entry so the Fase 3 intent keys always exist
+        # (LLM-provided values win; missing keys become empty defaults).
+        scene_map = [
+            {**cls._empty_scene_entry(i), **(e if isinstance(e, dict) else {})}
+            for i, e in enumerate(scene_map)
+        ]
 
         return cls(
             visual_universe=data.get("visual_universe") or FALLBACK_VISUAL_UNIVERSE,
@@ -175,6 +235,7 @@ class VisualBibleGenerator:
         script_text: str,
         num_scenes: int,
         model_name: str | None = None,
+        scene_texts: list | None = None,
     ) -> VisualBible:
         """Generate the visual bible for a script.
 
@@ -188,6 +249,10 @@ class VisualBibleGenerator:
         model_name:
             Optional model override.  If ``None``, the script generator's
             default model is used.
+        scene_texts:
+            Optional list (one per scene) of ``str`` or scene dicts.  Used by
+            Fase 3 strict alignment to derive filmable intent for the entries
+            the LLM omitted.  Fail-open: ``None`` keeps the legacy behavior.
 
         Returns
         -------
@@ -240,7 +305,7 @@ class VisualBibleGenerator:
                 raise last_error if last_error else RuntimeError(
                     "No model available in pool for visual bible"
                 )
-            bible = VisualBible.from_dict(result, num_scenes)
+            bible = VisualBible.from_dict(result, num_scenes, scene_texts=scene_texts)
         except Exception as exc:
             logger.warning(
                 "Visual bible LLM call failed: %s — using fallback", exc,
