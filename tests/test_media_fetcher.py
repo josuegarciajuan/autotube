@@ -1214,3 +1214,170 @@ class TestActionAwareQueryPool:
         assert media["max_generic_fallback_pct"] == 20.0
 
 
+# ── Fase 4b: cobertura de clips (objetivo 80 %) ─────────────────────
+
+class TestVideoCoverageFase4b:
+    """Clips en todo el runtime, boost a acción, tope 0 = sin tope fijo,
+    métrica por tiempo y fallback a imagen."""
+
+    def _classifier(self, **strategy):
+        from pipeline.media_fetcher import MediaFetcher
+
+        f = MediaFetcher.__new__(MediaFetcher)
+        base = {
+            "video_min_scene_duration": 6,
+            "video_first_half_pct": 40,
+            "video_scene_pct_min": 20,
+            "video_scene_pct_max": 80,
+            "video_scene_hard_cap": 0,
+            "stock_image_pct": 0,
+            "hook_climax_video_requires_bible": True,
+            "action_scene_boost": True,
+            "target_video_time_pct": 80,
+        }
+        base.update(strategy)
+        f._media_strategy = base
+        # A bible avoids the C7 hook/climax video gate in these fixtures.
+        f._visual_bible = {"visual_universe": "x"}
+        return f
+
+    def test_classify_covers_full_runtime(self):
+        """Clips are eligible beyond the first 40 % of runtime."""
+        f = self._classifier()
+        scenes = [
+            _make_scene_range(tipo="desarrollo", duration=12, asset_idx=i)
+            for i in range(10)
+        ]
+        video_scenes, _, _ = f._classify_scenes(scenes)
+        assert len(video_scenes) >= round(0.80 * 10), video_scenes
+        # At least one clip lands past the old 40 % window.
+        assert any(i >= 4 for i in video_scenes), video_scenes
+
+    def test_action_scene_gets_boost(self):
+        """With a single slot, a late ACTION scene outranks early static ones."""
+        f = self._classifier(video_scene_pct_max=20)
+        scenes = [
+            _make_scene_range(
+                tipo="desarrollo", duration=8, asset_idx=i,
+                search_query_en="desert panorama",
+            )
+            for i in range(5)
+        ]
+        scenes[-1]["search_query_en"] = "archaeologist excavating an ancient tomb"
+        scenes[-1]["texto"] = "The archaeologist excavates the tomb."
+
+        video_scenes, _, _ = f._classify_scenes(scenes)
+        assert 4 in video_scenes, "late action scene must receive the action boost"
+        assert 0 not in video_scenes, "early static scene must lose the slot"
+
+    def test_hard_cap_zero_means_no_fixed_cap(self):
+        """hard_cap=0 delegates to the RAM governor, not to 0 videos."""
+        f = self._classifier()
+        scenes = [
+            _make_scene_range(tipo="desarrollo", duration=12, asset_idx=i)
+            for i in range(10)
+        ]
+        video_scenes, _, _ = f._classify_scenes(scenes)
+        assert len(video_scenes) == 8  # 80 % of 10, not min(8, 0)
+
+    def test_should_continue_video_search_uses_new_caps(self):
+        f = self._classifier()
+        f._video_quality_scores = [0.9]
+        # 10 scenes, max 80 % → continue below 8, stop at 8.
+        assert f._should_continue_video_search(7, 10) is True
+        assert f._should_continue_video_search(8, 10) is False
+
+        g = self._classifier(video_scene_hard_cap=3)
+        g._video_quality_scores = [0.9]
+        # An explicit hard cap still stops earlier than the percentage.
+        assert g._should_continue_video_search(3, 10) is False
+        assert g._should_continue_video_search(2, 10) is True
+
+    @patch("pipeline.media_fetcher.time.sleep", return_value=None)
+    def test_hard_cap_zero_does_not_force_images(self, mock_sleep):
+        """A run with hard_cap=0 still fetches videos (cap is not zeroed)."""
+        from pipeline.media_fetcher import MediaFetcher
+
+        cfg = _make_config(
+            video_scene_pct_max=80,
+            video_scene_hard_cap=0,
+            video_min_scene_duration=6,
+            min_video_pct=0,
+            video_fallback_queries=[],
+        )
+        fetcher = MediaFetcher(config=cfg)
+        fetcher._visual_bible = {"visual_universe": "x", "scene_visual_map": []}
+        scenes = [
+            _make_scene_range(tipo="desarrollo", duration=8, asset_idx=i)
+            for i in range(4)
+        ]
+
+        def mock_fetch_tiers(scene, scene_idx, total_scenes, is_video_priority,
+                             target_dur, ctx, ai_used, ai_max, ai_enabled,
+                             force_images=False, is_stock_image_priority=False):
+            return (_make_video_result(path=f"/tmp/vid_{scene_idx}.mp4"), 0, {})
+
+        fetcher._fetch_with_ai_tiers = MagicMock(side_effect=mock_fetch_tiers)
+        fetcher._reconcile_actual_image_fallbacks = (
+            lambda s, r, fn: (s, r)
+        )
+
+        results = fetcher.fetch_for_script(
+            bloques=[{"texto": "t"} for _ in range(4)], scene_ranges=scenes,
+        )
+        assert len(results) == 4
+        assert all(r.get("type") == "video" for r in results)
+
+    def test_video_priority_falls_back_to_image(self):
+        """No suitable clip → the tier chain continues to the AI image."""
+        from pipeline.media_fetcher import MediaFetcher
+
+        fetcher = MediaFetcher(config=_make_config())
+        fetcher._build_query_pool = MagicMock(return_value=["action query"])
+        fetcher._try_stock_video_tier = MagicMock(return_value=None)
+        fetcher._try_ai_image_chain = MagicMock(
+            return_value=_make_image_result(path="/tmp/ai_unique.jpg")
+        )
+
+        asset, _ai_used, _q = fetcher._fetch_with_ai_tiers(
+            scene=_make_scene_range(tipo="desarrollo", duration=8),
+            scene_idx=0, total_scenes=3, is_video_priority=True,
+            target_dur=8.0, ctx=None, ai_used=0, ai_max=5, ai_enabled=True,
+        )
+        assert asset is not None and asset["type"] == "image"
+        fetcher._try_stock_video_tier.assert_called_once()
+        fetcher._try_ai_image_chain.assert_called_once()
+
+    def test_target_video_time_pct_warns_by_screen_time(self, caplog):
+        """The target is measured by TIME and only logs a warning."""
+        import logging
+
+        from pipeline.media_fetcher import MediaFetcher
+
+        f = MediaFetcher.__new__(MediaFetcher)
+        f._media_strategy = {"target_video_time_pct": 80}
+        scenes = [_make_scene_range(duration=10, asset_idx=i) for i in range(4)]
+        results = [_make_image_result(path=f"/tmp/i{i}.jpg") for i in range(4)]
+
+        with caplog.at_level(logging.WARNING):
+            pct = f._report_video_time_target(scenes, results)
+        assert pct == 0.0
+        assert any("Video time target not met" in r.message for r in caplog.records)
+
+    def test_target_video_time_pct_met_without_warning(self, caplog):
+        import logging
+
+        from pipeline.media_fetcher import MediaFetcher
+
+        f = MediaFetcher.__new__(MediaFetcher)
+        f._media_strategy = {"target_video_time_pct": 80}
+        scenes = [_make_scene_range(duration=10, asset_idx=i) for i in range(4)]
+        results = [_make_video_result(path=f"/tmp/v{i}.mp4") for i in range(4)]
+
+        with caplog.at_level(logging.WARNING):
+            pct = f._report_video_time_target(scenes, results)
+        assert pct == 100.0
+        assert not any("not met" in r.message for r in caplog.records)
+
+
+
