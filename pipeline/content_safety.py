@@ -22,7 +22,9 @@ Las categorías bloqueadas son:
     "mensaje del universo", críptidos) — el patrón de contenido eliminado de canal2
   - marcadores clickbait de alto riesgo: "MALDITO", "IMPOSIBLE", "INCREÍBLE",
     "que NADIE te contó" — sobrerrepresentados 4-9x en videos eliminados vs.
-    supervivientes (ver análisis de ago 2026)
+    supervivientes (ver análisis de ago 2026). Se bloquean solo cuando se
+    ACUMULAN >=2 marcadores distintos (afinado oct 2026): un único marcador es
+    vocabulario normal y lo corrige la capa de packaging, no debe tirar el vídeo.
 
 Uso:
     from pipeline.content_safety import classify_topic_safety
@@ -116,7 +118,11 @@ _BLOCK_PATTERNS: dict[str, list[str]] = {
         # "lo hallaron en el granero". Este nicho alimenta el flag de spam.
         # "asesin" se movió a _CONTEXT_REQUIRED_PATTERNS: en contextos
         # históricos/documentales ("asesinato de Daniel Tupý") no es spam.
-        "desapareci", "sin rastro", "hallaron", "secuestr",
+        # "hallaron"/"sin rastro" también pasan a contexto-requerido: son
+        # verbos/locuciones corrientes en expediciones y arqueología
+        # ("hallaron los restos del naufragio"), pero siguen bloqueando si
+        # co-ocurre un marcador criminal real (desapareci/víctima/arma...).
+        "desapareci", "secuestr",
         "nunca regres", "cadaver", "encontrado muerto", "encontrado sin vida",
         "homicid", "estrangul", "enterrado vivo", "tortura",
     ],
@@ -161,7 +167,7 @@ _CONTEXT_REQUIRED_PATTERNS: dict[str, list[str]] = {
         "de nacimiento", "dos caras", "infante",
     ],
     "true_crime": [
-        "asesin",
+        "asesin", "hallaron", "sin rastro",
     ],
 }
 
@@ -192,6 +198,23 @@ def _deterministic_check(texts: list[str]) -> SafetyVerdict | None:
     if not joined:
         return None
     for category, patterns in _BLOCK_PATTERNS.items():
+        # Clickbait: un único marcador ("imposible", "increíble") es vocabulario
+        # normal y NO debe tirar el vídeo entero — la capa de packaging ya reescribe
+        # esos títulos. Solo bloqueamos por contenido cuando se ACUMULAN >=2
+        # marcadores distintos (señal fuerte de clickbait de alto riesgo).
+        if category == "clickbait_riesgo":
+            matched = [p for p in patterns if _normalize(p) in joined]
+            if len(matched) >= 2:
+                return SafetyVerdict(
+                    safe=False,
+                    reason=(
+                        "tema bloqueado por categoría 'clickbait_riesgo' "
+                        f"(marcadores: {', '.join(matched[:3])})"
+                    ),
+                    categories=[category],
+                    source="deterministic",
+                )
+            continue
         for pat in patterns:
             if _normalize(pat) in joined:
                 return SafetyVerdict(
