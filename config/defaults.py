@@ -378,14 +378,34 @@ PIXABAY_API_TIMEOUT = 30
 # override it via their config / DB config_json.
 ASSET_DECISION_LOG_ENABLED = True
 
+# ── Observabilidad estructurada (oct 2026) ─────────────────────────
+# Emite eventos JSON correlacionados a ``logs/obs/`` (pipeline/observability.py).
+# El módulo es fail-open absoluto: cualquier fallo de logging se traga y NUNCA
+# interrumpe generación/render. ``OBS_LOG_ENABLED=False`` o
+# ``OBS_LOG_LEVEL="off"`` son un no-op total sin errores.
+# Canales pueden sobrescribir estas claves vía su config / DB config_json; el
+# módulo resuelve el valor con prioridad variable de entorno > config del canal
+# > default de aquí.
+OBS_LOG_ENABLED = True
+# off | summary | detail | trace. "detail" añade eventos por escena; "trace"
+# añade el texto completo de prompts/respuestas LLM (que en detail solo se
+# registran como sha1 + longitud, nunca el texto).
+OBS_LOG_LEVEL = "detail"
+OBS_LOG_DIR = "logs/obs"
+OBS_LOG_MAX_MB = 50
+OBS_LOG_BACKUPS = 10
+OBS_LOG_RETENTION_DAYS = 14
+# 0.0 = descarta eventos de escena; 1.0 = todos. Solo aplica en detail/trace.
+OBS_LOG_SAMPLE_RATE = 1.0
+
 # Fase 2 (calidad-coherencia): editorial review of generated scripts.
-# OFF by default — when enabled, generate_v2 attempts at most
+# ON by default (oct 2026): generate_v2 attempts at most
 # SCRIPT_EDITORIAL_REVIEW_MAX_CALLS repair passes and keeps the ORIGINAL
 # script unless the repaired version passes validation AND improves the
 # validator score. Purely additive: it never triggers model failover and
 # never blocks generation (fail-open). Channels may override both keys via
 # their config / DB config_json.
-SCRIPT_EDITORIAL_REVIEW_ENABLED = False
+SCRIPT_EDITORIAL_REVIEW_ENABLED = True
 SCRIPT_EDITORIAL_REVIEW_MAX_CALLS = 1
 
 # Fase 3 (calidad-coherencia): deliberate temporal segments.
@@ -397,14 +417,14 @@ SCRIPT_EDITORIAL_REVIEW_MAX_CALLS = 1
 THEME_TEMPORAL_OVERRIDES_ENABLED = True
 
 # ── Fase 4b: verificador visual de assets (calidad-coherencia) ──────
-# "off"     → no-op absoluto (default; comportamiento actual intacto).
+# "off"     → no-op absoluto.
 # "observe" → analiza el candidato elegido y registra hallazgos; NUNCA
 #             descarta ni bloquea nada.
 # "enforce" → además descarta candidatos con logo confirmado o resolución
 #             claramente insuficiente y prueba el siguiente dentro del
-#             presupuesto. NO activar por defecto: fail-open ante cualquier
-#             error (si la verificación falla, se acepta el asset).
-VISUAL_VERIFY_MODE = "off"
+#             presupuesto. Activado por defecto (oct 2026); fail-open ante
+#             cualquier error (si la verificación falla, se acepta el asset).
+VISUAL_VERIFY_MODE = "enforce"
 # Máximo de candidatos verificados por escena en modo "enforce". Al agotar
 # el presupuesto se acepta el siguiente candidato sin verificar (fail-open).
 VISUAL_VERIFY_MAX_CANDIDATES = 3
@@ -534,9 +554,9 @@ MEDIA_STRATEGY = {
     "action_scene_boost": True,
     # When True, a scene with a concrete action refuses a candidate without
     # any action overlap unless it is the last resort (fail-open: if no
-    # candidate matches the action, the full list is used). Default False =
-    # observation mode.
-    "require_action_match": False,
+    # candidate matches the action, the full list is used). Default True
+    # (oct 2026) = strict action matching, still fail-open.
+    "require_action_match": True,
     # Maximum % of scenes that may end up on a GENERIC fallback tier
     # (context/establishment or motif/symbolic). Exceeding it logs a warning
     # but never aborts the pipeline. 0-100.

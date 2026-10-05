@@ -427,6 +427,67 @@ def validate_channel_config(slug: str, config: Dict[str, Any]) -> List[str]:
             )
             config["THEME_TEMPORAL_OVERRIDES_ENABLED"] = True
 
+    # ── Observabilidad estructurada (tolerant, never break configs) ──
+    # `OBS_LOG_LEVEL` is an enum; malformed values fall back to "detail".
+    # Buckets everything under a single try so a malformed OBS block can never
+    # break a channel config.
+    _OBS_LEVELS = ("off", "summary", "detail", "trace")
+    if "OBS_LOG_LEVEL" in config:
+        val = config.get("OBS_LOG_LEVEL")
+        level = val.strip().lower() if isinstance(val, str) else ""
+        if level not in _OBS_LEVELS:
+            warnings.append(
+                f"[{slug}] OBS_LOG_LEVEL={val!r} is not one of "
+                f"{_OBS_LEVELS} — forcing 'detail'"
+            )
+            config["OBS_LOG_LEVEL"] = "detail"
+        else:
+            config["OBS_LOG_LEVEL"] = level
+
+    for obs_bool in ("OBS_LOG_ENABLED",):
+        if obs_bool in config:
+            val = config.get(obs_bool)
+            if not isinstance(val, bool):
+                warnings.append(
+                    f"[{slug}] {obs_bool}={val!r} is not boolean — forcing True"
+                )
+                config[obs_bool] = True
+
+    for obs_int, obs_default in (
+        ("OBS_LOG_MAX_MB", 50), ("OBS_LOG_BACKUPS", 10),
+        ("OBS_LOG_RETENTION_DAYS", 14),
+    ):
+        if obs_int in config:
+            val = config.get(obs_int)
+            if isinstance(val, bool) or not isinstance(val, (int, float)) or int(val) < 0:
+                warnings.append(
+                    f"[{slug}] {obs_int}={val!r} is not a non-negative integer "
+                    f"— forcing {obs_default}"
+                )
+                config[obs_int] = obs_default
+            else:
+                config[obs_int] = int(val)
+
+    if "OBS_LOG_SAMPLE_RATE" in config:
+        val = config.get("OBS_LOG_SAMPLE_RATE")
+        try:
+            rate = float(val)
+        except (TypeError, ValueError):
+            warnings.append(
+                f"[{slug}] OBS_LOG_SAMPLE_RATE={val!r} is not numeric — forcing 1.0"
+            )
+            config["OBS_LOG_SAMPLE_RATE"] = 1.0
+        else:
+            if rate < 0.0 or rate > 1.0:
+                clamped = max(0.0, min(1.0, rate))
+                warnings.append(
+                    f"[{slug}] OBS_LOG_SAMPLE_RATE={val!r} out of range [0, 1] "
+                    f"— clamping to {clamped}"
+                )
+                config["OBS_LOG_SAMPLE_RATE"] = clamped
+            else:
+                config["OBS_LOG_SAMPLE_RATE"] = rate
+
     # ── Log results ────────────────────────────────────────────
     if warnings:
         for w in warnings:
