@@ -22,9 +22,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import shutil
 import time
+
+logger = logging.getLogger("autotube.tts_bridge")
 
 MODE_FILE = os.environ.get("SS_MODE_FILE", "/var/lib/taildeck/projects/autotube.mode")
 SPOOL_DIR = os.environ.get("SS_SPOOL_DIR", "/var/lib/taildeck/spool")
@@ -89,41 +92,56 @@ def _copy(src_dir: str, out_dir: str, name: str) -> str:
 
 
 def delegar(bloques: list, voice_config: dict, video_id=None, out_dir: str = ".",
-            cta_text: str | None = None, timeout: float = 3600.0,
-            poll: float = 5.0) -> dict:
+            cta_text: str | None = None, timeout: float = 1200.0,
+            poll: float = 5.0, retries: int = 1) -> dict:
     """Delega la síntesis al pool y aplica el resultado. Devuelve el mismo
-    diccionario que la ruta local de `phase_tts`."""
-    rid = f"tts-{int(time.time())}-{os.getpid()}-{video_id or 'v'}"
-    base_name = f"narration_{rid}"
-    payload = {
-        "bloques": bloques,
-        "voice_config": voice_config or {},
-        "output_base": base_name,
-        "rid": rid,
-        "cta_text": cta_text or "",
-    }
-    # Un DIRECTORIO por petición: el adaptador empuja ese dir a push/in y el
-    # worker lee el `request.json` que contiene. Un fichero plano hacía que el
-    # adaptador empujara TODO el IN_DIR y el worker buscara un request.json
-    # inexistente (bug de contrato, jobs mursepju-…/musahgfx-…/musfqiya-…).
-    req_dir = os.path.join(IN_DIR, rid)
-    req_file = os.path.join(req_dir, "request.json")
-    _write_json_atomic(req_file, payload)
+    diccionario que la ruta local de `phase_tts`.
 
-    request = {
-        "id": rid,
-        "project": "autotube",
-        "process": "tts_kokoro",
-        "externalId": f"tts:{video_id or rid}",
-        "params": {"requestFile": req_file, "outBase": base_name},
-        "fingerprint": _fingerprint({"bloques": bloques, "voice_config": voice_config,
-                                     "cta_text": cta_text or ""}),
-    }
-    _write_json_atomic(os.path.join(SPOOL_DIR, f"{rid}.json"), request)
+    (fix oct 2026) El timeout baja de 3600s a 1200s y se reintenta `retries`
+    veces antes de abortar: el pool a veces no devuelve resultado (job muerto)
+    y esperar 1h dejaba el vídeo colgado. Reintentar re-encola la petición.
+    """
+    job_id = result_dir = est = None
+    for attempt in range(retries + 1):
+        rid = f"tts-{int(time.time())}-{os.getpid()}-{video_id or 'v'}"
+        base_name = f"narration_{rid}"
+        payload = {
+            "bloques": bloques,
+            "voice_config": voice_config or {},
+            "output_base": base_name,
+            "rid": rid,
+            "cta_text": cta_text or "",
+        }
+        # Un DIRECTORIO por petición: el adaptador empuja ese dir a push/in y el
+        # worker lee el `request.json` que contiene. Un fichero plano hacía que el
+        # adaptador empujara TODO el IN_DIR y el worker buscara un request.json
+        # inexistente (bug de contrato, jobs mursepju-…/musahgfx-…/musfqiya-…).
+        req_dir = os.path.join(IN_DIR, rid)
+        req_file = os.path.join(req_dir, "request.json")
+        _write_json_atomic(req_file, payload)
 
-    job_id, result_dir, est = _buscar_estado(rid, timeout, poll)
+        request = {
+            "id": rid,
+            "project": "autotube",
+            "process": "tts_kokoro",
+            "externalId": f"tts:{video_id or rid}",
+            "params": {"requestFile": req_file, "outBase": base_name},
+            "fingerprint": _fingerprint({"bloques": bloques, "voice_config": voice_config,
+                                         "cta_text": cta_text or ""}),
+        }
+        _write_json_atomic(os.path.join(SPOOL_DIR, f"{rid}.json"), request)
+
+        job_id, result_dir, est = _buscar_estado(rid, timeout, poll)
+        if est and est.get("ok"):
+            break
+        logger.warning(
+            "TTS pool sin resultado ok (intento %d/%d, rid=%s, job=%s): %s",
+            attempt + 1, retries + 1, rid, job_id, est,
+        )
     if not est or not est.get("ok"):
-        raise RuntimeError(f"TTS delegado sin resultado ok (rid={rid}, job={job_id}): {est}")
+        raise RuntimeError(
+            f"TTS delegado sin resultado ok (rid={rid}, job={job_id}): {est}"
+        )
 
     os.makedirs(out_dir, exist_ok=True)
     art = est.get("artefactos") or {}

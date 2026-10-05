@@ -24,20 +24,41 @@ def test_true_crime_asesinato_bloqueado():
     assert not _verdict("El capitán que la guerrilla asesinó (CASO REAL)")
 
 
-def test_true_crime_desaparicion_bloqueada():
-    assert not _verdict("129 hombres desaparecieron en el ártico")
+# Afinado oct 2026: los términos de DESAPARICIÓN pasan a contexto-requerido
+# porque son el nicho legítimo de canal4 ("Expediciones sin retorno"). Solo
+# bloquean si co-ocurre un marcador criminal inequívoco.
+def test_true_crime_desaparicion_sin_contexto_permite():
+    assert _verdict("La expedición que desapareció en el ártico")
 
 
-def test_true_crime_sin_rastro_bloqueado():
-    assert not _verdict("Desapareció sin dejar rastro")
+def test_true_crime_desaparicion_con_contexto_criminal_bloquea():
+    assert not _verdict("La guerrilla asesinó a la víctima que desapareció")
+
+
+def test_true_crime_sin_rastro_sin_contexto_permite():
+    assert _verdict("La caravana que se perdió sin dejar rastro en el desierto")
 
 
 def test_true_crime_secuestro_bloqueado():
     assert not _verdict("El secuestro que conmocionó a la ciudad")
 
 
-def test_true_crime_nunca_regreso_bloqueado():
-    assert not _verdict("5 perdidos en la montaña y NUNCA regresaron")
+def test_true_crime_nunca_regres_sin_contexto_permite():
+    assert _verdict("5 exploradores perdidos en la montaña y nunca regresaron")
+
+
+def test_true_crime_nunca_regres_con_contexto_criminal_bloquea():
+    assert not _verdict("La banda criminal los mató; nunca regresaron")
+
+
+def test_true_crime_hallaron_sin_contexto_permite():
+    # "hallaron" es verbo corriente en expediciones/arqueología (falso positivo
+    # corregido oct 2026: mataba shorts de canal4).
+    assert _verdict("Hallaron los restos de la expedición perdida en el Ártico")
+
+
+def test_true_crime_hallaron_con_contexto_criminal_bloquea():
+    assert not _verdict("Hallaron el cuerpo de la víctima de la guerrilla")
 
 
 # ── Sobrenatural presentado como real (canal2 eliminados) ─────────
@@ -61,21 +82,39 @@ def test_sobrenatural_mas_alla_bloqueado():
     assert not _verdict("Las últimas llamadas desde el más allá")
 
 
-# ── Marcadores clickbait de alto riesgo (decisión binaria) ────────
-def test_clickbait_maldito_bloqueado():
-    assert not _verdict("El rodaje maldito de Saigón 1948 (REAL)")
+# ── Marcadores clickbait de alto riesgo ───────────────────────────
+# Afinado oct 2026: un ÚNICO marcador es vocabulario normal (lo corrige la capa
+# de packaging); solo se bloquea el contenido cuando se ACUMULAN >=2.
+def test_clickbait_un_marcador_permite():
+    assert _verdict("El rodaje maldito de Saigón 1948 (REAL)")
 
 
-def test_clickbait_nadie_te_conto_bloqueado():
-    assert not _verdict("Licencia de enfermería: el loophole que NADIE te contó")
+def test_clickbait_un_marcador_increible_permite():
+    assert _verdict("Historias médicas que nadie debería escuchar (Increible)")
 
 
-def test_clickbait_increible_bloqueado():
-    assert not _verdict("Historias médicas que nadie debería escuchar (Increible)")
+def test_clickbait_un_marcador_imposible_permite():
+    assert _verdict("Ruinas que guardan secretos IMPOSIBLES de explicar")
 
 
-def test_clickbait_imposible_bloqueado():
-    assert not _verdict("Ruinas que guardan secretos IMPOSIBLES de explicar")
+def test_clickbait_dos_marcadores_bloquean():
+    assert not _verdict("Historias increíbles que NADIE te contó")
+
+
+def test_clickbait_tres_marcadores_bloquean():
+    assert not _verdict("El caso maldito imposible que NADIE te contó")
+
+
+def test_clickbait_en_cuerpo_no_bloquea():
+    # El clickbait solo se evalúa en el título: la mención en el guion es
+    # vocabulario normal y lo corrige la capa de packaging.
+    v = classify_topic_safety(
+        topic="anomalía médica",
+        title="El síndrome que desconcierta a los médicos",
+        script_texts=["Era imposible de diagnosticar", "parecía increíble", "un caso maldito"],
+        use_llm=False,
+    )
+    assert v.safe
 
 
 # ── Folklore narrativo que SOBREVIVE (no debe romperse) ───────────

@@ -4088,13 +4088,44 @@ def _alert_standalone_failed(channel_id: int, reason: str) -> None:
         logger.warning("standalone failed alert error: %s", _alert_exc)
 
 
+def _is_intentional_short_rejection(reason: str) -> bool:
+    """True si el slot felló por un filtro/rechazo ESPERADO del pipeline.
+
+    Rechazos deliberados (filtro anti-strike, dedup de tema, título duplicado,
+    audio demasiado largo) NO son fallos accionables: no deben generar una
+    alerta warning `short_dispatch_failed` que ensucia el panel. Se registran a
+    log y se descartan (fix oct 2026: eran ~12 de 20 warnings abiertos).
+    """
+    r = (reason or "").lower()
+    markers = (
+        "contenido no seguro",
+        "tema bloqueado por categoría",
+        "tema bloqueado por categoria",
+        "tema ya consumido",
+        "título similar",
+        "titulo similar",
+        "short audio too long",
+        "audio too long",
+    )
+    return any(m in r for m in markers)
+
+
 def _alert_short_dispatch_failed(slot_id: int, channel_id: int, reason: str) -> None:
     """Alerta (deduplicada) cuando un slot de short se CANCELA tras agotar reintentos.
 
     (fix ago 2026) Los fallos de native short eran silenciosos: job 'failed' sin
     alerta. create_alert deduplica por (entity_type, entity_id, alert_type), así
     que hay UNA sola alerta sin resolver por slot.
+
+    (fix oct 2026) Los rechazos intencionales del pipeline (seguridad, dedup de
+    tema, título duplicado, audio largo) NO se alertan: no son fallos.
     """
+    if _is_intentional_short_rejection(reason):
+        logger.info(
+            "Short slot #%s cancelado por rechazo intencional (no se alerta): %s",
+            slot_id, (reason or "")[:160],
+        )
+        return
     try:
         from api.services.lifecycle_monitor import create_alert
         from database.db_extended import ExtendedDatabase

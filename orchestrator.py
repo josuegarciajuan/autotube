@@ -567,6 +567,10 @@ class PipelineOrchestrator:
         When is_marathon=True, generates a long-form ~1h marathon script.
         """
         start = time.time()
+        # Flag de DIFERIMIENTO (no fallo): lo activan los guards de nicho. El
+        # worker lo usa para dejar el vídeo en 'draft' (re-planificable) en vez
+        # de 'error' (que dispara alerta crítica 'failed'). Se resetea por intento.
+        self._script_deferred = False
 
         # ── Fase 2/3: seeding de demanda en TODAS las rutas (0 cuota) ──
         # Antes solo se ejecutaba en la ruta normal; viral y maratón salían por
@@ -655,6 +659,11 @@ class PipelineOrchestrator:
                     "[%s] niche-guard estricto: sin fuentes on-niche — difiriendo "
                     "la selección en vez de publicar fuera de nicho", self.canal)
                 self._emit_niche_defer_alert("sin fuentes on-niche")
+                # Señal explícita al worker: esto es un DIFERIMIENTO, no un fallo
+                # terminal. El worker lo convierte en vídeo 'draft' + slot
+                # cancelado (re-planificable) en vez de 'error' (que dispara la
+                # alerta crítica 'failed'). Fix oct 2026.
+                self._script_deferred = True
                 return None
             if _niche_dropped:
                 logger.info(
@@ -898,6 +907,7 @@ class PipelineOrchestrator:
             "[%s] Tema fuera de nicho (estricto) — guion diferido: '%s'",
             self.canal, str(title)[:90])
         self._emit_niche_defer_alert("tema fuera de nicho")
+        self._script_deferred = True
         return True
 
     def _get_viral_scraper(self):

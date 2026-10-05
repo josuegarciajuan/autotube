@@ -1108,6 +1108,33 @@ def run_job(
                 script = orch.phase_generate_script()
             
             if not script:
+                # ── Diferimiento por nicho/fuentes (NO es un fallo terminal) ──
+                # El niched-guard estricto difiere cuando no hay fuentes on-niche
+                # (p. ej. scrapers externos bloqueados: Reddit 403, Wikipedia 429).
+                # Antes esto marcaba el vídeo 'error' y disparaba una alerta crítica
+                # 'failed' por un problema transitorio de fuentes. Ahora se deja el
+                # vídeo en 'draft' (re-planificable) y se cancela el slot, sin alerta.
+                if getattr(orch, "_script_deferred", False):
+                    defer_msg = (
+                        "Diferido por nicho: sin fuentes on-niche disponibles "
+                        "(fuentes externas vacías/bloqueadas). Vídeo re-planificable."
+                    )
+                    logger.warning(defer_msg)
+                    try:
+                        _slot = db.get_planned_slot_for_video(video_id)
+                        if _slot and _slot.get("id"):
+                            db.cancel_slots([_slot["id"]])
+                            logger.info("Slot #%s cancelado (diferido por nicho)", _slot["id"])
+                    except Exception as _slot_exc:  # noqa: BLE001
+                        logger.warning("No se pudo cancelar el slot diferido: %s", _slot_exc)
+                    db.update_job(job_id, status="failed", error_msg=defer_msg[:500])
+                    db.update_video(video_id, status="draft", progress_phase="script",
+                                    error_message=defer_msg)
+                    log_phase_end(db, entity_type='video', entity_id=video_id,
+                                  phase='script', channel_id=channel_id,
+                                  message='Script diferido por nicho (sin fuentes on-niche)')
+                    return False
+
                 error_msg = (
                     "No se pudo generar el guion (sin contenido disponible; "
                     "fuentes vacías o candidatos rechazados por seguridad)"
