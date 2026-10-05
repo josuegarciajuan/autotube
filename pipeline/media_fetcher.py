@@ -586,6 +586,9 @@ class MediaFetcher:
         self._used_asset_urls = set()
         self._used_image_urls = set()
 
+        # Fase 4a: fresh generic-fallback accounting window for this script.
+        self._reset_fallback_tracker()
+
         # Refresh cross-video dedup set from DB (includes assets from
         # recently completed/uploaded videos)
         self._load_cross_video_filenames()
@@ -985,6 +988,9 @@ class MediaFetcher:
             )
             logger.error(error_msg)
             raise RuntimeError(error_msg)
+        # Fase 4a: advisory warning (never aborts) when the generic fallback
+        # tier was used more than the configured cap allows.
+        self._warn_generic_fallback()
         return results
 
     def _reconcile_actual_image_fallbacks(
@@ -2645,120 +2651,170 @@ class MediaFetcher:
             return bool(cfg.get("THEME_TEMPORAL_OVERRIDES_ENABLED", True))
         return bool(getattr(cfg, "THEME_TEMPORAL_OVERRIDES_ENABLED", True))
 
+    def _enrich_with_intent(self, sctx, scene: dict):
+        """Fill missing filmable-intent fields with deterministic heuristics.
+
+        Fase 4a: the visual bible may omit ``subject``/``action``/… (or be
+        absent).  ``derive_scene_intent`` never raises and is used ONLY to fill
+        empty fields, so an explicit bible intent always wins.
+        """
+        try:
+            if getattr(sctx, "action", "") and getattr(sctx, "subject", ""):
+                return sctx
+            from pipeline.scene_context import derive_scene_intent
+
+            intent = derive_scene_intent(
+                scene, setting=getattr(sctx, "setting", "") or ""
+            )
+            if not getattr(sctx, "subject", ""):
+                sctx.subject = intent.get("subject", "") or ""
+            if not getattr(sctx, "action", ""):
+                sctx.action = intent.get("action", "") or ""
+            if not getattr(sctx, "object", ""):
+                sctx.object = intent.get("object", "") or ""
+            if not getattr(sctx, "setting", ""):
+                sctx.setting = intent.get("setting", "") or ""
+            if not getattr(sctx, "must_show", None):
+                sctx.must_show = list(intent.get("must_show", []) or [])
+        except Exception:
+            pass
+        return sctx
+
     def _build_query_pool(self, scene: dict, ctx, scene_idx: int = 0) -> list[str]:
         """Build an ordered list of query variations for a scene.
 
-        Order (narrative priority): narrative-first queries try first,
-        theme-anchored queries are fallbacks. This ensures that what you
-        SEE matches what you HEAR, while maintaining visual context.
+        Fase 4a — explicit fallback ladder (``build_fallback_ladder``):
+        ``action_exact → action_compatible → context → symbolic``.  The stock
+        search consumes the list in order, so a concrete, action-grounded query
+        is never degraded to a generic one while action variants remain.
 
-        Returns deduplicated list of non-empty queries (~11-13 variants).
+        Additional guarantees:
+          - the first variant is the action-exact query (subject+action+object+
+            setting) when the scene carries filmable intent;
+          - the era anchor is appended to EVERY non-timeless variant;
+          - deduplicated, every variant fits the provider ``max_len``.
+
+        Returns deduplicated list of non-empty queries.
         """
-        from pipeline.cinematic_staging import enrich_scene_query, sanitize_person_query
-        base = enrich_scene_query(
+        from pipeline.cinematic_staging import (
+            FALLBACK_LADDER,
+            build_contextual_fallback,
+            build_fallback_ladder,
+            enrich_scene_query,
+            has_person_reference,
+            sanitize_person_query,
+            sanitize_shot_direction,
+        )
+
+        raw_base = enrich_scene_query(
             scene.get("search_query_en", ""),
             ctx,
             scene.get("texto", ""),
         )
-        base = sanitize_person_query(base)
+        base = sanitize_person_query(raw_base)
 
-        pool = []
-
-        # 1. Base query (narrative + theme, roughly 60-70% / 30-40% ratio
-        #    thanks to the improved LLM prompt in script_generator.py)
-        if base and base.strip():
-            pool.append(base.strip())
-
-        # 1b. Bible-derived variant (Phase 3, C2): grounds the scene in the
-        #     video's GLOBAL visual world (visual concept / entity / motif /
-        #     era). Comes right after the narrative-first query so "lo que ves
-        #     = lo que oyes" stays dominant while stock clips also respect the
-        #     bible's protagonist/bridge/recurring-motif direction.
-        if getattr(self, "_visual_bible", None):
-            sctx = self._scene_context(scene, scene_idx=scene_idx)
-            bv = sctx.to_query_variant()
-            if bv and bv != (base or "").strip() and bv not in pool:
-                pool.append(bv)
-
-        scene_tipo = scene.get("tipo", "desarrollo")
-
-        # 2. Narrative-heavy variant: strip most theme words, keep 1 anchor.
-        #    This prioritizes narrative content with minimal theme anchoring.
-        #    Comes BEFORE directional variations so narrative specificity
-        #    wins over theme-heavy angle variations.
-        narrative_heavy = self._extract_narrative_keywords(base, ctx) if base else ""
-        if narrative_heavy and narrative_heavy != base and narrative_heavy.strip():
-            pool.append(narrative_heavy.strip())
-
-        # 2b. Era-anchored variant (HIGH priority for historical scenes).
-        #     Guarantees the FIRST search of a historical scene carries the
-        #     era anchor, even though the exhaustive path uses pool queries
-        #     directly (they never pass through _build_search_query).
+        # ── Era anchor: required on every non-timeless variant ──
         era_phrase = None
         if ctx and self._media_strategy.get("era_anchor_enabled", True):
             from pipeline.era_terms import era_anchor
             try:
-                era_phrase = era_anchor(ctx.era_decade, ctx.era)
+                era_phrase = era_anchor(
+                    getattr(ctx, "era_decade", ""), getattr(ctx, "era", "")
+                )
             except Exception:
                 era_phrase = None
-        if era_phrase and base:
-            v_narr = f"{narrative_heavy} {era_phrase}" if narrative_heavy else None
-            v_base = f"{base} {era_phrase}"
-            if v_narr and len(v_narr) <= 100 and v_narr not in pool:
-                pool.append(v_narr)
-            elif len(v_base) <= 100 and v_base not in pool:
-                pool.append(v_base)
 
-        # 3. Base + directional variations (reduced to 3 from 5 — keep the
-        #    most distinct ones; wide/close/distant have most visual variety)
+        from pipeline.cinematic_staging import fit_query
+
+        def with_era(query: str) -> str:
+            query = (query or "").strip()
+            if not query:
+                return ""
+            if not era_phrase:
+                return fit_query(query, 100)
+            if era_phrase.lower() in query.lower():
+                return fit_query(query, 100)
+            # Drop a trailing partial era fragment (e.g. left behind after
+            # stripping theme keywords) so we never emit
+            # "… 17th  17th century wooden sailing ship".
+            phrase_words = era_phrase.lower().split()
+            qwords = query.split()
+            for k in range(min(len(qwords), len(phrase_words) - 1), 0, -1):
+                tail = [w.lower().strip(" ,.") for w in qwords[-k:]]
+                if tail == phrase_words[:k]:
+                    query = " ".join(qwords[:-k]).rstrip(" ,.")
+                    break
+            # Reserve budget so the era anchor is NEVER the part trimmed away:
+            # guarantee it is present in every non-timeless variant.
+            budget = max(10, 100 - len(era_phrase) - 1)
+            return f"{fit_query(query, budget)} {era_phrase}".strip()
+
+        # ── Filmable intent (bible first, deterministic fallback) ──
+        concept_sctx = self._scene_context(scene, scene_idx=scene_idx)
+        sctx = self._enrich_with_intent(
+            self._scene_context(scene, scene_idx=scene_idx), scene
+        )
+        action_phrase = (getattr(sctx, "action", "") or "").strip()
+        search_query_en = (scene.get("search_query_en") or "").strip()
+
+        # Action-exact query: prefer the LLM query when it already encodes the
+        # action; otherwise compose subject+action+object+setting.
+        if action_phrase and search_query_en and any(
+            w and w in search_query_en.lower() for w in action_phrase.split()
+        ):
+            action_exact = base
+        else:
+            intent_phrase = ""
+            try:
+                intent_phrase = sctx._intent_phrase()
+            except Exception:
+                intent_phrase = ""
+            action_exact = (
+                sanitize_person_query(intent_phrase) if intent_phrase else base
+            )
+
+        tiers: dict[str, list[str]] = {tier: [] for tier in FALLBACK_LADDER}
+
+        def add(tier: str, query: str) -> None:
+            q = with_era(query)
+            if q:
+                tiers[tier].append(q)
+
+        # 1. Action-exact (subject + action + object + setting + era).
+        add("action_exact", action_exact)
+
+        # 2. Action-compatible: the narrative/theme-grounded query, its
+        #    narrative-heavy variant, directional variants and simplified
+        #    variants (which now keep the verb — see ``_simplify_query``).
+        add("action_compatible", base)
+        narrative_heavy = self._extract_narrative_keywords(base, ctx) if base else ""
+        add("action_compatible", narrative_heavy)
         if base:
-            from pipeline.cinematic_staging import has_person_reference, sanitize_shot_direction
             has_person = has_person_reference(base)
             for suffix in [
                 "wide shot establishing",
                 sanitize_shot_direction("close-up detail", has_person=has_person),
                 "distant view atmospheric",
             ]:
-                v = f"{base} {suffix}"
-                if len(v) <= 100:
-                    pool.append(v)
+                add("action_compatible", f"{base} {suffix}")
+        add("action_compatible", self._simplify_query(base) if base else "")
+        add("action_compatible", self._simplify_query(base, max_keywords=2) if base else "")
 
-        # 4. Simplified: just the key nouns (3-4 words, no style modifiers)
-        simple = self._simplify_query(base) if base else ""
-        if simple and simple != base and simple.strip():
-            pool.append(simple)
+        # 3. Context / establishment: bible-derived variant, anti-theme clean
+        #    query and dynamic theme fallbacks anchored to the video world.
+        if getattr(self, "_visual_bible", None):
+            bible_variant = concept_sctx.to_query_variant()
+            add("context", bible_variant)
+        if ctx and getattr(ctx, "theme_keywords_en", None) and base:
+            add("context", _strip_theme_keywords(base, ctx.theme_keywords_en))
+        scene_tipo = scene.get("tipo", "desarrollo")
+        if ctx and getattr(ctx, "primary_subject", ""):
+            add("context", build_contextual_fallback(scene_tipo, ctx))
+            add("context", self._build_themed_fallback(scene_tipo, ctx))
 
-        # 4b. Ultra-simplified: 2 core nouns. Drops overly-specific proper
-        #     nouns (site names, etc.) that stock providers can't match, so
-        #     the general subject still has a chance before generic fallbacks.
-        ultra_simple = self._simplify_query(base, max_keywords=2) if base else ""
-        if ultra_simple and ultra_simple not in pool and ultra_simple.strip():
-            pool.append(ultra_simple)
-
-        # 5. Without theme keywords — anti-poisoning fallback
-        if ctx and ctx.theme_keywords_en and base:
-            clean = _strip_theme_keywords(base, ctx.theme_keywords_en)
-            if clean and clean != base and clean.strip():
-                pool.append(clean)
-
-        # 6. Themed fallback queries: built dynamically from ThemeContext.
-        #    Topic-aware and moved BEFORE the generic type fallback so the
-        #    video stays anchored to its actual subject.
-        if ctx and hasattr(ctx, 'primary_subject') and ctx.primary_subject:
-            from pipeline.cinematic_staging import build_contextual_fallback
-            contextual_fb = build_contextual_fallback(scene_tipo, ctx)
-            if contextual_fb and contextual_fb not in pool:
-                pool.append(contextual_fb)
-            themed_fb = self._build_themed_fallback(scene_tipo, ctx)
-            if themed_fb and themed_fb not in pool:
-                pool.append(themed_fb)
-
-        # 7. Type-specific fallback queries (generic, near the end)
-        type_fb = self._FALLBACK_BY_TYPE.get(scene_tipo, "")
-        if type_fb and type_fb not in pool:
-            pool.append(type_fb)
-
-        # 8. Channel-configured fallback queries (absolute last resort)
+        # 4. Symbolic / absolute last resort: type-specific then channel
+        #    configured generic fallbacks.
+        add("symbolic", self._FALLBACK_BY_TYPE.get(scene_tipo, ""))
         fallbacks = self._media_strategy.get("fallback_queries", [
             "historical documentary archival photography cinematic 16:9",
             "ancient history artifacts museum exhibition documentary",
@@ -2768,19 +2824,9 @@ class MediaFetcher:
             "dark mystery abandoned exploration atmosphere cinematic",
         ])
         for fb in fallbacks:
-            if fb and fb.strip() and fb not in pool:
-                pool.append(fb.strip())
+            add("symbolic", fb)
 
-        # Remove empty/whitespace and deduplicate while preserving order
-        seen = set()
-        result = []
-        for q in pool:
-            qs = q.strip()
-            if qs and qs not in seen:
-                seen.add(qs)
-                result.append(qs)
-
-        return result
+        return build_fallback_ladder(tiers, max_len=100)
 
     # ── Relevance & anachronism filtering (v9) ─────────────────
 
@@ -2848,6 +2894,24 @@ class MediaFetcher:
             return False
         return bool(anachronism_hits(text))
 
+    def _is_anachronistic_for_scene(self, candidate: dict, ctx, scene_context) -> bool:
+        """Anachronism veto honouring the per-scene era (Fase 3).
+
+        When ``scene_context.era`` resolves to a timeless/present era (a
+        deliberate temporal jump), the global historical veto does NOT apply —
+        real modern footage is allowed for that scene.
+        """
+        era = getattr(scene_context, "era", "") or ""
+        if era:
+            try:
+                from pipeline.era_terms import era_anchor
+
+                if era_anchor("", era) is None:
+                    return False
+            except Exception:
+                return False
+        return self._is_anachronistic(candidate, ctx)
+
     def _relevance_score(self, candidate: dict, scene: dict, ctx) -> float:
         """Score how well a candidate matches the scene's narrative keywords.
 
@@ -2883,6 +2947,79 @@ class MediaFetcher:
             score -= penalty
 
         return max(0.0, score)
+
+    def _legacy_relevance_order(
+        self, asset_candidates: list[dict], scene: dict, ctx,
+    ) -> list[dict]:
+        """Pre-Fase-4a ordering kept as a fail-open fallback.
+
+        Scores by ``_relevance_score``, prefers candidates clearing
+        ``relevance_min_overlap`` and otherwise keeps the whole page.
+        """
+        try:
+            scored: list[tuple[float, dict]] = []
+            for candidate in asset_candidates:
+                if self._is_asset_duplicate(candidate):
+                    continue
+                if self._is_anachronistic(candidate, ctx):
+                    continue
+                scored.append((self._relevance_score(candidate, scene, ctx), candidate))
+            if not scored:
+                return []
+            scored.sort(key=lambda pair: pair[0], reverse=True)
+            try:
+                min_overlap = float(self._media_strategy.get("relevance_min_overlap", 1))
+            except (TypeError, ValueError):
+                min_overlap = 1.0
+            if scored[0][0] >= min_overlap:
+                return [c for s, c in scored if s >= min_overlap]
+            return [c for _, c in scored]
+        except Exception:
+            return list(asset_candidates)
+
+    # ── Fase 4a: generic-fallback accounting (advisory only) ──────────
+
+    def _reset_fallback_tracker(self) -> None:
+        """Start a fresh per-script generic-fallback accounting window."""
+        try:
+            from pipeline.cinematic_staging import GenericFallbackTracker
+
+            max_pct = self._media_strategy.get("max_generic_fallback_pct", 20)
+            self._fallback_tracker = GenericFallbackTracker(max_pct=max_pct)
+        except Exception:
+            self._fallback_tracker = None
+
+    def _record_fallback_tier(self, query: str) -> None:
+        """Classify the query that produced an asset and count its tier."""
+        tracker = getattr(self, "_fallback_tracker", None)
+        if tracker is None:
+            return
+        try:
+            from pipeline.cinematic_staging import classify_query_tier
+
+            tier = classify_query_tier(
+                query, getattr(self, "_last_scene_context", None)
+            )
+            tracker.record(tier)
+        except Exception:
+            pass
+
+    def _warn_generic_fallback(self) -> None:
+        """Log a warning when too many scenes ended on a generic tier."""
+        tracker = getattr(self, "_fallback_tracker", None)
+        if tracker is None:
+            return
+        try:
+            if tracker.exceeds():
+                logger.warning(
+                    "Generic fallback tier used by %.0f%% of scenes "
+                    "(%.0f%% > max_generic_fallback_pct=%.0f%%, %d/%d) — "
+                    "consider enriching scene intent/queries",
+                    tracker.generic_pct, tracker.generic_pct,
+                    tracker.max_pct, tracker.generic, tracker.total,
+                )
+        except Exception:
+            pass
 
     def _llm_relevance_filter(
         self, candidates: list[dict], scene: dict, scene_context=None
@@ -2977,59 +3114,89 @@ class MediaFetcher:
     def _try_download_best_candidate(
         self, asset_candidates: list[dict], provider, scene: dict, ctx,
     ) -> dict | None:
-        """Score one page of candidates by narrative relevance (era-aware),
-        skip anachronistic ones, optionally refine with an LLM call, and
-        download the best non-duplicate that succeeds.
+        """Rank one page of candidates with ONE unified score and download the
+        best non-duplicate that succeeds.
 
-        Defensive by design: candidates without metadata score 0 and are
-        still downloadable (conservative fallback — never blocks a page).
+        Fase 4a: ordering is decided ONCE by ``rank_candidates`` (action +
+        context + era + narrative relevance + ``must_avoid`` penalty).  The
+        result is respected as-is — it is never re-sorted by a second score.
+        Deduplication and a defensive anachronism skip are still applied.
+
+        Fail-open: if the new scorer fails, we fall back to the previous
+        ``_relevance_score`` ordering; candidates without metadata still score
+        0 and remain downloadable.
         """
-        # Use the actual narration as a first-pass ordering signal.  The
-        # existing relevance score, historical rejection, deduplication and
-        # optional LLM reranking remain authoritative below; this ordering
-        # only prevents a generic label match from winning a more observable
-        # action match when both candidates otherwise tie.
-        # C4: pass the full scene context so ranking uses the whole-video brief
-        # (fase, vecinos, concepto visual) instead of only the bare fragment.
-        scene_context = self._scene_context(scene, scene.get("scene_idx", 0))
-        from pipeline.cinematic_staging import rank_candidates
-        ranked_candidates = rank_candidates(
-            asset_candidates,
-            scene.get("texto", "") or scene.get("search_query_en", ""),
-            ctx,
-            scene_context=scene_context,
+        scene_context = self._enrich_with_intent(
+            self._scene_context(scene, scene.get("scene_idx", 0)), scene
         )
-        if ranked_candidates:
-            asset_candidates = ranked_candidates
+        # Stashed so the exhaustive loop can attribute the used query to a
+        # fallback tier (generic-fallback accounting).
+        self._last_scene_context = scene_context
 
-        scored: list[tuple[float, dict]] = []
-        for candidate in asset_candidates:
+        action_boost = bool(self._media_strategy.get("action_scene_boost", True))
+        require_action = bool(self._media_strategy.get("require_action_match", False))
+
+        ordered: list[dict] | None = None
+        try:
+            from pipeline.cinematic_staging import rank_candidates
+
+            ranked_candidates = rank_candidates(
+                asset_candidates,
+                scene.get("texto", "") or scene.get("search_query_en", ""),
+                ctx,
+                scene_context=scene_context,
+                action_scene_boost=action_boost,
+            )
+            if ranked_candidates:
+                ordered = ranked_candidates
+        except Exception:
+            ordered = None
+
+        if ordered is None:
+            # Fail-open: previous behavior (relevance score only, era-aware).
+            ordered = self._legacy_relevance_order(asset_candidates, scene, ctx)
+
+        # ── Dedup + defensive anachronism skip (keeps rank order) ──
+        filtered: list[dict] = []
+        for candidate in ordered:
             if self._is_asset_duplicate(candidate):
                 continue
-            if self._is_anachronistic(candidate, ctx):
+            if self._is_anachronistic_for_scene(candidate, ctx, scene_context):
                 text = self._candidate_text(candidate)
                 logger.info(
                     "Skipping anachronistic candidate for historical scene: %s",
                     text[:100] or candidate.get("url", "")[:60],
                 )
                 continue
-            score = self._relevance_score(candidate, scene, ctx)
-            scored.append((score, candidate))
+            filtered.append(candidate)
 
-        if not scored:
+        if not filtered:
             return None
 
-        scored.sort(key=lambda pair: pair[0], reverse=True)
+        # ── require_action_match (Fase 4a, default OFF) ──
+        # A scene with a concrete action refuses candidates without any action
+        # overlap — unless NO candidate matches, in which case the full list is
+        # kept (last resort; never blocks the pipeline).
+        if require_action and (getattr(scene_context, "action", "") or "").strip():
+            from pipeline.cinematic_staging import candidate_matches_action
 
-        # Prefer candidates that clear the relevance threshold; if none do
-        # (e.g. no metadata), fall back to the full page (current behavior).
-        min_overlap = float(self._media_strategy.get("relevance_min_overlap", 1))
-        if scored[0][0] >= min_overlap:
-            ordered = [c for s, c in scored if s >= min_overlap]
-        else:
-            ordered = [c for _, c in scored]
+            matched = [
+                c for c in filtered if candidate_matches_action(c, scene_context)
+            ]
+            if matched:
+                filtered = matched
+            else:
+                logger.info(
+                    "require_action_match: no candidate matches action %r — "
+                    "keeping full list (last resort)",
+                    scene_context.action[:60],
+                )
 
-        # Optional LLM refinement (opt-in per channel via media strategy)
+        ordered = filtered
+
+        # Optional LLM refinement (opt-in per channel via media strategy).
+        # It may reorder, but only AFTER the deterministic unified score — and
+        # only when explicitly enabled by the channel.
         if (
             self._media_strategy.get("llm_relevance_filter", False)
             and len(ordered) >= 2
@@ -3133,6 +3300,7 @@ class MediaFetcher:
                         asset_candidates, provider, scene, ctx,
                     )
                     if downloaded:
+                        self._record_fallback_tier(query)
                         return downloaded
 
                     # Check if there are more pages
@@ -3163,6 +3331,7 @@ class MediaFetcher:
                             asset_candidates, provider, scene, ctx,
                         )
                         if downloaded:
+                            self._record_fallback_tier(query)
                             return downloaded
                         total = asset_candidates[0].get("_total_available", 0)
                         per_page = asset_candidates[0].get("_per_page", 20)
@@ -3869,10 +4038,14 @@ class MediaFetcher:
     def _simplify_query(query: str, max_keywords: int = 4) -> str:
         """Take first N keywords from a query (skip style modifiers).
 
+        Fase 4a: when the query contains a known English action verb, the verb
+        is ALWAYS kept (plus its nearest keywords) so simplification never
+        drops the narrated action.  Fully deterministic, no LLM.
+
         ``max_keywords=4`` returns a 3-4 word query; ``max_keywords=2``
-        returns an ultra-simplified query that drops overly-specific
-        proper nouns (e.g. site names) so stock providers have a chance
-        of matching the general subject.
+        returns an ultra-simplified query that drops overly-specific proper
+        nouns (e.g. site names) so stock providers have a chance of matching
+        the general subject.
         """
         words = query.split()
         # Skip known style words
@@ -3882,8 +4055,41 @@ class MediaFetcher:
             "atmosphere", "slow", "motion", "tracking", "shot", "aerial",
             "overhead", "style", "film", "video", "stock",
         }
-        keywords = [w for w in words if w.lower() not in style_words]
-        return " ".join(keywords[:max_keywords])
+
+        def _clean(word: str) -> str:
+            return word.lower().strip(",.!?;:\"'()")
+
+        keywords = [w for w in words if _clean(w) not in style_words]
+        if not keywords:
+            return ""
+
+        try:
+            from pipeline.cinematic_staging import ACTION_VERBS_EN
+        except Exception:  # fail-open: behave like the previous implementation
+            ACTION_VERBS_EN = frozenset()
+
+        max_kw = max(1, int(max_keywords))
+        verb_idx = next(
+            (i for i, w in enumerate(keywords) if _clean(w) in ACTION_VERBS_EN),
+            None,
+        )
+        if verb_idx is None:
+            return " ".join(keywords[:max_kw])
+
+        # Keep the verb and fill the remaining slots with the closest keywords
+        # on either side, then emit them in the original order.
+        chosen = {verb_idx}
+        left, right = verb_idx - 1, verb_idx + 1
+        while len(chosen) < max_kw and (left >= 0 or right < len(keywords)):
+            if right < len(keywords):
+                chosen.add(right)
+                right += 1
+            if len(chosen) >= max_kw:
+                break
+            if left >= 0:
+                chosen.add(left)
+                left -= 1
+        return " ".join(keywords[i] for i in sorted(chosen))
 
     # ── Internal: smart query builder ────────────────────────────
     _STYLE_WORDS: set[str] = {
