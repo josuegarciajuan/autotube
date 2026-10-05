@@ -4013,6 +4013,56 @@ def _migrate_v11(conn, logger):
     logger.info("Migration v11: media_file_locks table ensured")
 
 
+def _pid_alive(pid) -> bool:
+    """True si el proceso ``pid`` sigue vivo. None/0/vacío → False."""
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except Exception:  # noqa: BLE001 — ESRCH (muerto) o EPERM: no reclamar
+        return False
+
+
+def reap_stale_short_retrying(conn, timeout_minutes: int = 360) -> list:
+    """Reclama jobs de shorts atascados en 'retrying' sin worker vivo.
+
+    El camino de reintento de shorts marca el job como 'retrying' antes de
+    re-despacharlo, pero ante un crash/kill/deploy la fila nunca se cierra y se
+    acumula indefinidamente (observado oct-2026: 3500+ huérfanos). Marca como
+    'failed' los jobs ``generate_*short`` en 'retrying' con antigüedad >
+    ``timeout_minutes`` cuyo ``worker_pid`` no está vivo.
+
+    Devuelve la lista de dicts reclamados para el informe del janitor.
+    """
+    rows = conn.execute(
+        """
+        SELECT id AS job_id, worker_pid, channel_id, action,
+               CAST((julianday('now') - julianday(COALESCE(started_at, created_at))) * 1440 AS INTEGER) AS elapsed_min
+        FROM generation_jobs
+        WHERE status = 'retrying'
+          AND action LIKE 'generate_%short'
+          AND (julianday('now') - julianday(COALESCE(started_at, created_at))) * 1440 > ?
+        """,
+        (int(timeout_minutes),),
+    ).fetchall()
+
+    reaped: list = []
+    for row in rows:
+        r = dict(row)
+        if _pid_alive(r.get("worker_pid")):
+            continue
+        conn.execute(
+            "UPDATE generation_jobs SET status='failed', "
+            "error_msg='Orphaned retry: no live worker', "
+            "finished_at=CURRENT_TIMESTAMP "
+            "WHERE id=? AND status='retrying'",
+            (r["job_id"],),
+        )
+        reaped.append(r)
+    return reaped
+
+
 class ExtendedDatabase(Database):
     """Extended DB with channel, video scene, and job management."""
 
@@ -5628,6 +5678,30 @@ class ExtendedDatabase(Database):
                         "elapsed_sec": r["elapsed_sec"],
                         "video_progress_phase": r["video_progress_phase"],
                     })
+            
+            # ── Type 4: Short jobs stuck in 'retrying' without a live worker ──
+            # El reintento de shorts deja filas 'retrying' que nunca se cierran
+            # ante crash/kill/deploy y se acumulan (3500+ observados). Reclámalas
+            # pasadas >6h si su worker PID ya no existe.
+            try:
+                reaped = reap_stale_short_retrying(conn, timeout_minutes=360)
+                for r in reaped:
+                    logger.warning(
+                        "Orphan short-retry job #%d (channel=%s, action=%s, "
+                        "elapsed=%dmin): marking as failed (no live worker)",
+                        r["job_id"], r.get("channel_id"), r.get("action"),
+                        r["elapsed_min"],
+                    )
+                    result["details"].append({
+                        "type": "short_retry_orphan",
+                        "job_id": r["job_id"],
+                        "elapsed_min": r["elapsed_min"],
+                    })
+                result["jobs_failed"] += len(reaped)
+            except Exception as exc:  # noqa: BLE001 — el janitor nunca aborta
+                result["errors"].append({
+                    "phase": "short_retry_orphans", "error": str(exc),
+                })
             
             conn.commit()
         
