@@ -2943,34 +2943,35 @@ async def _run_reassembly_job(job_id: int, video_id: int):
     # normalizes both paths.
     db_guard.update_job(job_id, status="running")
 
-    # ── Global concurrency guard: strictly ONE generation at a time ──
+    # ── Global concurrency guard: up to MAX long-forms at a time ──
     # Prevents reassembly + normal generation from running simultaneously,
     # which causes ffmpeg resource contention and OOM crashes.
     # Uses count_running_longform_jobs() (RUNNING only, self included):
-    #   count=1 → only self → ok
-    #   count>1 → another job is actually running → blocked
+    #   count <= limit → ok
+    #   count >  limit → another job is actually running → blocked
+    # El límite efectivo es 2 solo con render distribuido activo; si no, 1.
     # The old count_active_longform_jobs() ALSO counted 'queued' jobs, so a
     # batch of freshly-created queued recovery jobs blocked each other
-    # (self-blocking: "Global concurrency guard: 8 active job(s)"). Only
-    # RUNNING jobs consume ffmpeg/RAM, so queued jobs must not count.
+    # (self-blocking). Only RUNNING jobs consume ffmpeg/RAM.
+    _lf_limit = settings.effective_max_concurrent_longform_jobs()
     active_count = db_guard.count_running_longform_jobs()
-    if active_count > 1:
+    if active_count > _lf_limit:
         logger.warning(
-            "Reassembly job %d blocked: %d active job(s) running globally",
-            job_id, active_count,
+            "Reassembly job %d blocked: %d active job(s) running globally (limit %d)",
+            job_id, active_count, _lf_limit,
         )
         await _broadcast_progress(
             job_id, 0, "blocked",
             f"Ya hay {active_count} generacion(es) en curso. Reassembly bloqueado.",
             "failed", video_id,
-            detail="Solo se permite una generacion simultanea para evitar conflictos de recursos",
+            detail="Se ha alcanzado el límite de generaciones largas simultáneas",
         )
         # Requeue (NOT fail): the queue consumer retries once the running
         # generation finishes. Reset the video to 'error' so the dashboard
         # doesn't show it as active while nothing processes it — the startup
         # recovery or a manual reassemble can pick it up again.
         db_guard.update_job(job_id, status="queued",
-                            error_msg=f"Deferred by concurrency guard: {active_count} job(s) running")
+                            error_msg=f"Deferred by concurrency guard: {active_count} job(s) running (limit {_lf_limit})")
         db_guard.update_video(video_id, status="error")
         return
 
@@ -3856,26 +3857,29 @@ async def start_generation_job_subprocess(
     # ── Spam block: forzar generate_only (no subir nada durante el ban) ──
     action = _spam_block_force_generate_only(db, channel_id, action)
 
-    # ── Global guard: strictly ONE job at a time ──
-    # Prevents ffmpeg resource contention (concurrent renders cause timeouts).
-    # Phase pipelining disabled — all jobs (long-form, shorts, clips, uploads)
-    # run concurrently with shorts (2-column model). The current job is
-    # already counted by count_active_longform_jobs().
-    # count=1 = only self = ok; count=2 = another long-form job active = blocked.
-    active_count = db.count_active_longform_jobs()
-    if active_count > 1:
+    # ── Global guard: up to MAX long-form jobs at a time ──
+    # Prevents ffmpeg resource contention (concurrent LOCAL renders cause
+    # timeouts/OOM). El límite efectivo es 2 solo con render distribuido
+    # (AUTOTUBE_DIST_RENDER_V2=1); si no, 1.
+    # Normalizamos el estado a 'running' ANTES de contar para que el job
+    # propio se contabilice en ambas rutas (creación directa y queue consumer)
+    # y no haya self-blocking por jobs 'queued'.
+    db.update_job(job_id, status="running")
+    _lf_limit = settings.effective_max_concurrent_longform_jobs()
+    active_count = db.count_running_longform_jobs()
+    if active_count > _lf_limit:
         logger.warning(
-            "Subprocess spawn blocked: %d active job(s) running globally",
-            active_count,
+            "Subprocess spawn blocked: %d active job(s) running (limit %d)",
+            active_count, _lf_limit,
         )
         await _broadcast_progress(
             job_id, 0, "blocked",
-            f"Ya hay {active_count} generacion(es) en curso. Solo una a la vez.",
+            f"Ya hay {active_count} generacion(es) en curso. Límite {_lf_limit}.",
             "failed", video_id,
-            detail="Solo se permite una generacion simultanea para evitar conflictos de recursos",
+            detail="Se ha alcanzado el límite de generaciones largas simultáneas",
         )
         db.update_job(job_id, status="failed",
-                      error_msg=f"Global concurrency guard: {active_count} active job(s)")
+                      error_msg=f"Global concurrency guard: {active_count} active job(s) (limit {_lf_limit})")
         # ── Record slot failure with backoff (v12) ──────────────
         slot_result = db.record_slot_dispatch_failure(job_id)
         if slot_result:

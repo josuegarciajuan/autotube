@@ -237,6 +237,36 @@ MIN_FREE_FOR_ASSEMBLY_MB = int(os.getenv("MIN_FREE_FOR_ASSEMBLY_MB", "2500"))
 # OOM-killeaba la API (y con ella los shorts in-process). Subido a 3 GB.
 MIN_FREE_FOR_SHORTS_DISPATCH_MB = int(os.getenv("MIN_FREE_FOR_SHORTS_DISPATCH_MB", "3000"))
 
+# ── Concurrencia de generación long-form ───────────────────────
+# Máximo de vídeos largos generándose a la vez. Solo se permite >1 cuando el
+# render se reparte por la flota de SuperServer (AUTOTUBE_DIST_RENDER_V2=1):
+# dos renders locales simultáneos saturan el host y provocan OOM (motivo del
+# capado histórico). Ver AGENTS.md → invariante de concurrencia.
+MAX_CONCURRENT_LONGFORM_JOBS = int(os.getenv("MAX_CONCURRENT_LONGFORM_JOBS", "2"))
+
+
+def _env_truthy(name: str) -> bool:
+    return str(os.getenv(name, "")).strip().lower() in ("1", "true", "yes", "on")
+
+
+def dist_render_enabled() -> bool:
+    """True si el render se distribuye por la flota (SuperServer)."""
+    return _env_truthy("AUTOTUBE_DIST_RENDER_V2")
+
+
+def effective_max_concurrent_longform_jobs() -> int:
+    """Límite efectivo de long-forms concurrentes.
+
+    Devuelve 1 (seguro) si el render NO está distribuido, para que un host con
+    la flag apagada no arranque 2 renders locales (saturación/OOM). Con render
+    distribuido activo devuelve ``MAX_CONCURRENT_LONGFORM_JOBS``.
+    """
+    configured = max(1, int(MAX_CONCURRENT_LONGFORM_JOBS or 1))
+    if configured > 1 and not dist_render_enabled():
+        return 1
+    return configured
+
+
 # ── Render timeout ─────────────────────────────────────────────
 # Timeout = min(max(video_duration * RENDER_TIMEOUT_MULTIPLIER, RENDER_TIMEOUT_MIN_SEC), RENDER_TIMEOUT_MAX_SEC)
 RENDER_TIMEOUT_MULTIPLIER = float(os.getenv("RENDER_TIMEOUT_MULTIPLIER", "5.0"))

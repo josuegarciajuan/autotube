@@ -1,12 +1,13 @@
 """Pausa de generación (hold) — protección a través de reinicios.
 
-La pausa *generation-only* de autotube se representa con **dos filas centinela**
+La pausa *generation-only* de autotube se representa con **filas centinela**
 en ``generation_jobs`` (``phase='hold'``) que ocupan los guards de concurrencia:
 
   * ``action='generate_only'``         → bloquea long-form
-    (``count_active_longform_jobs`` lo cuenta como job activo).
+    (``count_active_longform_jobs`` lo cuenta como job activo). Se crean
+    tantos como el límite efectivo (1 sin render distribuido, 2 con él).
   * ``action='generate_native_short'`` → bloquea shorts
-    (``count_active_shorts_jobs`` lo cuenta como job activo).
+    (``count_active_shorts_jobs`` lo cuenta como job activo). Siempre 1.
 
 Su vigencia se controla por ``last_heartbeat_at`` (TTL en días). Un refrescador
 externo puede empujar ese latido, pero **la intención del operador** se persiste
@@ -31,6 +32,8 @@ import json
 import logging
 from datetime import datetime, timezone
 
+from config.settings import effective_max_concurrent_longform_jobs
+
 logger = logging.getLogger("autotube.generation_hold")
 
 # ── Constantes del hold ─────────────────────────────────────────
@@ -43,6 +46,20 @@ RELEASE_CONFIRM = "REANUDAR_GENERACION"
 
 _TRUTHY = {"1", "true", "yes", "on"}
 REQUIRED_ACTIONS = set(HOLD_ACTIONS)
+
+
+def desired_hold_counts() -> dict:
+    """Centinelas requeridos por acción.
+
+    Long-form necesita tantos centinelas como el límite efectivo de
+    generaciones concurrentes (1 sin render distribuido, 2 con él): un único
+    centinela solo taparía uno de los slots y la pausa quedaría a medias.
+    Shorts mantienen 1 (su guard global sigue siendo 1).
+    """
+    return {
+        "generate_only": max(1, effective_max_concurrent_longform_jobs()),
+        "generate_native_short": 1,
+    }
 
 
 # ── Utilidades internas (solo dependen de `db._connect`) ────────
@@ -197,18 +214,25 @@ def ensure_hold(db, reason: str = "", ttl_days: int = DEFAULT_TTL_DAYS) -> dict:
     # Mirar TODOS los centinelas (cualquier estado) para restaurar los que un
     # reinicio marcó como 'failed' en vez de crear duplicados.
     existing = _hold_rows_any_status(db)
-    by_action = {r.get("action"): r for r in existing if r.get("action") in HOLD_ACTIONS}
+    desired = desired_hold_counts()
     channel_id = _hold_channel_id(db, existing or None)
 
     created = 0
     refreshed = 0
+    cancelled = 0
     try:
         with _connect(db) as conn:
-            # Refresca latido de los centinelas existentes (aunque su status no
-            # sea 'running', los devolvemos a running para restaurar la pausa).
-            for action in HOLD_ACTIONS:
-                row = by_action.get(action)
-                if row:
+            by_action: dict[str, list] = {}
+            for row in existing:
+                act = row.get("action")
+                if act in HOLD_ACTIONS:
+                    by_action.setdefault(act, []).append(row)
+
+            for action, want in desired.items():
+                rows = by_action.get(action, [])
+                # Refresca hasta `want` centinelas (aunque su status no sea
+                # 'running', los devolvemos a running para restaurar la pausa).
+                for row in rows[:want]:
                     conn.execute(
                         "UPDATE generation_jobs "
                         "SET status='running', finished_at=NULL, "
@@ -217,7 +241,17 @@ def ensure_hold(db, reason: str = "", ttl_days: int = DEFAULT_TTL_DAYS) -> dict:
                         (f"+{ttl} days", row["id"], HOLD_PHASE),
                     )
                     refreshed += 1
-                else:
+                # Excedente (p. ej. el límite bajó de 2 a 1): cancelar para no
+                # sobre-bloquear los guards de concurrencia.
+                for row in rows[want:]:
+                    conn.execute(
+                        "UPDATE generation_jobs SET status='cancelled', "
+                        "finished_at=CURRENT_TIMESTAMP WHERE id=? AND phase=?",
+                        (row["id"], HOLD_PHASE),
+                    )
+                    cancelled += 1
+                # Crea los que falten.
+                for _ in range(max(0, want - len(rows))):
                     if channel_id is None:
                         continue
                     conn.execute(
@@ -238,12 +272,13 @@ def ensure_hold(db, reason: str = "", ttl_days: int = DEFAULT_TTL_DAYS) -> dict:
         _set_state(db, "generation_hold_reason", reason[:400])
     _publish_state(db, reason=reason)
     logger.info(
-        "generation_hold: pausa asegurada (creados=%d, refrescados=%d)",
-        created, refreshed,
+        "generation_hold: pausa asegurada (creados=%d, refrescados=%d, cancelados=%d)",
+        created, refreshed, cancelled,
     )
     return {
         "created": created,
         "refreshed": refreshed,
+        "cancelled": cancelled,
         "actions": list(HOLD_ACTIONS),
         "channel_id": channel_id,
     }
