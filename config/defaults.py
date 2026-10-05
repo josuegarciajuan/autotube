@@ -503,6 +503,20 @@ MEDIA_STRATEGY = {
     # reorders candidates so the best match downloads first. Off by
     # default — costs a call per page and adds latency.
     "llm_relevance_filter": False,
+
+    # ── Fase 4a: action/context-aware selection (calidad-coherencia) ──
+    # When True, candidates that depict the narrated action are boosted over
+    # generic label matches in the deterministic ranking.
+    "action_scene_boost": True,
+    # When True, a scene with a concrete action refuses a candidate without
+    # any action overlap unless it is the last resort (fail-open: if no
+    # candidate matches the action, the full list is used). Default False =
+    # observation mode.
+    "require_action_match": False,
+    # Maximum % of scenes that may end up on a GENERIC fallback tier
+    # (context/establishment or motif/symbolic). Exceeding it logs a warning
+    # but never aborts the pipeline. 0-100.
+    "max_generic_fallback_pct": 20,
 }
 
 # ═══════════════════════════════════════════════════════════════════

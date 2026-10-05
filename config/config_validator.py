@@ -47,6 +47,9 @@ _MEDIA_STRATEGY_RULES: List[Tuple[str, float, float, float, str]] = [
     # before deferring a candidate in favour of a larger one.
     ("min_stock_image_width",  640.0, 4000.0, 1280.0, "media_strategy min_stock_image_width"),
     ("min_stock_image_height", 360.0, 2160.0, 720.0,  "media_strategy min_stock_image_height"),
+    # Fase 4a (calidad-coherencia): cap on scenes ending on a generic fallback
+    # tier. Out-of-range values are forced back to 20 (warning only).
+    ("max_generic_fallback_pct", 0.0, 100.0, 20.0, "media_strategy max_generic_fallback_pct"),
 ]
 
 # Minimum sum of RGB channels for COLOR_PALETTE.secondary
@@ -291,6 +294,21 @@ def validate_channel_config(slug: str, config: Dict[str, Any]) -> List[str]:
                     f"is not boolean — forcing True"
                 )
                 media["prefer_large_download"] = True
+
+        # Fase 4a: action-aware selection flags. Non-boolean values are coerced
+        # to their safe defaults (boost ON, strict match OFF) — never break.
+        for bool_param, bool_default in (
+            ("action_scene_boost", True),
+            ("require_action_match", False),
+        ):
+            if bool_param in media:
+                val = media.get(bool_param)
+                if not isinstance(val, bool):
+                    warnings.append(
+                        f"[{slug}] MEDIA_STRATEGY.{bool_param}={val!r} "
+                        f"is not boolean — forcing {bool_default}"
+                    )
+                    media[bool_param] = bool_default
 
     # ── Top-level feature flags: tolerant, default True ────────
     # `ASSET_DECISION_LOG_ENABLED` controls the structured per-scene log.
