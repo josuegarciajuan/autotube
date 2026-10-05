@@ -5,6 +5,17 @@ suba a YouTube. Es **bloqueante** por defecto y **fail-open ante errores de
 herramienta** (un fallo del gate en sí nunca bloquea: solo bloquea si detecta
 contenido defectuoso con evidencia).
 
+Intro/outro: el pipeline monta tarjetas de marca ("intro") al principio y
+("outro"/CTA) al final con fondo oscuro (p.ej. ``(22, 18, 12)``), que
+``blackdetect`` clasifica como negro. Esos tramos son legítimos y NO deben
+bloquear la subida. Por eso los tramos negros que empiezan en ``0`` o terminan
+en EOF se excluyen del conteo si cumplen DOS condiciones de seguridad:
+  - su duración ≤ ``RENDER_GATE_EDGE_IGNORE_SEC`` (ventana de intro/outro), y
+  - su duración ≤ ``RENDER_GATE_EDGE_MAX_FRACTION`` de la duración total.
+
+Así un vídeo completamente negro (o un tramo negro largo real al principio/final)
+sigue bloqueando, pero las tarjetas cortas de marca no.
+
 Kill-switch: ``RENDER_GATE_ENABLED=False`` (config por canal o global).
 
 Uso:
@@ -28,6 +39,9 @@ DEFAULTS = {
     "RENDER_GATE_BLACK_PIX_TH": 0.10,
     "RENDER_GATE_BLACK_MIN_SEC": 2.0,     # trozo negro mínimo considerado
     "RENDER_GATE_MAX_BLACK_SEC": 5.0,     # total de negro permitido antes de bloquear
+    # Exención de intro/outro (tramos negros pegados a los extremos).
+    "RENDER_GATE_EDGE_IGNORE_SEC": 30.0,  # ventana máx. de intro/outro a eximir
+    "RENDER_GATE_EDGE_MAX_FRACTION": 0.15,  # y como fracción de la duración total
     # silencedetect
     "RENDER_GATE_SILENCE_DB": -40,
     "RENDER_GATE_SILENCE_MIN_SEC": 3.0,   # silencio mínimo considerado
@@ -35,8 +49,14 @@ DEFAULTS = {
     "RENDER_GATE_TIMEOUT_SEC": 300,
 }
 
-_RE_BLACK = re.compile(r"black_duration:([0-9.]+)")
+_RE_BLACK_RUN = re.compile(
+    r"black_start:\s*([0-9.]+)\s+black_end:\s*([0-9.]+)\s+black_duration:\s*([0-9.]+)"
+)
 _RE_SILENCE = re.compile(r"silence_duration:\s*([0-9.]+)")
+
+# Tolerancia (s) para considerar que un tramo "empieza al principio" o
+# "termina al final" del vídeo.
+_EDGE_EPS = 0.6
 
 
 def _cfg(channel_config, key):
@@ -65,6 +85,19 @@ def _run_ffmpeg_detect(video_path: str, vf: str, af: str, timeout: int) -> tuple
         return f"error ejecutando ffmpeg: {exc}", False
 
 
+def _probe_duration(video_path: str, timeout: int) -> float | None:
+    """Duración del vídeo (s) vía ffprobe. None si no se puede determinar."""
+    cmd = [
+        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+        "-of", "csv=p=0", video_path,
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return float((r.stdout or "").strip())
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _sum_durations(stderr: str, regex: re.Pattern, min_sec: float) -> tuple[float, int]:
     total = 0.0
     count = 0
@@ -79,17 +112,67 @@ def _sum_durations(stderr: str, regex: re.Pattern, min_sec: float) -> tuple[floa
     return total, count
 
 
+def _parse_black_runs(stderr: str, min_sec: float) -> list[tuple[float, float, float]]:
+    """Tramos negros (start, end, duration) con duración ≥ min_sec."""
+    runs: list[tuple[float, float, float]] = []
+    for m in _RE_BLACK_RUN.finditer(stderr or ""):
+        try:
+            start, end, dur = float(m.group(1)), float(m.group(2)), float(m.group(3))
+        except ValueError:
+            continue
+        if dur >= min_sec:
+            runs.append((start, end, dur))
+    return runs
+
+
+def _split_edge_black(
+    runs: list[tuple[float, float, float]],
+    duration: float | None,
+    edge_sec: float,
+    max_fraction: float,
+) -> tuple[float, int, float, int]:
+    """Separa tramos negros de cuerpo (bloqueantes) y de intro/outro (exentos).
+
+    Un tramo se exime solo si está pegado a un extremo (empieza en 0 o termina
+    en EOF) Y es corto (`≤ edge_sec`) Y no domina el vídeo
+    (`≤ max_fraction * duración`). Si no se conoce la duración, no se exime nada
+    (fail-safe: se mantiene el comportamiento bloqueante original).
+    """
+    counted_total = counted_count = 0.0
+    ignored_total = ignored_count = 0.0
+    if duration is None or duration <= 0:
+        for _s, _e, dur in runs:
+            counted_total += dur
+            counted_count += 1
+        return counted_total, counted_count, 0.0, 0.0
+
+    for start, end, dur in runs:
+        is_head = start <= _EDGE_EPS
+        is_tail = (duration - end) <= _EDGE_EPS
+        short_enough = dur <= edge_sec
+        not_dominant = dur <= max_fraction * duration
+        if (is_head or is_tail) and short_enough and not_dominant:
+            ignored_total += dur
+            ignored_count += 1
+        else:
+            counted_total += dur
+            counted_count += 1
+    return counted_total, counted_count, ignored_total, ignored_count
+
+
 def evaluate_render_gate(video_path: str, channel_config=None) -> dict:
     """Evalúa el vídeo contra el gate.
 
     Returns dict:
         enabled, passed, blocking (list[str]), warnings (list[str]),
-        black_sec, black_segments, silence_sec, silence_segments, error
+        black_sec, black_segments, black_ignored_sec, black_ignored_segments,
+        silence_sec, silence_segments, error
     """
     result = {
         "enabled": bool(_cfg(channel_config, "RENDER_GATE_ENABLED")),
         "passed": True, "blocking": [], "warnings": [],
         "black_sec": 0.0, "black_segments": 0,
+        "black_ignored_sec": 0.0, "black_ignored_segments": 0,
         "silence_sec": 0.0, "silence_segments": 0,
         "error": None,
     }
@@ -105,6 +188,8 @@ def evaluate_render_gate(video_path: str, channel_config=None) -> dict:
     pix_th = float(_cfg(channel_config, "RENDER_GATE_BLACK_PIX_TH"))
     black_min = float(_cfg(channel_config, "RENDER_GATE_BLACK_MIN_SEC"))
     black_max = float(_cfg(channel_config, "RENDER_GATE_MAX_BLACK_SEC"))
+    edge_sec = float(_cfg(channel_config, "RENDER_GATE_EDGE_IGNORE_SEC"))
+    edge_fraction = float(_cfg(channel_config, "RENDER_GATE_EDGE_MAX_FRACTION"))
     sil_min = float(_cfg(channel_config, "RENDER_GATE_SILENCE_MIN_SEC"))
     sil_max = float(_cfg(channel_config, "RENDER_GATE_MAX_SILENCE_SEC"))
     sil_db = int(_cfg(channel_config, "RENDER_GATE_SILENCE_DB"))
@@ -117,11 +202,26 @@ def evaluate_render_gate(video_path: str, channel_config=None) -> dict:
         result["error"] = out
         result["warnings"].append(f"render_gate: blackdetect no ejecutó ({out}); no se bloquea por esto")
     else:
-        total, count = _sum_durations(out, _RE_BLACK, black_min)
+        runs = _parse_black_runs(out, black_min)
+        duration = _probe_duration(video_path, timeout)
+        total, count, ign_total, ign_count = _split_edge_black(
+            runs, duration, edge_sec, edge_fraction,
+        )
         result["black_sec"], result["black_segments"] = total, count
+        result["black_ignored_sec"], result["black_ignored_segments"] = ign_total, ign_count
+        if ign_count:
+            logger.info(
+                "Render gate: %d tramo(s) de intro/outro ignorados (%.1fs)",
+                ign_count, ign_total,
+            )
         if total > black_max:
+            extra = (
+                f"; {ign_count} tramo(s) de intro/outro ignorados"
+                if ign_count else ""
+            )
             result["blocking"].append(
-                f"render_gate: {total:.1f}s de negro en {count} tramo(s) (> {black_max}s)"
+                f"render_gate: {total:.1f}s de negro en {count} tramo(s) "
+                f"(> {black_max}s{extra})"
             )
 
     # ── silencedetect (audio) ──
@@ -143,8 +243,9 @@ def evaluate_render_gate(video_path: str, channel_config=None) -> dict:
         logger.error("Render gate: %s", "; ".join(result["blocking"]))
     else:
         logger.info(
-            "Render gate OK (negro=%.1fs/%d, silencio=%.1fs/%d)",
+            "Render gate OK (negro=%.1fs/%d, intro/outro ignorado=%.1fs/%d, silencio=%.1fs/%d)",
             result["black_sec"], result["black_segments"],
+            result["black_ignored_sec"], result["black_ignored_segments"],
             result["silence_sec"], result["silence_segments"],
         )
     return result
