@@ -97,3 +97,44 @@ Incluye tanto los proveedores de stock (video/imagen) como los de generación IA
 ---
 
 *Última actualización: 2026-08-12 — Fase 1 completada (Pollinations + SD Local)*
+
+---
+
+## Aviso: Pollinations legacy tras muro de pago x402 (oct 2026)
+
+A partir de ~28-sep-2026 el endpoint anónimo de Pollinations
+(`image.pollinations.ai/prompt`) dejó de servir imágenes de forma sostenida:
+la primera petición responde `200` y las siguientes devuelven **`402 Payment
+Required`** con un challenge **x402** en la cabecera `payment-required`
+(pago en USDC, `serviceName: "Pollinations legacy image"`). No es un rate
+limit: espaciar peticiones (probado a 16 s) no lo evita, ni `referrer`.
+
+**Diagnóstico (reproducible):**
+
+```bash
+# 1ª OK, resto 402
+for i in 1 2 3; do
+  curl -s -o /dev/null -w "%{http_code}\n" \
+    "https://image.pollinations.ai/prompt/test$i?width=512&height=512&model=flux&nologo=true"
+done
+```
+
+**Solución soportada:** registrar una cuenta gratuita (tier *Seed*) en
+<https://auth.pollinations.ai> y exportar el token. El provider lo envía como
+`?token=` y como cabecera `Authorization: Bearer`:
+
+```env
+POLLINATIONS_TOKEN=<token>
+# opcional, identifica la app (para el modo web/referrer)
+POLLINATIONS_REFERRER=autotube
+# disyuntor tras un 402 (s) — evita martillear la API por escena
+POLLINATIONS_X402_COOLDOWN_SEC=1800
+```
+
+Sin token, el provider activa un **disyuntor** al primer 402 y cede el paso al
+fallback (flota SD / local SD), en vez de reintentar en cada escena.
+
+**Recomendación operativa:** mientras no haya token, la ruta robusta es la
+**flota SD** (`AUTOTUBE_DIST_IMAGES=1`), que no depende de terceros. Ver
+`config/defaults.py::ai_image_providers` (orden `["pollinations", "local_sd"]`).
+
