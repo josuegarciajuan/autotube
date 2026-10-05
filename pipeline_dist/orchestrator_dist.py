@@ -269,15 +269,17 @@ class DistributedOrchestrator(PipelineOrchestrator):
                                progress_cb=None, stall_sec: float = 900.0) -> dict:
         """Espera una ejecución distribuida con guardia de estancamiento.
 
-        A diferencia de ``dsl_client.wait``, si no hay progreso real (ninguna
-        unidad en vuelo ni aceptada) durante ``stall_sec``, cancela la ejecución
-        y lanza: evita colgar el vídeo cuando no existe un nodo elegible para la
-        definición. El progreso se considera vivo mientras haya unidades
-        ``inflight`` (una imagen puede tardar minutos sin aceptar aún).
+        El latido de progreso es la **salida real** (``accepted`` o ``generated``
+        creciendo), no el mero hecho de que haya unidades ``inflight``: un worker
+        colgado deja ``inflight>0`` indefinidamente y antes se interpretaba como
+        "vivo", lo que podía colgar el vídeo hasta el timeout completo. Si no se
+        acepta ninguna imagen nueva durante ``stall_sec``, se cancela y se lanza
+        para caer al render local.
         """
         deadline = time.time() + float(timeout)
         last_progress = time.time()
         last_accepted = -1
+        last_generated = -1
         last = None
         while time.time() < deadline:
             st = dsl_client.status(eid)
@@ -293,15 +295,18 @@ class DistributedOrchestrator(PipelineOrchestrator):
                 p = st.get("progress") or {}
                 inflight = int(p.get("inflight") or 0)
                 accepted = int(p.get("accepted") or 0)
+                generated = int(p.get("generated") or 0)
                 pending = int(p.get("pending") or 0)
-                if inflight > 0 or accepted > last_accepted:
+                if accepted > last_accepted or generated > last_generated:
                     last_progress = time.time()
                     last_accepted = accepted
-                elif pending > 0 and (time.time() - last_progress) > stall_sec:
+                    last_generated = generated
+                elif (time.time() - last_progress) > stall_sec:
                     dsl_client.cancel(eid)
                     raise ScenePlanError(
-                        f"ai-image sin progreso {stall_sec:.0f}s "
-                        f"(inflight=0, pending={pending}); cancelado"
+                        f"sin progreso {stall_sec:.0f}s "
+                        f"(accepted={accepted}, generated={generated}, "
+                        f"inflight={inflight}, pending={pending}); cancelado"
                     )
             time.sleep(2.0)
         dsl_client.cancel(eid)
