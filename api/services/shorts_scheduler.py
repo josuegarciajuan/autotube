@@ -3413,6 +3413,14 @@ def _spawn_short_worker(*, short_type: str, channel_id: int, channel_slug: str,
         log_path = Path("logs") / f"shorts_worker_{job_id}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Correlated observability for the dispatch (the worker process sets its
+    # own context too; this covers logging done here in the API process).
+    try:
+        from pipeline.observability import set_context
+        set_context(job_id=job_id, channel=channel_slug)
+    except Exception:
+        pass
+
     try:
         proc = subprocess.Popen(
             cmd, start_new_session=True,

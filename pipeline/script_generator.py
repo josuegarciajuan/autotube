@@ -1408,6 +1408,16 @@ class ScriptGenerator:
                 len(chapters),
                 data.get("summary", "")[:80],
             )
+            try:
+                from pipeline.observability import obs_event
+                obs_event(
+                    "script_outline",
+                    mode="normal",
+                    chapters=len(chapters),
+                    summary_len=len(data.get("summary", "") or ""),
+                )
+            except Exception:
+                pass
             return data
         except Exception as exc:
             logger.warning("_generate_outline failed: %s", exc)
@@ -2349,6 +2359,17 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             "generate_v2: content done — %d blocks, %d words",
             len(all_bloques), sum(len(b.get("texto", "").split()) for b in all_bloques),
         )
+        try:
+            from pipeline.observability import obs_event
+            obs_event(
+                "script_blocks",
+                blocks=len(all_bloques),
+                words=sum(len(b.get("texto", "").split()) for b in all_bloques),
+                dedup_removed=max(0, initial_blocks - len(all_bloques)),
+                batches=max_batches,
+            )
+        except Exception:
+            pass
 
         # Safety net: if the LLM massively overshoots the word target
         # (e.g. thinking mode or stale config), cap gracefully by word count
@@ -2405,6 +2426,22 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                 from pipeline.script_validator import ScriptValidator
                 validator = ScriptValidator(self.canal_config)
                 val_result = validator.validate(enriched, word_target, content_item)
+                try:
+                    from pipeline.observability import obs_event
+                    obs_event(
+                        "script_validation",
+                        passes=bool(val_result.passes),
+                        score=round(float(val_result.score), 4),
+                        structural=round(float(val_result.structural_score), 3),
+                        word_count=round(float(val_result.word_count_score), 3),
+                        repetition=round(float(val_result.repetition_score), 3),
+                        hook=round(float(val_result.hook_score), 3),
+                        coherence=round(float(val_result.coherence_score), 3),
+                        warnings=len(val_result.warnings),
+                        warning_sample=val_result.warnings[:5],
+                    )
+                except Exception:
+                    pass
 
                 if val_result.passes:
                     logger.info(
@@ -3581,6 +3618,15 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         """
         try:
             if not getattr(self.canal_config, "SCRIPT_EDITORIAL_REVIEW_ENABLED", False):
+                try:
+                    from pipeline.observability import obs_event
+                    obs_event(
+                        "script_editorial_repair",
+                        decision="disabled", kept_original=True,
+                        score_before=round(float(getattr(val_result, "score", 0.0) or 0.0), 4),
+                    )
+                except Exception:
+                    pass
                 return enriched
         except Exception:
             return enriched
@@ -3600,6 +3646,19 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
         except (TypeError, ValueError):
             baseline_score = 0.0
 
+        try:
+            from pipeline.observability import obs_event as _obs_repair_event
+        except Exception:
+            _obs_repair_event = None
+
+        def _emit_repair(decision: str, **kw) -> None:
+            if _obs_repair_event is None:
+                return
+            try:
+                _obs_repair_event("script_editorial_repair", decision=decision, **kw)
+            except Exception:
+                pass
+
         current = enriched
         for call_idx in range(max_calls):
             try:
@@ -3617,6 +3676,10 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                     "keeping original",
                     call_idx + 1, max_calls,
                 )
+                _emit_repair(
+                    "no_repairable_paragraphs", call=call_idx + 1, max_calls=max_calls,
+                    score_before=round(baseline_score, 4), kept_original=True,
+                )
                 break
 
             try:
@@ -3627,6 +3690,11 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                 logger.warning(
                     "ScriptEditorial: regeneration failed (fail-open): %s", exc
                 )
+                _emit_repair(
+                    "regeneration_error", call=call_idx + 1, max_calls=max_calls,
+                    score_before=round(baseline_score, 4), kept_original=True,
+                    error=type(exc).__name__,
+                )
                 break
 
             if not regenerated or regenerated is current:
@@ -3634,6 +3702,10 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                     "ScriptEditorial: regeneration produced no change (call %d/%d) "
                     "— keeping original",
                     call_idx + 1, max_calls,
+                )
+                _emit_repair(
+                    "no_change", call=call_idx + 1, max_calls=max_calls,
+                    score_before=round(baseline_score, 4), kept_original=True,
                 )
                 break
 
@@ -3643,6 +3715,11 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                 logger.warning(
                     "ScriptEditorial: post-repair validation failed (fail-open): %s",
                     exc,
+                )
+                _emit_repair(
+                    "validation_error", call=call_idx + 1, max_calls=max_calls,
+                    score_before=round(baseline_score, 4), kept_original=True,
+                    error=type(exc).__name__,
                 )
                 break
 
@@ -3659,6 +3736,12 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                     "score %.2f → %.2f)",
                     call_idx + 1, max_calls, n_repaired, baseline_score, new_score,
                 )
+                _emit_repair(
+                    "accepted", call=call_idx + 1, max_calls=max_calls,
+                    repaired_paragraphs=n_repaired,
+                    score_before=round(baseline_score, 4),
+                    score_after=round(new_score, 4), kept_original=False,
+                )
                 current = regenerated
                 baseline_score = new_score
                 # Default max_calls=1 means exactly one bounded pass. More
@@ -3669,6 +3752,12 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                 "ScriptEditorial: repair REJECTED (call %d/%d): passes=%s, "
                 "score %.2f → %.2f — keeping original",
                 call_idx + 1, max_calls, passes, baseline_score, new_score,
+            )
+            _emit_repair(
+                "rejected", call=call_idx + 1, max_calls=max_calls,
+                repaired_paragraphs=n_repaired, passes=passes,
+                score_before=round(baseline_score, 4),
+                score_after=round(new_score, 4), kept_original=True,
             )
             break
 

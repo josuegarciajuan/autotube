@@ -630,6 +630,23 @@ class VideoEditor:
             self._current_clip_idx += 1
             rendered_this_run += 1
 
+            # Structured observability (fail-open): per-scene asset gate
+            # outcome. Only booleans/names — never frames or pixel data.
+            try:
+                from pipeline.observability import obs_event
+                _seg_name = Path(result_path).name if result_path else ""
+                obs_event(
+                    "video_scene_gate",
+                    scene_idx=i,
+                    asset_type=media_type,
+                    has_path=bool(result_path),
+                    is_fallback=("_fb" in _seg_name or "_od" in _seg_name),
+                    is_placeholder=("_placeholder" in _seg_name or "_black" in _seg_name),
+                    quality_flag=(asset.get("quality_flag") if isinstance(asset, dict) else None),
+                )
+            except Exception:
+                pass
+
             # ── v4: subprocess progress via DB ─────────────────
             # Only active when called from the pipeline worker
             # (video_id is set).  Writes ~10 progress updates

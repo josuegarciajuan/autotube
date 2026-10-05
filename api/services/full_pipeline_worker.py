@@ -312,7 +312,8 @@ _shutdown_requested = threading.Event()
 _in_critical_phase = threading.Event()
 
 
-def _setup_worker_logging(job_id: int):
+def _setup_worker_logging(job_id: int, channel_id: int | None = None,
+                          video_id: int | None = None):
     """Configure logging for the worker — writes to both stderr and a per-job log file."""
     LOG_DIR = _PROJECT_ROOT / "logs"
     LOG_DIR.mkdir(exist_ok=True)
@@ -328,6 +329,18 @@ def _setup_worker_logging(job_id: int):
     for lib in ["urllib3", "googleapiclient", "google.auth", "apscheduler", "PIL",
                 "httpx", "httpcore", "openai", "moviepy"]:
         logging.getLogger(lib).setLevel(logging.WARNING)
+    # Structured correlated observability (JSONL). Fail-open.
+    try:
+        from pipeline.observability import setup_obs_logging, set_context
+        setup_obs_logging()
+        ctx = {"job_id": job_id}
+        if channel_id is not None:
+            ctx["channel"] = channel_id
+        if video_id is not None:
+            ctx["video_id"] = video_id
+        set_context(**ctx)
+    except Exception:
+        pass
     return logging.getLogger("autotube.worker")
 
 
@@ -2415,7 +2428,9 @@ def main():
         sys.exit(exc.code if exc.code else 2)
 
     # Setup logging
-    logger = _setup_worker_logging(args.job_id)
+    logger = _setup_worker_logging(
+        args.job_id, channel_id=args.channel_id, video_id=args.video_id,
+    )
     if args.debug:
         logger.setLevel(logging.DEBUG)
 

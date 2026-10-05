@@ -139,8 +139,26 @@ class DistributedOrchestrator(PipelineOrchestrator):
                     "[%s] ai-image: ninguna escena AI-tier; la flota no pre-genera.",
                     self.canal,
                 )
+                try:
+                    from pipeline.observability import obs_event
+                    obs_event(
+                        "dist_ai_prefetch_scope", channel=self.canal,
+                        scene_ranges=len(scene_ranges), ai_tier=0, decision="no_ai_scenes",
+                    )
+                except Exception:
+                    pass
                 return None
         try:
+            try:
+                from pipeline.observability import obs_event
+                obs_event(
+                    "dist_ai_prefetch_scope", channel=self.canal,
+                    scene_ranges=len(scene_ranges),
+                    ai_tier=(len(only_indices) if only_indices is not None else None),
+                    cap=cap or None, decision="prefetch",
+                )
+            except Exception:
+                pass
             return self._prefetch_ai_images_dist(
                 scene_ranges, script, only_indices=only_indices,
             )
@@ -149,6 +167,14 @@ class DistributedOrchestrator(PipelineOrchestrator):
                 "[%s] Pre-generación IA distribuida no aplicable (%s: %s); local.",
                 self.canal, type(exc).__name__, exc,
             )
+            try:
+                from pipeline.observability import obs_event
+                obs_event(
+                    "dist_ai_prefetch_fallback_local", channel=self.canal,
+                    error_type=type(exc).__name__, error=str(exc)[:200],
+                )
+            except Exception:
+                pass
             return None
 
     def _prefetch_ai_images_dist(self, scene_ranges: list, script: Optional[dict],
@@ -271,6 +297,17 @@ class DistributedOrchestrator(PipelineOrchestrator):
             eid, timeout, _progress,
             stall_sec=float(os.environ.get("AUTOTUBE_DIST_SD_STALL_SEC", "900") or 900),
         )
+        try:
+            from pipeline.observability import obs_event
+            _p = (summary or {}).get("progress") or {}
+            obs_event(
+                "dist_ai_prefetch_result", channel=self.canal, exec_id=eid,
+                requested=n_expected, status=summary.get("status"),
+                accepted=int(_p.get("accepted") or 0),
+                generated=int(_p.get("generated") or 0),
+            )
+        except Exception:
+            pass
         if summary.get("status") != "done":
             raise ScenePlanError(
                 f"ai-image {summary.get('status')}: {summary.get('error')}"
@@ -301,6 +338,14 @@ class DistributedOrchestrator(PipelineOrchestrator):
         mf._local_sd = CachedLocalSDProvider(mf._local_sd, cache_by_hash)
         logger.info("[%s] ai-image OK: %d imágenes en caché (%s)",
                     self.canal, len(cache_by_hash), cache_root)
+        try:
+            from pipeline.observability import obs_event
+            obs_event(
+                "dist_ai_prefetch_cached", channel=self.canal,
+                images=len(cache_by_hash), requested=n_expected,
+            )
+        except Exception:
+            pass
         return cache_by_hash
 
     def _wait_dist_stall_aware(self, eid: str, timeout: float,
@@ -349,6 +394,16 @@ class DistributedOrchestrator(PipelineOrchestrator):
             # (hasta 25 h con 150 escenas). Ahora se cancela y cae a local.
             if (time.time() - last_progress) > stall_sec:
                 dsl_client.cancel(eid)
+                try:
+                    from pipeline.observability import obs_event
+                    obs_event(
+                        "dist_ai_prefetch_stall", phase="images",
+                        exec_id=eid, stall_sec=stall_sec,
+                        accepted=accepted, generated=generated,
+                        inflight=inflight, pending=pending,
+                    )
+                except Exception:
+                    pass
                 raise ScenePlanError(
                     f"sin progreso {stall_sec:.0f}s "
                     f"(accepted={accepted}, generated={generated}, "

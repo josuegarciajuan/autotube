@@ -61,6 +61,17 @@ def _setup_logging(job_id: int | None = None, channel_slug: str = "unknown"):
     logger.handlers.clear()
     logger.addHandler(handler)
     logger.propagate = False
+    # Structured correlated observability (JSONL). Fail-open: the short's own
+    # stdout log is captured by the spawner; this only adds obs + context.
+    try:
+        from pipeline.observability import setup_obs_logging, set_context
+        setup_obs_logging()
+        ctx = {"channel": channel_slug}
+        if job_id is not None:
+            ctx["job_id"] = job_id
+        set_context(**ctx)
+    except Exception:
+        pass
     return logger
 
 

@@ -298,6 +298,26 @@ class ScriptValidator:
                 "; ".join(result.issues[:5]),
             )
 
+        # Structured observability (fail-open, never alters the result).
+        try:
+            from pipeline.observability import obs_event
+
+            obs_event(
+                "script_validator_result",
+                passes=bool(result.passes),
+                score=round(float(result.score), 4),
+                structural=round(float(result.structural_score), 3),
+                word_count=round(float(result.word_count_score), 3),
+                repetition=round(float(result.repetition_score), 3),
+                hook=round(float(result.hook_score), 3),
+                coherence=round(float(result.coherence_score), 3),
+                warnings=len(result.warnings),
+                warning_sample=result.warnings[:5],
+                severe=sorted(str(s) for s in severe_issues),
+            )
+        except Exception:
+            pass
+
         return result
 
     # ── Individual checks ─────────────────────────────────────────

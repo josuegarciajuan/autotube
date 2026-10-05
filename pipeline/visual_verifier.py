@@ -505,6 +505,30 @@ def verify_asset(
     finally:
         if tmp_dir is not None:
             shutil.rmtree(tmp_dir, ignore_errors=True)
+    # Structured observability (fail-open): what was discarded and why.
+    try:
+        from pipeline.observability import obs_event
+        try:
+            _path_name = Path(obs.path).name if obs.path else ""
+        except Exception:
+            _path_name = ""
+        obs_event(
+            "visual_verify",
+            scene_idx=obs.scene_idx,
+            mode=mode,
+            asset_type=obs.asset_type,
+            path_name=_path_name,
+            frames=obs.frames_checked,
+            logo=obs.logo_suspected,
+            corners=obs.logo_corners,
+            width=obs.width,
+            resolution_ok=obs.resolution_ok,
+            rejected=obs.rejected,
+            reason=obs.reason,
+            error=obs.error,
+        )
+    except Exception:
+        pass
     return obs
 
 
