@@ -744,7 +744,7 @@ así que quedan fuera. La casa no se etiqueta (no debe auto-cargarse).
 **Activación en producción:** `deploy/autotube-panel.service` exporta
 `AUTOTUBE_DIST_IMAGES=1` (vía drop-in en `/etc/systemd/system/autotube-panel.service.d/`).
 Ajustes por entorno (sin tocar código):
-`AUTOTUBE_DIST_SD_THREADS` (def. 2), `AUTOTUBE_DIST_SD_MAX_INFLIGHT` (def. 8),
+`AUTOTUBE_DIST_SD_THREADS` (def. 3), `AUTOTUBE_DIST_SD_MAX_INFLIGHT` (def. 6),
 `AUTOTUBE_DIST_SD_TIMEOUT_SEC` / `AUTOTUBE_DIST_SD_PER_IMAGE_SEC` (timeout escalado),
 `AUTOTUBE_DIST_SD_STALL_SEC` (def. 900 s → cancela y cae a local si no hay nodo elegible).
 
