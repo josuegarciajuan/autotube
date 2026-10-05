@@ -1068,6 +1068,13 @@ RENDER_GATE_ENABLED = True
 RENDER_GATE_BLACK_PIX_TH = 0.10
 RENDER_GATE_BLACK_MIN_SEC = 2.0
 RENDER_GATE_MAX_BLACK_SEC = 5.0
+# Exención de intro/outro: las tarjetas de marca (fondo oscuro) al principio/
+# final del vídeo se detectan como "negro" y son legítimas. Se ignoran los
+# tramos negros pegados a un extremo que además sean cortos (≤ N s) y no
+# dominen el vídeo (≤ fracción de la duración). Un vídeo íntegramente negro o
+# un tramo largo real sigue bloqueando.
+RENDER_GATE_EDGE_IGNORE_SEC = 30.0
+RENDER_GATE_EDGE_MAX_FRACTION = 0.15
 RENDER_GATE_SILENCE_DB = -40
 RENDER_GATE_SILENCE_MIN_SEC = 3.0
 RENDER_GATE_MAX_SILENCE_SEC = 8.0
