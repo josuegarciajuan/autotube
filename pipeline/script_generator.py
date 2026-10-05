@@ -2417,43 +2417,26 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
                     if val_result.warnings:
                         logger.info("ScriptValidator warnings: %s", "; ".join(val_result.warnings[:3]))
                 elif not val_result.is_grave:
-                    # Minor issues — try regeneration without failover
+                    # Minor issues — bounded editorial repair (no failover).
                     logger.warning(
                         "ScriptValidator: minor issues (score=%.2f): %s",
                         val_result.score,
                         "; ".join(val_result.issues[:3]),
                     )
-                    try:
-                        regenerated = self._regenerate_problematic_paragraphs(
-                            enriched, {"issues": val_result.issues}, content_item
-                        )
-                        if regenerated:
-                            val2 = validator.validate(regenerated, word_target, content_item)
-                            if val2.passes:
-                                logger.info("ScriptValidator: PASS after regeneration (score=%.2f)", val2.score)
-                                enriched = regenerated
-                    except Exception:
-                        pass  # keep original enriched
+                    enriched = self._maybe_editorial_repair(
+                        enriched, val_result, validator, word_target, content_item,
+                    )
                 else:
-                    # Grave issues — would trigger model failover, but we're past generation
+                    # Grave issues — would trigger model failover, but we're past
+                    # generation. Only bounded editorial repair, fail-open.
                     logger.warning(
                         "ScriptValidator: GRAVE issues (score=%.2f): %s",
                         val_result.score,
                         "; ".join(val_result.issues[:5]),
                     )
-                    # Still try to salvage with regeneration
-                    try:
-                        regenerated = self._regenerate_problematic_paragraphs(
-                            enriched, {"issues": val_result.issues}, content_item
-                        )
-                        if regenerated:
-                            val2 = validator.validate(regenerated, word_target, content_item)
-                            if val2.passes:
-                                enriched = regenerated
-                            else:
-                                logger.warning("ScriptValidator: still failing after regeneration — keeping original")
-                    except Exception:
-                        pass
+                    enriched = self._maybe_editorial_repair(
+                        enriched, val_result, validator, word_target, content_item,
+                    )
 
             except Exception as exc:
                 logger.warning(
@@ -3577,6 +3560,140 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             result["weak_hook_para"] = all_bloques[0].get("paragraph_idx", 0)
 
         return result
+
+    def _maybe_editorial_repair(
+        self, enriched: dict, val_result, validator, word_target, content_item,
+    ) -> dict:
+        """Run a BOUNDED editorial repair pass over the generated script.
+
+        Fase 2 (calidad-coherencia). Fully fail-open and OFF by default:
+
+        - No-op unless ``SCRIPT_EDITORIAL_REVIEW_ENABLED`` is True, so the
+          default behavior does not fire any new regeneration.
+        - At most ``SCRIPT_EDITORIAL_REVIEW_MAX_CALLS`` (0-3, default 1) LLM
+          repair calls via ``_regenerate_problematic_paragraphs``.
+        - The regenerated script replaces the original ONLY when it passes
+          validation AND strictly improves the validator score; otherwise the
+          ORIGINAL is preserved.
+        - Any exception keeps the original script.
+
+        It never triggers model failover and never aborts generation.
+        """
+        try:
+            if not getattr(self.canal_config, "SCRIPT_EDITORIAL_REVIEW_ENABLED", False):
+                return enriched
+        except Exception:
+            return enriched
+
+        try:
+            max_calls = int(getattr(
+                self.canal_config, "SCRIPT_EDITORIAL_REVIEW_MAX_CALLS", 1
+            ))
+        except (TypeError, ValueError):
+            max_calls = 1
+        max_calls = max(0, min(3, max_calls))
+        if max_calls <= 0:
+            return enriched
+
+        try:
+            baseline_score = float(getattr(val_result, "score", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            baseline_score = 0.0
+
+        current = enriched
+        for call_idx in range(max_calls):
+            try:
+                self._ensure_paragraph_indices(current)
+                check_result = self._check_narrative_quality(current)
+            except Exception as exc:
+                logger.warning(
+                    "ScriptEditorial: local quality check failed (fail-open): %s", exc
+                )
+                break
+
+            if not check_result.get("problem_paragraphs"):
+                logger.info(
+                    "ScriptEditorial: no repairable paragraphs (call %d/%d) — "
+                    "keeping original",
+                    call_idx + 1, max_calls,
+                )
+                break
+
+            try:
+                regenerated = self._regenerate_problematic_paragraphs(
+                    current, check_result, content_item,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "ScriptEditorial: regeneration failed (fail-open): %s", exc
+                )
+                break
+
+            if not regenerated or regenerated is current:
+                logger.info(
+                    "ScriptEditorial: regeneration produced no change (call %d/%d) "
+                    "— keeping original",
+                    call_idx + 1, max_calls,
+                )
+                break
+
+            try:
+                val2 = validator.validate(regenerated, word_target, content_item)
+            except Exception as exc:
+                logger.warning(
+                    "ScriptEditorial: post-repair validation failed (fail-open): %s",
+                    exc,
+                )
+                break
+
+            try:
+                new_score = float(getattr(val2, "score", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                new_score = 0.0
+
+            n_repaired = len(check_result.get("problem_paragraphs", []))
+            passes = bool(getattr(val2, "passes", False))
+            if passes and new_score > baseline_score:
+                logger.info(
+                    "ScriptEditorial: repair ACCEPTED (call %d/%d, %d paragraphs, "
+                    "score %.2f → %.2f)",
+                    call_idx + 1, max_calls, n_repaired, baseline_score, new_score,
+                )
+                current = regenerated
+                baseline_score = new_score
+                # Default max_calls=1 means exactly one bounded pass. More
+                # passes only run when explicitly configured (max_calls > 1).
+                continue
+
+            logger.info(
+                "ScriptEditorial: repair REJECTED (call %d/%d): passes=%s, "
+                "score %.2f → %.2f — keeping original",
+                call_idx + 1, max_calls, passes, baseline_score, new_score,
+            )
+            break
+
+        return current
+
+    @staticmethod
+    def _ensure_paragraph_indices(enriched: dict) -> None:
+        """Backfill ``paragraph_idx`` on blocks from the ``parrafos`` grouping.
+
+        ``_enrich_blocks`` builds ``parrafos`` referencing the same block dicts
+        as the flat ``bloques`` list but does not always set ``paragraph_idx``.
+        The narrative quality checks rely on it to locate problematic
+        paragraphs. Idempotent and fail-open.
+        """
+        if not isinstance(enriched, dict):
+            return
+        parrafos = enriched.get("parrafos") or []
+        for pi, p in enumerate(parrafos):
+            if not isinstance(p, dict):
+                continue
+            blocks = p.get("bloques") or []
+            for bi, b in enumerate(blocks):
+                if isinstance(b, dict):
+                    b["paragraph_idx"] = pi
+                    b["is_last_in_paragraph"] = (bi == len(blocks) - 1)
 
     def _regenerate_problematic_paragraphs(
         self, enriched: dict, check_result: dict, content_item: dict,

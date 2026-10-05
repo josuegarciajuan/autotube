@@ -36,6 +36,12 @@ class ThemeContext:
     composition: str = "planos medios y generales"  # "planos medios y generales", "primeros planos", "simetría"
     era_decade: str = ""                 # Normalized: "1980s" instead of "los años ochenta"
 
+    # ── Fase 3: deliberate temporal jumps ──────────────────
+    # Each item: {"from_scene": int, "to_scene": int, "era_decade": str, "note": str}
+    # Lets a historical documentary cut to present-day footage (excavations,
+    # labs, experts) without flagging it as an anachronism.
+    temporal_segments: list[dict] = field(default_factory=list)
+
     # ── Helper methods ─────────────────────────────────────
 
     def to_search_context(self) -> str:
@@ -80,6 +86,54 @@ class ThemeContext:
         return ", ".join(parts)
 
 
+def _theme_ctx_get(theme_ctx: object, key: str, default: object = None) -> object:
+    if theme_ctx is None:
+        return default
+    if isinstance(theme_ctx, dict):
+        return theme_ctx.get(key, default)
+    return getattr(theme_ctx, key, default)
+
+
+def era_for_scene(theme_ctx: object, scene_idx: int) -> str:
+    """Effective era for a scene: temporal_segment override, else global era.
+
+    Fail-open: returns ``""`` on any error or missing data, letting callers
+    fall back to the global ``era_decade``/``era``.
+    """
+    try:
+        global_era = (
+            _theme_ctx_get(theme_ctx, "era_decade", "") or
+            _theme_ctx_get(theme_ctx, "era", "") or ""
+        )
+        if theme_ctx is None:
+            return ""
+        segments = _theme_ctx_get(theme_ctx, "temporal_segments", None)
+        if not isinstance(segments, (list, tuple)):
+            return global_era
+        try:
+            idx = int(scene_idx)
+        except (TypeError, ValueError):
+            return global_era
+        for seg in segments:
+            if not isinstance(seg, dict):
+                continue
+            try:
+                start = int(seg.get("from_scene", 0))
+                end = int(seg.get("to_scene", start))
+            except (TypeError, ValueError):
+                continue
+            if start > end:
+                start, end = end, start
+            if start <= idx <= end:
+                seg_era = seg.get("era_decade") or seg.get("era") or ""
+                if seg_era:
+                    return str(seg_era)
+                return global_era
+        return global_era
+    except Exception:
+        return ""
+
+
 THEME_EXTRACTOR_SYSTEM = """Eres un director de arte cinematográfico. Analizas el argumento de un video documental y extraes el contexto visual que debe unificar todas las escenas.
 
 Tu tarea: identificar el GÉNERO, ÉPOCA, ESTILO VISUAL y MOTIVOS CLAVE que deben aparecer en TODAS las imágenes del video. También identificas qué elementos NUNCA deben aparecer (anacronismos, elementos fuera de contexto).
@@ -113,9 +167,14 @@ Determina:
     Prefiere "planos medios y generales" como valor por defecto salvo que el contenido
     pida expresamente intimidad con un objeto (no con un rostro).
 12. era_decade: década normalizada (ej: "1980s", "1940s", "medieval", "futuro cercano") — NUNCA uses frases como "los años ochenta", siempre en formato "1980s"
+13. temporal_segments: lista de SALTOS DE ÉPOCA DELIBERADOS dentro del video
+    (ej. un documental histórico que corta a una excavación actual o a un
+    laboratorio moderno). Cada segmento cubre un rango de escenas y lleva su
+    época efectiva y una nota del motivo. Si todo el video comparte una sola
+    época, devuelve [] (lista vacía).
 
 Responde SOLO con JSON:
-{{"genre":"...","era":"...","visual_style":"...","key_motifs":[...],"forbidden_elements":[...],"theme_keywords_en":[...],"color_palette":{{"primary":"#...","secondary":"#...","accent":"#..."}},"primary_subject":"...","mood":"...","lighting":"...","composition":"...","era_decade":"..."}}"""
+{{"genre":"...","era":"...","visual_style":"...","key_motifs":[...],"forbidden_elements":[...],"theme_keywords_en":[...],"color_palette":{{"primary":"#...","secondary":"#...","accent":"#..."}},"primary_subject":"...","mood":"...","lighting":"...","composition":"...","era_decade":"...","temporal_segments":[{{"from_scene":0,"to_scene":3,"era_decade":"actualidad","note":"excavacion moderna"}}]}}"""
 
 
 REANCHOR_SYSTEM = """Eres un director de arte cinematográfico. Analizas el GUIÓN FINAL de un documental y confirmas/corriges su contexto visual.
@@ -143,9 +202,13 @@ Determina y devuelve SOLO estos campos, ajustados al guion final:
 3. primary_subject: el sujeto/escenario visual principal del video
 4. key_motifs: 3-5 elementos visuales icónicos
 5. forbidden_elements: 2-4 elementos que NUNCA deben aparecer (anacronismos)
+6. temporal_segments: OPCIONAL. Saltos de época deliberados en el guion final
+   (ej. una excavación actual dentro de un relato histórico). Formato:
+   [{{"from_scene": <int>, "to_scene": <int>, "era_decade": "<época>", "note": "<motivo>"}}].
+   Si no hay saltos o no estás seguro, omite este campo.
 
 Si el guion mantiene el contexto previo, consérvalo; si lo contradice, corrígelo.
-Responde SOLO con JSON: {{"era":"...","era_decade":"...","primary_subject":"...","key_motifs":[...],"forbidden_elements":[...]}}"""
+Responde SOLO con JSON: {{"era":"...","era_decade":"...","primary_subject":"...","key_motifs":[...],"forbidden_elements":[...],"temporal_segments":[...]}}"""
 
 
 def reanchor_from_script(
@@ -209,6 +272,12 @@ def reanchor_from_script(
     subject = data.get("primary_subject", "") or theme_ctx.primary_subject
     motifs = data.get("key_motifs") or theme_ctx.key_motifs
     forbidden = data.get("forbidden_elements") or theme_ctx.forbidden_elements
+    # Optional/tolerant: keep the previous segments when the LLM omits them.
+    raw_segments = data.get("temporal_segments")
+    if isinstance(raw_segments, list) and raw_segments:
+        temporal_segments = [s for s in raw_segments if isinstance(s, dict)]
+    else:
+        temporal_segments = list(theme_ctx.temporal_segments or [])
 
     logger.info(
         "Theme re-anchored: era=%s era_decade=%s subject=%s motifs=%s",
@@ -227,6 +296,7 @@ def reanchor_from_script(
         lighting=theme_ctx.lighting,
         composition=theme_ctx.composition,
         era_decade=era_decade,
+        temporal_segments=temporal_segments,
     )
 
 
@@ -270,6 +340,7 @@ class ThemeExtractor:
             "lighting": "luz dorada",
             "composition": "planos medios y generales",
             "era_decade": "",
+            "temporal_segments": [],
         }
 
         client = create_llm_client(timeout=60.0, max_retries=2)
@@ -331,6 +402,10 @@ class ThemeExtractor:
                 lighting=data.get("lighting", "luz dorada"),
                 composition=data.get("composition", "planos medios y generales"),
                 era_decade=normalize_era(data.get("era_decade", "")),
+                temporal_segments=[
+                    s for s in (data.get("temporal_segments") or [])
+                    if isinstance(s, dict)
+                ],
             )
 
             # ── Niche guardrail validation ────────────────────

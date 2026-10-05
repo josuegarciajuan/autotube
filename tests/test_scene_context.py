@@ -126,3 +126,41 @@ def test_media_fetcher_query_pool_includes_bible_variant():
     # A bible-derived variant is present and English.
     assert any("explorer silhouette" in q for q in pool)
     assert any(len(q) <= 100 for q in pool)
+
+
+# ── Fase 3 additions ────────────────────────────────────────────────
+
+def test_build_scene_context_fills_prev_next_when_passed():
+    ctx = build_scene_context(
+        {"texto": "x"}, scene_idx=1, prev_snippet="escena previa", next_snippet="escena siguiente",
+    )
+    assert ctx.prev_snippet == "escena previa"
+    assert ctx.next_snippet == "escena siguiente"
+
+
+def test_build_scene_context_sets_depiction_mode_fallback():
+    ctx = build_scene_context({"texto": "El explorador cruza el desierto a caballo"}, scene_idx=0)
+    assert ctx.depiction_mode == "literal"
+
+
+def test_to_rerank_brief_lists_must_avoid():
+    ctx = SceneVisualContext(
+        must_avoid=["smartphone", "drone"],
+        depiction_mode="literal",
+    )
+    brief = ctx.to_rerank_brief()
+    assert "smartphone" in brief
+    assert "drone" in brief
+    assert "literal" in brief
+
+
+def test_to_query_variant_prefers_intent_over_concept():
+    ctx = SceneVisualContext(
+        action="crossing dunes",
+        subject="explorer",
+        visual_concept="should not win",
+    )
+    q = ctx.to_query_variant()
+    assert "crossing dunes explorer" in q
+    assert "should not win" not in q
+

@@ -233,6 +233,9 @@ class PipelineOrchestrator:
                 script_text=script_text,
                 num_scenes=n_scenes,
                 model_name=bible_model or None,
+                # Fase 3 strict alignment: one text item per scene so padded
+                # entries derive their filmable intent from the real fragment.
+                scene_texts=scene_ranges if scene_ranges else None,
             )
 
             # Build coherence engine enriched with the bible

@@ -303,3 +303,83 @@ def anachronism_hits(text: str) -> list[str]:
         if re.search(r"\b" + re.escape(word) + r"\b", t):
             hits.append(word)
     return hits
+
+
+# ── Deliberate time jumps: per-scene anachronism exemption (Fase 3) ───
+#
+# A historical documentary may legitimately cut to present-day footage
+# (an excavation, a laboratory, an expert interview).  Those scenes are
+# described by a ``temporal_segments`` entry whose ``note`` marks the jump as
+# intentional; they must NOT have modern material vetoed as anachronistic.
+
+_MODERN_SEGMENT_MARKERS = (
+    "modern", "actual", "actualidad", "presente", "contempor",
+    "excavacion", "excavación", "hoy", "siglo xxi", "siglo_xxi",
+    "21st", "20th", "futuro",
+)
+
+
+def _theme_attr(theme_ctx: object, key: str, default: object = None) -> object:
+    if theme_ctx is None:
+        return default
+    if isinstance(theme_ctx, dict):
+        return theme_ctx.get(key, default)
+    return getattr(theme_ctx, key, default)
+
+
+def _segment_covers(seg: object, scene_idx: int) -> bool:
+    if not isinstance(seg, dict):
+        return False
+    try:
+        start = int(seg.get("from_scene", 0))
+        end = int(seg.get("to_scene", start))
+    except (TypeError, ValueError):
+        return False
+    if start > end:
+        start, end = end, start
+    return start <= scene_idx <= end
+
+
+def is_anachronism_exempt(
+    scene: object, theme_ctx: object, scene_idx: int | None = None
+) -> bool:
+    """True when *scene* falls in a deliberately-modern temporal segment.
+
+    ``ThemeContext.temporal_segments`` records intentional time jumps in a
+    historical documentary (e.g. a present-day excavation).  Scenes covered
+    by such a segment are exempt from anachronism vetoes so real modern
+    footage is allowed.
+
+    Fail-open: any missing/malformed data returns ``False`` (never raises).
+    """
+    try:
+        if theme_ctx is None:
+            return False
+
+        idx = scene_idx
+        if idx is None:
+            if isinstance(scene, dict):
+                idx = scene.get("scene_idx")
+            elif isinstance(scene, int):
+                idx = scene
+        if idx is None:
+            return False
+        idx = int(idx)
+
+        segments = _theme_attr(theme_ctx, "temporal_segments", None)
+        if not isinstance(segments, (list, tuple)):
+            return False
+
+        for seg in segments:
+            if not _segment_covers(seg, idx):
+                continue
+            note = str(seg.get("note", "") or "").lower()
+            era = str(seg.get("era_decade", "") or "").lower()
+            blob = f"{note} {era}".strip()
+            if any(marker in blob for marker in _MODERN_SEGMENT_MARKERS):
+                return True
+            if _is_timeless(era):
+                return True
+        return False
+    except Exception:
+        return False

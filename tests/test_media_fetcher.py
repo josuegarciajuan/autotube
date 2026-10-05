@@ -933,3 +933,451 @@ class TestHookClimaxVideoGate:
         f = self._fetcher(has_bible=False, flag=False)
         video_scenes, _, _ = f._classify_scenes(scenes)
         assert 0 in video_scenes  # gate disabled → hook gets video anyway
+
+
+# ── Fase 1 (calidad-coherencia): metadata & large-download preference ──
+
+class TestImageCandidateMetadata:
+    """_search_image_provider_page must NOT discard width/height/description."""
+
+    def test_search_image_provider_page_preserves_dimensions(self):
+        from pipeline.media_fetcher import MediaFetcher
+
+        fetcher = MediaFetcher(config=_make_config())
+        provider = MagicMock()
+        provider.search_paginated.return_value = ([{
+            "id": "123",
+            "download_url": "https://cdn.test/x.jpg",
+            "fallback_download_url": None,
+            "width": 1920,
+            "height": 1080,
+            "description": "a church at dawn",
+        }], 42)
+
+        candidates = fetcher._search_image_provider_page(provider, "church dawn", page=1)
+
+        assert len(candidates) == 1
+        cand = candidates[0]
+        assert cand["width"] == 1920, f"width lost: {cand}"
+        assert cand["height"] == 1080, f"height lost: {cand}"
+        assert cand["description"] == "a church at dawn", f"description lost: {cand}"
+        assert cand["type"] == "image"
+        assert cand["_total_available"] == 42
+
+
+class TestPreferLargeDownload:
+    """Low-res image candidates are deferred; accepted with a flag only when
+    no larger candidate could be downloaded (never blocks the pipeline)."""
+
+    def _fetcher(self, **overrides):
+        from pipeline.media_fetcher import MediaFetcher
+
+        fetcher = MediaFetcher(config=_make_config(**overrides))
+        fetcher._scene_context = MagicMock(return_value=None)
+        fetcher._is_asset_duplicate = MagicMock(return_value=False)
+        fetcher._is_anachronistic = MagicMock(return_value=False)
+        fetcher._relevance_score = MagicMock(return_value=0.0)
+        return fetcher
+
+    @staticmethod
+    def _img(img_id, width):
+        return {
+            "id": img_id,
+            "url": f"https://cdn.test/{img_id}.jpg",
+            "download_url": f"https://cdn.test/{img_id}.jpg",
+            "type": "image",
+            "source": "pixabay_photo",
+            "width": width,
+            "height": 480,
+        }
+
+    def test_low_res_deferred_for_larger_candidate(self):
+        from unittest.mock import patch as _patch
+
+        fetcher = self._fetcher(min_stock_image_width=1280)
+        low = self._img("low", 640)
+        high = self._img("high", 1920)
+
+        calls = []
+
+        def fake_download(provider, candidate):
+            calls.append(candidate["id"])
+            return {
+                "path": f"/tmp/{candidate['id']}.jpg",
+                "type": "image",
+                "source": candidate["source"],
+                "width": candidate.get("width"),
+                "height": candidate.get("height"),
+            }
+
+        fetcher._download_candidate = MagicMock(side_effect=fake_download)
+
+        with _patch("pipeline.cinematic_staging.rank_candidates", return_value=None):
+            result = fetcher._try_download_best_candidate(
+                [low, high], MagicMock(), _make_scene_range(), None,
+            )
+
+        assert result is not None
+        assert result["path"].endswith("high.jpg"), f"chose {result['path']}"
+        assert calls[0] == "high", f"low-res tried first: {calls}"
+
+    def test_all_low_res_accepted_with_flag(self):
+        from unittest.mock import patch as _patch
+
+        fetcher = self._fetcher(min_stock_image_width=1280)
+        low1 = self._img("low1", 640)
+        low2 = self._img("low2", 800)
+
+        def fake_download(provider, candidate):
+            return {
+                "path": f"/tmp/{candidate['id']}.jpg",
+                "type": "image",
+                "source": candidate["source"],
+            }
+
+        fetcher._download_candidate = MagicMock(side_effect=fake_download)
+
+        with _patch("pipeline.cinematic_staging.rank_candidates", return_value=None):
+            result = fetcher._try_download_best_candidate(
+                [low1, low2], MagicMock(), _make_scene_range(), None,
+            )
+
+        assert result is not None, "low-res candidate must still be accepted"
+        assert result.get("quality_flag") == "low_res"
+
+    def test_video_candidate_not_deferred(self):
+        """Video candidates (type=video) must never be treated as low-res."""
+        from unittest.mock import patch as _patch
+
+        fetcher = self._fetcher(min_stock_image_width=1280)
+        video = {
+            "id": "",
+            "url": "https://cdn.test/clip.mp4",
+            "type": "video",
+            "source": "pexels",
+            "duration": 8,
+        }
+        fetcher._download_candidate = MagicMock(return_value={
+            "path": "/tmp/clip.mp4", "type": "video",
+            "duration": 8, "source": "pexels",
+        })
+
+        with _patch("pipeline.cinematic_staging.rank_candidates", return_value=None):
+            result = fetcher._try_download_best_candidate(
+                [video], MagicMock(), _make_scene_range(), None,
+            )
+
+        assert result is not None
+        assert result["type"] == "video"
+        assert "quality_flag" not in result
+
+
+class TestAssetDecisionRecord:
+    """Fase 0: structured per-scene decision log must never raise."""
+
+    def test_no_raise_with_empty_or_missing_asset(self, caplog):
+        from pipeline.media_fetcher import MediaFetcher
+
+        fetcher = MediaFetcher(config=_make_config())
+        caplog.set_level("INFO", logger="pipeline.media_fetcher")
+        # None of these must raise.
+        fetcher._asset_decision_record(0, {}, {}, "", None, "")
+        fetcher._asset_decision_record(1, None, None)
+        fetcher._asset_decision_record(2, {"texto": "x"}, {"type": "image", "path": None})
+
+    def test_logs_single_structured_line(self, caplog):
+        from pipeline.media_fetcher import MediaFetcher
+
+        fetcher = MediaFetcher(config=_make_config())
+        caplog.set_level("INFO", logger="pipeline.media_fetcher")
+
+        fetcher._asset_decision_record(
+            scene_idx=3,
+            scene={"tipo": "desarrollo", "search_query_en": "ancient ruins"},
+            asset={"type": "image", "source": "pixabay_photo",
+                   "path": "/tmp/x.jpg", "width": 1920, "height": 1080},
+            query_used="ancient ruins",
+            score=0.42,
+            reason="tier_selected",
+        )
+
+        messages = [r.getMessage() for r in caplog.records
+                    if "asset_decision" in r.getMessage()]
+        assert len(messages) == 1
+        line = messages[0]
+        assert "scene=3" in line
+        assert "width=1920" in line
+        assert "height=1080" in line
+        assert "reason=tier_selected" in line
+
+    def test_disabled_flag_suppresses_log(self, caplog):
+        from pipeline.media_fetcher import MediaFetcher
+
+        fetcher = MediaFetcher(config=_make_config())
+        fetcher._asset_decision_log_enabled = False
+        caplog.set_level("INFO", logger="pipeline.media_fetcher")
+
+        fetcher._asset_decision_record(
+            0, {"texto": "x"}, {"type": "image", "path": "/tmp/x.jpg"},
+        )
+        assert not [r for r in caplog.records if "asset_decision" in r.getMessage()]
+
+
+# ── Fase 4a (calidad-coherencia): query pool + fallback ladder ──────
+
+class TestActionAwareQueryPool:
+    """The pool starts with the action-exact query and never drops the action
+    while action variants remain (explicit fallback ladder)."""
+
+    def _fetcher(self, **strategy):
+        from pipeline.media_fetcher import MediaFetcher
+
+        f = MediaFetcher.__new__(MediaFetcher)
+        base = {
+            "era_anchor_enabled": True,
+            "fallback_queries": [],
+            "action_scene_boost": True,
+            "require_action_match": False,
+            "max_generic_fallback_pct": 20,
+        }
+        base.update(strategy)
+        f._media_strategy = base
+        f._config = {}
+        return f
+
+    def test_action_query_precedes_generic_fallbacks(self):
+        from pipeline.theme_extractor import ThemeContext
+
+        f = self._fetcher()
+        scene = {
+            "search_query_en": "archaeologist excavating tomb",
+            "texto": "The archaeologist excavates the ancient tomb.",
+            "tipo": "desarrollo",
+        }
+        ctx = ThemeContext(era="presente", era_decade="")
+        pool = f._build_query_pool(scene, ctx, scene_idx=0)
+
+        assert pool
+        # First variant is action-exact (contains the narrated action).
+        assert "excavat" in pool[0].lower()
+
+    def test_no_generic_before_action_variants(self):
+        from pipeline.cinematic_staging import classify_query_tier
+        from pipeline.theme_extractor import ThemeContext
+
+        f = self._fetcher()
+        scene = {
+            "search_query_en": "sailors sailing storm",
+            "texto": "The sailors sail through the storm.",
+            "tipo": "desarrollo",
+        }
+        ctx = ThemeContext(era="presente", era_decade="")
+        pool = f._build_query_pool(scene, ctx, scene_idx=0)
+
+        # Once a generic tier appears, no action-tier query may follow it.
+        seen_generic = False
+        for query in pool:
+            tier = classify_query_tier(query, None)
+            if tier in ("context", "symbolic"):
+                seen_generic = True
+            elif seen_generic and tier in ("action_exact", "action_compatible"):
+                pytest.fail(f"action query after generic tier: {query!r}")
+
+    def test_ladder_helper_orders_tiers(self):
+        from pipeline.cinematic_staging import build_fallback_ladder
+
+        ladder = build_fallback_ladder({
+            "symbolic": ["symbolic motif"],
+            "context": ["context establishing"],
+            "action_compatible": ["compatible action"],
+            "action_exact": ["exact action"],
+        })
+        assert ladder == [
+            "exact action", "compatible action", "context establishing", "symbolic motif",
+        ]
+
+    def test_bool_and_pct_config_tolerant(self):
+        """Config coercion must never break a channel (validator)."""
+        from config.config_validator import validate_channel_config
+
+        config = {
+            "MEDIA_STRATEGY": {
+                "action_scene_boost": "yes",       # not bool → True
+                "require_action_match": 1,          # not bool → False
+                "max_generic_fallback_pct": 250,    # out of range → 20
+            },
+        }
+        validate_channel_config("test_slug", config)
+        media = config["MEDIA_STRATEGY"]
+        assert media["action_scene_boost"] is True
+        assert media["require_action_match"] is False
+        assert media["max_generic_fallback_pct"] == 20.0
+
+
+# ── Fase 4b: cobertura de clips (objetivo 80 %) ─────────────────────
+
+class TestVideoCoverageFase4b:
+    """Clips en todo el runtime, boost a acción, tope 0 = sin tope fijo,
+    métrica por tiempo y fallback a imagen."""
+
+    def _classifier(self, **strategy):
+        from pipeline.media_fetcher import MediaFetcher
+
+        f = MediaFetcher.__new__(MediaFetcher)
+        base = {
+            "video_min_scene_duration": 6,
+            "video_first_half_pct": 40,
+            "video_scene_pct_min": 20,
+            "video_scene_pct_max": 80,
+            "video_scene_hard_cap": 0,
+            "stock_image_pct": 0,
+            "hook_climax_video_requires_bible": True,
+            "action_scene_boost": True,
+            "target_video_time_pct": 80,
+        }
+        base.update(strategy)
+        f._media_strategy = base
+        # A bible avoids the C7 hook/climax video gate in these fixtures.
+        f._visual_bible = {"visual_universe": "x"}
+        return f
+
+    def test_classify_covers_full_runtime(self):
+        """Clips are eligible beyond the first 40 % of runtime."""
+        f = self._classifier()
+        scenes = [
+            _make_scene_range(tipo="desarrollo", duration=12, asset_idx=i)
+            for i in range(10)
+        ]
+        video_scenes, _, _ = f._classify_scenes(scenes)
+        assert len(video_scenes) >= round(0.80 * 10), video_scenes
+        # At least one clip lands past the old 40 % window.
+        assert any(i >= 4 for i in video_scenes), video_scenes
+
+    def test_action_scene_gets_boost(self):
+        """With a single slot, a late ACTION scene outranks early static ones."""
+        f = self._classifier(video_scene_pct_max=20)
+        scenes = [
+            _make_scene_range(
+                tipo="desarrollo", duration=8, asset_idx=i,
+                search_query_en="desert panorama",
+            )
+            for i in range(5)
+        ]
+        scenes[-1]["search_query_en"] = "archaeologist excavating an ancient tomb"
+        scenes[-1]["texto"] = "The archaeologist excavates the tomb."
+
+        video_scenes, _, _ = f._classify_scenes(scenes)
+        assert 4 in video_scenes, "late action scene must receive the action boost"
+        assert 0 not in video_scenes, "early static scene must lose the slot"
+
+    def test_hard_cap_zero_means_no_fixed_cap(self):
+        """hard_cap=0 delegates to the RAM governor, not to 0 videos."""
+        f = self._classifier()
+        scenes = [
+            _make_scene_range(tipo="desarrollo", duration=12, asset_idx=i)
+            for i in range(10)
+        ]
+        video_scenes, _, _ = f._classify_scenes(scenes)
+        assert len(video_scenes) == 8  # 80 % of 10, not min(8, 0)
+
+    def test_should_continue_video_search_uses_new_caps(self):
+        f = self._classifier()
+        f._video_quality_scores = [0.9]
+        # 10 scenes, max 80 % → continue below 8, stop at 8.
+        assert f._should_continue_video_search(7, 10) is True
+        assert f._should_continue_video_search(8, 10) is False
+
+        g = self._classifier(video_scene_hard_cap=3)
+        g._video_quality_scores = [0.9]
+        # An explicit hard cap still stops earlier than the percentage.
+        assert g._should_continue_video_search(3, 10) is False
+        assert g._should_continue_video_search(2, 10) is True
+
+    @patch("pipeline.media_fetcher.time.sleep", return_value=None)
+    def test_hard_cap_zero_does_not_force_images(self, mock_sleep):
+        """A run with hard_cap=0 still fetches videos (cap is not zeroed)."""
+        from pipeline.media_fetcher import MediaFetcher
+
+        cfg = _make_config(
+            video_scene_pct_max=80,
+            video_scene_hard_cap=0,
+            video_min_scene_duration=6,
+            min_video_pct=0,
+            video_fallback_queries=[],
+        )
+        fetcher = MediaFetcher(config=cfg)
+        fetcher._visual_bible = {"visual_universe": "x", "scene_visual_map": []}
+        scenes = [
+            _make_scene_range(tipo="desarrollo", duration=8, asset_idx=i)
+            for i in range(4)
+        ]
+
+        def mock_fetch_tiers(scene, scene_idx, total_scenes, is_video_priority,
+                             target_dur, ctx, ai_used, ai_max, ai_enabled,
+                             force_images=False, is_stock_image_priority=False):
+            return (_make_video_result(path=f"/tmp/vid_{scene_idx}.mp4"), 0, {})
+
+        fetcher._fetch_with_ai_tiers = MagicMock(side_effect=mock_fetch_tiers)
+        fetcher._reconcile_actual_image_fallbacks = (
+            lambda s, r, fn: (s, r)
+        )
+
+        results = fetcher.fetch_for_script(
+            bloques=[{"texto": "t"} for _ in range(4)], scene_ranges=scenes,
+        )
+        assert len(results) == 4
+        assert all(r.get("type") == "video" for r in results)
+
+    def test_video_priority_falls_back_to_image(self):
+        """No suitable clip → the tier chain continues to the AI image."""
+        from pipeline.media_fetcher import MediaFetcher
+
+        fetcher = MediaFetcher(config=_make_config())
+        fetcher._build_query_pool = MagicMock(return_value=["action query"])
+        fetcher._try_stock_video_tier = MagicMock(return_value=None)
+        fetcher._try_ai_image_chain = MagicMock(
+            return_value=_make_image_result(path="/tmp/ai_unique.jpg")
+        )
+
+        asset, _ai_used, _q = fetcher._fetch_with_ai_tiers(
+            scene=_make_scene_range(tipo="desarrollo", duration=8),
+            scene_idx=0, total_scenes=3, is_video_priority=True,
+            target_dur=8.0, ctx=None, ai_used=0, ai_max=5, ai_enabled=True,
+        )
+        assert asset is not None and asset["type"] == "image"
+        fetcher._try_stock_video_tier.assert_called_once()
+        fetcher._try_ai_image_chain.assert_called_once()
+
+    def test_target_video_time_pct_warns_by_screen_time(self, caplog):
+        """The target is measured by TIME and only logs a warning."""
+        import logging
+
+        from pipeline.media_fetcher import MediaFetcher
+
+        f = MediaFetcher.__new__(MediaFetcher)
+        f._media_strategy = {"target_video_time_pct": 80}
+        scenes = [_make_scene_range(duration=10, asset_idx=i) for i in range(4)]
+        results = [_make_image_result(path=f"/tmp/i{i}.jpg") for i in range(4)]
+
+        with caplog.at_level(logging.WARNING):
+            pct = f._report_video_time_target(scenes, results)
+        assert pct == 0.0
+        assert any("Video time target not met" in r.message for r in caplog.records)
+
+    def test_target_video_time_pct_met_without_warning(self, caplog):
+        import logging
+
+        from pipeline.media_fetcher import MediaFetcher
+
+        f = MediaFetcher.__new__(MediaFetcher)
+        f._media_strategy = {"target_video_time_pct": 80}
+        scenes = [_make_scene_range(duration=10, asset_idx=i) for i in range(4)]
+        results = [_make_video_result(path=f"/tmp/v{i}.mp4") for i in range(4)]
+
+        with caplog.at_level(logging.WARNING):
+            pct = f._report_video_time_target(scenes, results)
+        assert pct == 100.0
+        assert not any("not met" in r.message for r in caplog.records)
+
+
+

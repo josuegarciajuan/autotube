@@ -68,3 +68,48 @@ def test_reanchor_returns_original_when_empty_result():
          patch("config.llm_helpers.llm_json_call_or_fallback", return_value={}):
         out = reanchor_from_script(ctx, "guion " * 20)
     assert out is ctx
+
+
+# ── Fase 3: temporal_segments (optional, tolerant) ──────────────────
+
+def test_theme_context_defaults_to_no_temporal_segments():
+    assert ThemeContext().temporal_segments == []
+
+
+def test_reanchor_preserves_temporal_segments_when_llm_omits_them():
+    ctx = _ctx()
+    ctx.temporal_segments = [
+        {"from_scene": 2, "to_scene": 4, "era_decade": "actualidad", "note": "excavacion"},
+    ]
+    data = {
+        "era": "siglo_XIII",
+        "era_decade": "medieval",
+        "primary_subject": "ancient ruins",
+        "key_motifs": ["castles"],
+        "forbidden_elements": ["modern city"],
+    }
+    with patch("config.llm_client.create_llm_client"), \
+         patch("config.llm_helpers.llm_json_call_or_fallback", return_value=data):
+        out = reanchor_from_script(ctx, "El guion final narra la historia. " * 10)
+    assert out.temporal_segments == ctx.temporal_segments
+
+
+def test_reanchor_updates_temporal_segments_when_provided():
+    ctx = _ctx()
+    data = {
+        "era": "siglo_XIII",
+        "era_decade": "medieval",
+        "primary_subject": "ancient ruins",
+        "key_motifs": ["castles"],
+        "forbidden_elements": ["modern city"],
+        "temporal_segments": [
+            {"from_scene": 0, "to_scene": 1, "era_decade": "actualidad", "note": "hoy"},
+            "not-a-dict",
+        ],
+    }
+    with patch("config.llm_client.create_llm_client"), \
+         patch("config.llm_helpers.llm_json_call_or_fallback", return_value=data):
+        out = reanchor_from_script(ctx, "El guion final narra la historia. " * 10)
+    assert out.temporal_segments == [
+        {"from_scene": 0, "to_scene": 1, "era_decade": "actualidad", "note": "hoy"},
+    ]

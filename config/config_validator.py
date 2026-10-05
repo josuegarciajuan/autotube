@@ -43,7 +43,21 @@ _MEDIA_STRATEGY_RULES: List[Tuple[str, float, float, float, str]] = [
     ("max_video_blocks_pct",  10.0,  90.0, 50.0,  "media_strategy max_video_blocks_pct"),
     ("max_placeholder_pct",    0.0,  50.0,  0.0,  "media_strategy max_placeholder_pct"),
     ("stock_image_pct",        0.0,  60.0, 15.0,  "media_strategy stock_image_pct"),
+    # Fase 1 (calidad-coherencia): minimum acceptable stock-image resolution
+    # before deferring a candidate in favour of a larger one.
+    ("min_stock_image_width",  640.0, 4000.0, 1280.0, "media_strategy min_stock_image_width"),
+    ("min_stock_image_height", 360.0, 2160.0, 720.0,  "media_strategy min_stock_image_height"),
+    # Fase 4a (calidad-coherencia): cap on scenes ending on a generic fallback
+    # tier. Out-of-range values are forced back to 20 (warning only).
+    ("max_generic_fallback_pct", 0.0, 100.0, 20.0, "media_strategy max_generic_fallback_pct"),
+    # Fase 4b: video coverage percentages. Percentages are bounded 0-100 and
+    # tolerated (never reject a config; clamp to the safe default instead).
+    ("video_scene_pct_max", 0.0, 100.0, 80.0, "media_strategy video_scene_pct_max"),
+    ("target_video_time_pct", 0.0, 100.0, 80.0, "media_strategy target_video_time_pct"),
 ]
+
+# Fase 4b: enum-valued flags fall back to their safe default when malformed.
+_VISUAL_VERIFY_MODES = ("off", "observe", "enforce")
 
 # Minimum sum of RGB channels for COLOR_PALETTE.secondary
 # to prevent fully-opaque black vignette overlay.
@@ -276,6 +290,142 @@ def validate_channel_config(slug: str, config: Dict[str, Any]) -> List[str]:
                     f"[{slug}] MEDIA_STRATEGY.{param}={fval} out of range [{lo}, {hi}] — forcing {default} ({desc})"
                 )
                 media[param] = default
+
+        # ── Tolerant boolean checks (never break existing configs) ──
+        # `prefer_large_download` toggles the low-res deferral heuristic.
+        if "prefer_large_download" in media:
+            val = media.get("prefer_large_download")
+            if not isinstance(val, bool):
+                warnings.append(
+                    f"[{slug}] MEDIA_STRATEGY.prefer_large_download={val!r} "
+                    f"is not boolean — forcing True"
+                )
+                media["prefer_large_download"] = True
+
+        # Fase 4a: action-aware selection flags. Non-boolean values are coerced
+        # to their safe defaults (boost ON, strict match OFF) — never break.
+        for bool_param, bool_default in (
+            ("action_scene_boost", True),
+            ("require_action_match", False),
+        ):
+            if bool_param in media:
+                val = media.get(bool_param)
+                if not isinstance(val, bool):
+                    warnings.append(
+                        f"[{slug}] MEDIA_STRATEGY.{bool_param}={val!r} "
+                        f"is not boolean — forcing {bool_default}"
+                    )
+                    media[bool_param] = bool_default
+
+        # Fase 4b: `video_scene_hard_cap` is unbounded above (0 = no fixed cap),
+        # so it cannot use a fixed max in `_MEDIA_STRATEGY_RULES`. Negative or
+        # non-numeric values are clamped to 0 (delegate to the RAM governor).
+        if "video_scene_hard_cap" in media:
+            val = media.get("video_scene_hard_cap")
+            try:
+                ival = int(val)
+            except (TypeError, ValueError):
+                warnings.append(
+                    f"[{slug}] MEDIA_STRATEGY.video_scene_hard_cap={val!r} "
+                    f"is not numeric — forcing 0 (no fixed cap)"
+                )
+                media["video_scene_hard_cap"] = 0
+            else:
+                if ival < 0:
+                    warnings.append(
+                        f"[{slug}] MEDIA_STRATEGY.video_scene_hard_cap={ival} "
+                        f"is negative — forcing 0 (no fixed cap)"
+                    )
+                    media["video_scene_hard_cap"] = 0
+
+    # ── Fase 4b: visual verifier flags (tolerant, default off) ──
+    # `VISUAL_VERIFY_MODE` is an enum string; anything else falls back to "off".
+    if "VISUAL_VERIFY_MODE" in config:
+        val = config.get("VISUAL_VERIFY_MODE")
+        mode = val.strip().lower() if isinstance(val, str) else ""
+        if mode not in _VISUAL_VERIFY_MODES:
+            warnings.append(
+                f"[{slug}] VISUAL_VERIFY_MODE={val!r} is not one of "
+                f"{_VISUAL_VERIFY_MODES} — forcing 'off'"
+            )
+            config["VISUAL_VERIFY_MODE"] = "off"
+        else:
+            config["VISUAL_VERIFY_MODE"] = mode
+
+    # `VISUAL_VERIFY_MAX_CANDIDATES` must be a positive integer; clamp >= 1.
+    if "VISUAL_VERIFY_MAX_CANDIDATES" in config:
+        default_candidates = 3
+        val = config.get("VISUAL_VERIFY_MAX_CANDIDATES")
+        if isinstance(val, bool) or not isinstance(val, (int, float)):
+            warnings.append(
+                f"[{slug}] VISUAL_VERIFY_MAX_CANDIDATES={val!r} "
+                f"is not an integer — forcing {default_candidates}"
+            )
+            config["VISUAL_VERIFY_MAX_CANDIDATES"] = default_candidates
+        elif int(val) < 1:
+            warnings.append(
+                f"[{slug}] VISUAL_VERIFY_MAX_CANDIDATES={val!r} < 1 — forcing 1"
+            )
+            config["VISUAL_VERIFY_MAX_CANDIDATES"] = 1
+
+    # ── Top-level feature flags: tolerant, default True ────────
+    # `ASSET_DECISION_LOG_ENABLED` controls the structured per-scene log.
+    if "ASSET_DECISION_LOG_ENABLED" in config:
+        val = config.get("ASSET_DECISION_LOG_ENABLED")
+        if not isinstance(val, bool):
+            warnings.append(
+                f"[{slug}] ASSET_DECISION_LOG_ENABLED={val!r} "
+                f"is not boolean — forcing True"
+            )
+            config["ASSET_DECISION_LOG_ENABLED"] = True
+
+    # ── Fase 2: editorial review flags (tolerant, never break configs) ──
+    # `SCRIPT_EDITORIAL_REVIEW_ENABLED` gates the bounded editorial repair of
+    # generated scripts. Non-boolean values are forced to the safe default OFF.
+    if "SCRIPT_EDITORIAL_REVIEW_ENABLED" in config:
+        val = config.get("SCRIPT_EDITORIAL_REVIEW_ENABLED")
+        if not isinstance(val, bool):
+            warnings.append(
+                f"[{slug}] SCRIPT_EDITORIAL_REVIEW_ENABLED={val!r} "
+                f"is not boolean — forcing False"
+            )
+            config["SCRIPT_EDITORIAL_REVIEW_ENABLED"] = False
+
+    # `SCRIPT_EDITORIAL_REVIEW_MAX_CALLS` bounds the number of repair passes
+    # (0-3, default 1). Non-numeric values fall back to 1; out-of-range values
+    # are clamped, never rejected.
+    if "SCRIPT_EDITORIAL_REVIEW_MAX_CALLS" in config:
+        default_calls = 1
+        val = config.get("SCRIPT_EDITORIAL_REVIEW_MAX_CALLS")
+        if isinstance(val, bool) or not isinstance(val, (int, float)):
+            warnings.append(
+                f"[{slug}] SCRIPT_EDITORIAL_REVIEW_MAX_CALLS={val!r} "
+                f"is not an integer — forcing {default_calls}"
+            )
+            config["SCRIPT_EDITORIAL_REVIEW_MAX_CALLS"] = default_calls
+        else:
+            ival = int(val)
+            if ival < 0 or ival > 3:
+                clamped = max(0, min(3, ival))
+                warnings.append(
+                    f"[{slug}] SCRIPT_EDITORIAL_REVIEW_MAX_CALLS={val!r} "
+                    f"out of range [0, 3] — clamping to {clamped}"
+                )
+                config["SCRIPT_EDITORIAL_REVIEW_MAX_CALLS"] = clamped
+
+    # ── Fase 3: temporal overrides flag (tolerant, default True) ──
+    # `THEME_TEMPORAL_OVERRIDES_ENABLED` lets deliberate temporal segments
+    # override the global era and exempt those scenes from anachronism vetoes.
+    # Non-boolean values are coerced to the safe default True (never breaks
+    # existing configs).
+    if "THEME_TEMPORAL_OVERRIDES_ENABLED" in config:
+        val = config.get("THEME_TEMPORAL_OVERRIDES_ENABLED")
+        if not isinstance(val, bool):
+            warnings.append(
+                f"[{slug}] THEME_TEMPORAL_OVERRIDES_ENABLED={val!r} "
+                f"is not boolean — forcing True"
+            )
+            config["THEME_TEMPORAL_OVERRIDES_ENABLED"] = True
 
     # ── Log results ────────────────────────────────────────────
     if warnings:

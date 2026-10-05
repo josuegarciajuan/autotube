@@ -372,12 +372,57 @@ PIXABAY_API_TIMEOUT = 30
 # MEDIA STRATEGY DEFAULTS
 # ═══════════════════════════════════════════════════════════════════
 
+# Fase 0 (calidad-coherencia): structured per-scene asset decision log.
+# One `asset_decision ...` line per chosen scene (ASSET_DECISION_LOG_ENABLED).
+# Default True (observability only — never changes behaviour). Channels may
+# override it via their config / DB config_json.
+ASSET_DECISION_LOG_ENABLED = True
+
+# Fase 2 (calidad-coherencia): editorial review of generated scripts.
+# OFF by default — when enabled, generate_v2 attempts at most
+# SCRIPT_EDITORIAL_REVIEW_MAX_CALLS repair passes and keeps the ORIGINAL
+# script unless the repaired version passes validation AND improves the
+# validator score. Purely additive: it never triggers model failover and
+# never blocks generation (fail-open). Channels may override both keys via
+# their config / DB config_json.
+SCRIPT_EDITORIAL_REVIEW_ENABLED = False
+SCRIPT_EDITORIAL_REVIEW_MAX_CALLS = 1
+
+# Fase 3 (calidad-coherencia): deliberate temporal segments.
+# When True, per-scene ``temporal_segments`` from the theme context override
+# the global era for the scenes they cover and exempt those scenes from
+# anachronism vetoes (e.g. a present-day excavation inside a historical
+# documentary). Purely additive and fail-open: no segment → global era.
+# Channels may override it via their config / DB config_json.
+THEME_TEMPORAL_OVERRIDES_ENABLED = True
+
+# ── Fase 4b: verificador visual de assets (calidad-coherencia) ──────
+# "off"     → no-op absoluto (default; comportamiento actual intacto).
+# "observe" → analiza el candidato elegido y registra hallazgos; NUNCA
+#             descarta ni bloquea nada.
+# "enforce" → además descarta candidatos con logo confirmado o resolución
+#             claramente insuficiente y prueba el siguiente dentro del
+#             presupuesto. NO activar por defecto: fail-open ante cualquier
+#             error (si la verificación falla, se acepta el asset).
+VISUAL_VERIFY_MODE = "off"
+# Máximo de candidatos verificados por escena en modo "enforce". Al agotar
+# el presupuesto se acepta el siguiente candidato sin verificar (fail-open).
+VISUAL_VERIFY_MAX_CANDIDATES = 3
+
 MEDIA_STRATEGY = {
     # ── Existing ────────────────────────────────────────────────
     "media_per_block": 1,
     "prefer_video": True,
     "max_video_blocks_pct": 80,
     "target_video_pct": 80,
+    # ── Stock image resolution preference (Fase 1) ──────────────
+    # When True, image candidates whose declared width is known and below
+    # `min_stock_image_width` are deferred in favour of larger candidates.
+    # If every candidate is small, the low-res one is still accepted with
+    # quality_flag="low_res" (never blocks the pipeline).
+    "prefer_large_download": True,
+    "min_stock_image_width": 1280,
+    "min_stock_image_height": 720,
     "max_placeholder_pct": 0,
     "video_fallback_to_image": True,
     "video_min_duration": 4,
@@ -413,24 +458,35 @@ MEDIA_STRATEGY = {
     "ai_local_sd_steps": 8,
     "AI_IMAGE_PROMPT_EXCEPTIONS": {"positive": [], "negative": []},
 
-    # ── Video Scene Control (Phase 2) ──────────────────────────
+    # ── Video Scene Control (Phase 2 / Fase 4b) ────────────────
     # Minimum % of scenes that should try stock video.
     "video_scene_pct_min": 20,
-    # Maximum % of scenes that may try stock video (if quality is high).
-    "video_scene_pct_max": 30,
+    # Maximum % of scenes that may try stock video. Fase 4b raises it to 80:
+    # clips are now eligible across the FULL runtime (position only decays
+    # their priority), with image fallback whenever no suitable clip exists.
+    "video_scene_pct_max": 80,
     # Absolute hard cap on number of video assets regardless of scene count.
-    "video_scene_hard_cap": 12,
+    # Fase 4b: 0 means "no fixed cap" — the RAM governor (MAX_ABSOLUTE_VIDEOS
+    # in media_fetcher) remains the safety ceiling. On long videos the
+    # governor may sit below `target_video_time_pct` (RAM safety first).
+    "video_scene_hard_cap": 0,
     # Only assign video to scenes within the first X% of total runtime.
+    # Fase 4b: kept as a *preference* window (priority decays faster outside
+    # it) but it no longer excludes late scenes.
     "video_first_half_pct": 40,
     # Minimum scene duration (seconds) to be eligible for video.
     # Matches the new VIDEO_SCENE_DURATION_MAX=7s pacing: scenes ≥6s in the
     # first half still qualify for stock video.
     "video_min_scene_duration": 6,
-    # Avg quality threshold (0-1). Above this → keep searching up to 30%.
+    # Avg quality threshold (0-1). Above this → keep searching up to max %.
     "video_quality_threshold": 0.5,
     # % of non-video scenes that prioritize real stock images (Pixabay/Unsplash)
     # over AI-generated images. 0 = AI-first everywhere (previous behavior).
     "stock_image_pct": 15,
+    # Fase 4b: share of the TOTAL screen time that should be covered by video
+    # rather than images. Measured by scene duration (not scene count);
+    # falling short only logs an informative warning — never aborts.
+    "target_video_time_pct": 80,
 
     # ── Pollo AI (credits, kept as absolute last resort) ───────
     "pollo_ai_enabled": True,
@@ -471,6 +527,20 @@ MEDIA_STRATEGY = {
     # reorders candidates so the best match downloads first. Off by
     # default — costs a call per page and adds latency.
     "llm_relevance_filter": False,
+
+    # ── Fase 4a: action/context-aware selection (calidad-coherencia) ──
+    # When True, candidates that depict the narrated action are boosted over
+    # generic label matches in the deterministic ranking.
+    "action_scene_boost": True,
+    # When True, a scene with a concrete action refuses a candidate without
+    # any action overlap unless it is the last resort (fail-open: if no
+    # candidate matches the action, the full list is used). Default False =
+    # observation mode.
+    "require_action_match": False,
+    # Maximum % of scenes that may end up on a GENERIC fallback tier
+    # (context/establishment or motif/symbolic). Exceeding it logs a warning
+    # but never aborts the pipeline. 0-100.
+    "max_generic_fallback_pct": 20,
 }
 
 # ═══════════════════════════════════════════════════════════════════

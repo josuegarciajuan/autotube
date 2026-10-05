@@ -115,3 +115,21 @@ def test_new_defaults_are_hard_soft_aligned():
     assert defaults.VIDEO_SCENE_DEFAULT_TARGET >= defaults.VIDEO_SCENE_DURATION_MIN
     assert defaults.VIDEO_SCENE_DEFAULT_TARGET <= defaults.VIDEO_SCENE_DURATION_MAX
     assert defaults.MEDIA_STRATEGY.get("hook_climax_video_requires_bible") is True
+
+
+def test_theme_temporal_overrides_default_is_true():
+    assert defaults.THEME_TEMPORAL_OVERRIDES_ENABLED is True
+
+
+def test_non_boolean_theme_temporal_overrides_forced_true():
+    config = {"THEME_TEMPORAL_OVERRIDES_ENABLED": "yes"}
+    warnings = validate_channel_config("canalX", config)
+    assert any("THEME_TEMPORAL_OVERRIDES_ENABLED" in w for w in warnings)
+    assert config["THEME_TEMPORAL_OVERRIDES_ENABLED"] is True
+
+
+def test_boolean_theme_temporal_overrides_passthrough():
+    config = {"THEME_TEMPORAL_OVERRIDES_ENABLED": False}
+    warnings = validate_channel_config("canalX", config)
+    assert not any("THEME_TEMPORAL_OVERRIDES_ENABLED" in w for w in warnings)
+    assert config["THEME_TEMPORAL_OVERRIDES_ENABLED"] is False

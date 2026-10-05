@@ -109,6 +109,41 @@ class MediaFetcher:
         # P3: Theme context for enriched search queries
         self._theme_context = None
 
+        # Fase 3: the scene list currently being fetched, used to resolve the
+        # previous/next narration snippets for each scene context.  Reset per
+        # ``fetch_for_script`` call; empty means "no neighbour information".
+        self._current_scenes: list[dict] = []
+        self._current_scene_idx: int = -1
+
+        # Fase 0 (calidad-coherencia): structured per-scene asset decision log.
+        # Observability only; never alters the fetch chain. Default True.
+        self._asset_decision_log_enabled = bool(
+            getattr(self._config, "ASSET_DECISION_LOG_ENABLED", True)
+        )
+
+        # Fase 4b (calidad-coherencia): visual verifier. "off" (default) is an
+        # absolute no-op; "observe" records without discarding; "enforce" also
+        # discards confirmed-logo / clearly-low-res candidates within budget.
+        _verify_mode = getattr(self._config, "VISUAL_VERIFY_MODE", "off")
+        try:
+            _verify_mode = str(_verify_mode).strip().lower()
+        except Exception:
+            _verify_mode = "off"
+        self._visual_verify_mode = (
+            _verify_mode if _verify_mode in ("off", "observe", "enforce") else "off"
+        )
+        try:
+            self._visual_verify_max_candidates = max(
+                1, int(getattr(self._config, "VISUAL_VERIFY_MAX_CANDIDATES", 3))
+            )
+        except (TypeError, ValueError):
+            self._visual_verify_max_candidates = 3
+        # Per-scene CandidateGate (budget shared across pages/providers) and
+        # observation sinks. Reset at each fetch_for_script() boundary.
+        self._visual_gates: dict[int, object] = {}
+        self._visual_observations: list[dict] = []
+        self._visual_observed_paths: set[str] = set()
+
         # ── Video provider chain ───────────────────────────────
         self.video_providers: list = []
         self._build_video_provider_chain()
@@ -331,6 +366,167 @@ class MediaFetcher:
                 "url": asset.get("url", "") or asset.get("download_url", ""),
             })
 
+    def _asset_decision_record(
+        self,
+        scene_idx: int,
+        scene: dict | None,
+        asset: dict | None,
+        query_used: str = "",
+        score=None,
+        reason: str = "",
+    ) -> None:
+        """Emit ONE structured (key=value) log line per chosen scene asset.
+
+        Fase 0 (calidad-coherencia): pure observability. Includes real asset
+        dimensions when the candidate/downloader exposed them. Gated by
+        ``ASSET_DECISION_LOG_ENABLED`` (default True) and defensive by design:
+        it never mutates state and never raises, even with an empty/missing
+        asset (baseline auditing must never break a render).
+        """
+        try:
+            if not getattr(self, "_asset_decision_log_enabled", True):
+                return
+            scene = scene or {}
+            asset = asset if isinstance(asset, dict) else {}
+            query = (query_used or scene.get("search_query_en", "") or "")
+            logger.info(
+                "asset_decision scene=%s tipo=%s type=%s source=%s "
+                "provider=%s width=%s height=%s resolution=%s score=%s "
+                "reason=%s query=%r path=%s",
+                scene_idx,
+                scene.get("tipo", "?"),
+                asset.get("type", "unknown"),
+                asset.get("source", ""),
+                asset.get("provider", asset.get("source", "")),
+                asset.get("width", "?"),
+                asset.get("height", "?"),
+                asset.get("resolution", "?"),
+                score,
+                reason or "selected",
+                query,
+                asset.get("path", "") or "",
+            )
+        except Exception as exc:  # never let logging break the pipeline
+            logger.debug("asset_decision log failed: %s", exc)
+
+    # ── Fase 4b: visual verifier helpers (fail-open, observe by default) ───
+
+    def _record_visual_observation(self, obs) -> None:
+        """Store + log ONE structured visual observation (never raises)."""
+        try:
+            data = obs.to_dict() if hasattr(obs, "to_dict") else dict(obs)
+            bucket = getattr(self, "_visual_observations", None)
+            if not isinstance(bucket, list):
+                bucket = []
+                self._visual_observations = bucket
+            bucket.append(data)
+            logger.info(
+                "visual_observation scene=%s type=%s path=%s frames=%s "
+                "logo=%s corners=%s sharpness=%s text_edges=%s width=%s "
+                "res_ok=%s rejected=%s reason=%s error=%s",
+                data.get("scene_idx"),
+                data.get("asset_type"),
+                Path(str(data.get("path") or "")).name,
+                data.get("frames_checked"),
+                data.get("logo_suspected"),
+                ",".join(data.get("logo_corners") or []),
+                data.get("sharpness"),
+                data.get("has_text_edges"),
+                data.get("width"),
+                data.get("resolution_ok"),
+                data.get("rejected"),
+                data.get("reason") or "",
+                data.get("error") or "",
+            )
+        except Exception as exc:
+            logger.debug("visual observation log failed: %s", exc)
+
+    def get_visual_observations(self) -> list[dict]:
+        """Structured observations gathered during the last fetch (observability)."""
+        return list(self._visual_observations)
+
+    def _get_visual_gate(self, scene_idx: int, target_dur: float):
+        gate = self._visual_gates.get(scene_idx)
+        if gate is None:
+            from pipeline.visual_verifier import CandidateGate
+
+            gate = CandidateGate(
+                scene_idx=scene_idx,
+                mode=getattr(self, "_visual_verify_mode", "off"),
+                budget=getattr(self, "_visual_verify_max_candidates", 3),
+                target_dur=target_dur,
+                on_observation=self._record_visual_observation,
+            )
+            self._visual_gates[scene_idx] = gate
+        return gate
+
+    def _visual_candidate_ok(self, asset: dict, scene: dict, target_dur: float) -> bool:
+        """Return True to accept *asset*, False to discard (enforce only).
+
+        Fase 4b: the per-scene budget is shared across provider pages via
+        ``self._visual_gates``.  In ``off`` mode it is an absolute no-op and in
+        ``observe`` it only records the chosen candidate.  Fail-open: any error
+        (including a missing ``pipeline.visual_verifier``) accepts the asset.
+        Uses ``getattr`` defaults so unit tests constructing the fetcher via
+        ``object.__new__`` (without ``__init__``) keep working.
+        """
+        if getattr(self, "_visual_verify_mode", "off") == "off":
+            return True
+        if not isinstance(asset, dict) or not asset.get("path"):
+            return True
+        try:
+            if not isinstance(getattr(self, "_visual_gates", None), dict):
+                self._visual_gates = {}
+            scene_idx = int(scene.get("scene_idx", 0) or 0)
+            gate = self._get_visual_gate(scene_idx, target_dur)
+            accepted = bool(gate.consider(asset))
+            if accepted and gate.accepted_path:
+                observed = getattr(self, "_visual_observed_paths", None)
+                if isinstance(observed, set):
+                    observed.add(str(gate.accepted_path))
+            return accepted
+        except Exception as exc:  # never block the pipeline
+            logger.debug("visual candidate gate failed (fail-open): %s", exc)
+            return True
+
+    def _visual_observe_chosen(self, asset: dict, scene: dict, scene_idx: int):
+        """Observe the final chosen asset for paths the candidate gate missed.
+
+        Deliberately observe-only: it never rejects.  Enforce rejection happens
+        in ``_visual_candidate_ok`` where alternative candidates exist.
+        """
+        if getattr(self, "_visual_verify_mode", "off") == "off":
+            return asset
+        try:
+            if not isinstance(asset, dict) or not asset.get("path"):
+                return asset
+            if asset.get("type") == "placeholder":
+                return asset
+            observed = getattr(self, "_visual_observed_paths", None)
+            if not isinstance(observed, set):
+                observed = set()
+                self._visual_observed_paths = observed
+            path = str(asset["path"])
+            if path in observed:
+                return asset
+            from pipeline.visual_verifier import verify_asset
+
+            target_dur = float(scene.get("duration", 5) or 5)
+            obs = verify_asset(
+                asset, scene_idx=int(scene_idx or 0), mode="observe",
+                target_dur=target_dur,
+                # Frames are always 1-3 regardless of the candidate budget.
+                max_frames=max(
+                    1, min(3, int(getattr(self, "_visual_verify_max_candidates", 3))),
+                ),
+            )
+            if obs is not None:
+                observed.add(path)
+                self._record_visual_observation(obs)
+        except Exception as exc:  # fail-open
+            logger.debug("visual observe chosen failed (fail-open): %s", exc)
+        return asset
+
     def flush_asset_history(self, db, video_id: int) -> int:
         """Record all pending assets for this video in the history table.
 
@@ -531,6 +727,9 @@ class MediaFetcher:
         self._used_asset_urls = set()
         self._used_image_urls = set()
 
+        # Fase 4a: fresh generic-fallback accounting window for this script.
+        self._reset_fallback_tracker()
+
         # Refresh cross-video dedup set from DB (includes assets from
         # recently completed/uploaded videos)
         self._load_cross_video_filenames()
@@ -568,6 +767,11 @@ class MediaFetcher:
         scenes = scene_ranges
         n_scenes = len(scenes)
 
+        # Fase 3: expose the current scene list so ``_scene_context`` can
+        # resolve prev/next narration snippets for every scene.
+        self._current_scenes = scenes
+        self._current_scene_idx = -1
+
         # ── Phase 2: Classify scenes (video_priority vs stock_image vs ai_image) ──
         video_scenes, stock_image_scenes, scene_types = self._classify_scenes(scenes)
 
@@ -597,16 +801,26 @@ class MediaFetcher:
         except Exception:
             pass
 
-        hard_cap = self._media_strategy.get("video_scene_hard_cap", 12)
-        MAX_ABSOLUTE_VIDEOS = min(MAX_ABSOLUTE_VIDEOS, hard_cap)
+        # ── Fase 4b: fixed hard cap is opt-in (0 = delegate to RAM governor) ──
+        # `video_scene_hard_cap` default is 0: the RAM governor above is the
+        # ONLY hard ceiling. `MAX_ABSOLUTE_VIDEOS` is never removed — on long
+        # videos it may stay below `target_video_time_pct` for RAM safety.
+        try:
+            hard_cap = int(self._media_strategy.get("video_scene_hard_cap", 0) or 0)
+        except (TypeError, ValueError):
+            hard_cap = 0
+        if hard_cap > 0:
+            MAX_ABSOLUTE_VIDEOS = min(MAX_ABSOLUTE_VIDEOS, hard_cap)
         logger.info(
-            "Fase 2 classification: %d video-priority / %d stock-image-priority / "
-            "%d ai-image (%d scenes), hard cap %d videos, dynamic range %.0f-%.0f%%",
+            "Fase 2/4b classification: %d video-priority / %d stock-image-priority / "
+            "%d ai-image (%d scenes), MAX_ABSOLUTE_VIDEOS=%d (hard_cap=%s), "
+            "dynamic range %.0f-%.0f%%, target video time %.0f%%",
             len(video_scenes), len(stock_image_scenes),
             n_scenes - len(video_scenes) - len(stock_image_scenes), n_scenes,
-            MAX_ABSOLUTE_VIDEOS,
+            MAX_ABSOLUTE_VIDEOS, (hard_cap if hard_cap > 0 else "none"),
             self._media_strategy.get("video_scene_pct_min", 20),
-            self._media_strategy.get("video_scene_pct_max", 30),
+            self._media_strategy.get("video_scene_pct_max", 80),
+            self._media_strategy.get("target_video_time_pct", 80),
         )
 
         # ── Phase 2: fetch per scene (tier-based) ──────────────
@@ -647,11 +861,17 @@ class MediaFetcher:
         self._used_img_ids.clear()
         self._used_content_hashes.clear()
 
+        # ── Reset Fase 4b visual verification state (per video) ──
+        self._visual_gates = {}
+        self._visual_observations = []
+        self._visual_observed_paths = set()
+
         # ── Hard abort counter: consecutive placeholder scenes ──
         _consecutive_black = 0
         _MAX_CONSECUTIVE_BLACK = 3
 
         for i, scene in enumerate(scenes):
+            self._current_scene_idx = i
             scene_tipo = scene.get("tipo", "desarrollo")
             target_dur = scene.get("duration", 5)
             is_video_priority = i in video_scenes
@@ -705,6 +925,7 @@ class MediaFetcher:
             )
 
             # ── Score video quality for dynamic control ───────────
+            _asset_score = (quality_info or {}).get("score")
             if asset and asset.get("type") == "video":
                 provider = asset.get("source", "unknown")
                 resolution = asset.get("resolution", "unknown")
@@ -717,6 +938,7 @@ class MediaFetcher:
                     queries_tried=_video_queries_tried.get(i, 1),
                 )
                 self._video_quality_scores.append(score)
+                _asset_score = score
                 logger.info(
                     "Video quality score: %.2f (provider=%s, res=%s)",
                     score, provider, resolution,
@@ -750,6 +972,23 @@ class MediaFetcher:
             else:
                 _consecutive_black = 0
                 self._record_asset_for_history(asset)
+
+            # ── Fase 4b: observe the chosen asset (never discards here) ──
+            # Covers non-stock paths (AI image, Pollo, direct providers) that do
+            # not go through _try_download_best_candidate. The stock candidate
+            # gate already recorded its path, so it is skipped (no duplicate).
+            asset = self._visual_observe_chosen(asset, scene, i)
+
+            # ── Fase 0: structured decision log (observability only) ──
+            self._asset_decision_record(
+                scene_idx=i,
+                scene=scene,
+                asset=asset,
+                query_used=scene.get("search_query_en", ""),
+                score=_asset_score,
+                reason=("placeholder" if asset.get("type") == "placeholder"
+                        else "tier_selected"),
+            )
 
             # ── Count for stats ───────────────────────────────
             atype = asset.get("type", "?")
@@ -911,7 +1150,55 @@ class MediaFetcher:
             )
             logger.error(error_msg)
             raise RuntimeError(error_msg)
+        # Fase 4a: advisory warning (never aborts) when the generic fallback
+        # tier was used more than the configured cap allows.
+        self._warn_generic_fallback()
+        # Fase 4b: measure video coverage by SCREEN TIME (not just scene count)
+        # and warn — never abort — when it stays below the configured target.
+        self._report_video_time_target(scenes, results)
         return results
+
+    def _report_video_time_target(
+        self, scenes: list[dict], results: list[dict]
+    ) -> float | None:
+        """Log (and return) the % of total screen time covered by video assets.
+
+        Fase 4b: `target_video_time_pct` is an *objective*, not a gate. The RAM
+        governor (`MAX_ABSOLUTE_VIDEOS`) can legitimately cap long videos below
+        the target; in that case this emits an informative warning only.
+        """
+        try:
+            target = float(self._media_strategy.get("target_video_time_pct", 80))
+        except (TypeError, ValueError):
+            target = 80.0
+        if target <= 0:
+            self._last_video_time_pct = None
+            return None
+        total_dur = 0.0
+        video_dur = 0.0
+        for scene, asset in zip(scenes, results):
+            try:
+                dur = float(scene.get("duration", 0) or 0)
+            except (TypeError, ValueError):
+                dur = 0.0
+            total_dur += dur
+            if isinstance(asset, dict) and asset.get("type") == "video":
+                video_dur += dur
+        pct = (video_dur / total_dur * 100.0) if total_dur > 0 else 0.0
+        self._last_video_time_pct = pct
+        if pct + 1e-6 < target:
+            logger.warning(
+                "Video time target not met: %.0f%% < %.0f%% (target_video_time_pct) — "
+                "images used as fallback; in long videos the RAM governor may cap "
+                "video assets below the target for safety",
+                pct, target,
+            )
+        else:
+            logger.info(
+                "Video time target met: %.0f%% (target %.0f%%)",
+                pct, target,
+            )
+        return pct
 
     def _reconcile_actual_image_fallbacks(
         self,
@@ -1483,12 +1770,15 @@ class MediaFetcher:
 
         **Video-priority criteria** (any one is sufficient):
           1. Scene type is ``hook`` or ``climax`` (always forced).
-          2. Scene duration ≥ ``video_min_scene_duration`` AND position
-             is within the first ``video_first_half_pct``% of runtime.
+          2. Scene duration ≥ ``video_min_scene_duration``.  Fase 4b: scenes
+             from the WHOLE runtime are eligible — position only decays their
+             priority (with a floor), it never excludes them.
 
-        Capped at ``video_scene_pct_max``% of total scenes.  Scenes
-        beyond the cap are reclassified as ``ai_image`` even if they
-        meet the criteria.
+        Capped at ``video_scene_pct_max``% of total scenes (default 80) and, if
+        ``video_scene_hard_cap`` > 0, by that absolute number.  Fase 4b sets
+        ``video_scene_hard_cap=0`` (no fixed cap) so the RAM governor in
+        ``fetch_for_script`` remains the only hard ceiling.  Scenes beyond the
+        cap are reclassified as ``ai_image`` even if they meet the criteria.
 
         **Stock-image priority** (only if ``stock_image_pct`` > 0):
           Up to ``stock_image_pct``% of the remaining (non-video,
@@ -1512,10 +1802,26 @@ class MediaFetcher:
 
         total_duration = sum(s.get("duration", 5) for s in scenes) or 1.0
         min_dur = self._media_strategy.get("video_min_scene_duration", 10)
-        first_half_pct = self._media_strategy.get("video_first_half_pct", 40) / 100.0
-        max_pct = self._media_strategy.get("video_scene_pct_max", 30) / 100.0
-        hard_cap = self._media_strategy.get("video_scene_hard_cap", 12)
-        max_video = min(round(max_pct * n_scenes), hard_cap)
+        # Fase 4b: `video_first_half_pct` is a *preference* window, not a hard
+        # filter — position decays the priority across the whole runtime.
+        preferred_pct = self._media_strategy.get("video_first_half_pct", 40) / 100.0
+        try:
+            preferred_pct = min(max(float(preferred_pct), 0.0), 1.0)
+        except (TypeError, ValueError):
+            preferred_pct = 0.4
+        max_pct = self._media_strategy.get("video_scene_pct_max", 80) / 100.0
+        try:
+            max_pct = min(max(float(max_pct), 0.0), 1.0)
+        except (TypeError, ValueError):
+            max_pct = 0.8
+        try:
+            hard_cap = int(self._media_strategy.get("video_scene_hard_cap", 0) or 0)
+        except (TypeError, ValueError):
+            hard_cap = 0
+        max_video = round(max_pct * n_scenes)
+        if hard_cap > 0:
+            max_video = min(max_video, hard_cap)
+        max_video = max(0, min(max_video, n_scenes))
 
         # C7 (Fase 8): hook/climax are the retention-critical beats. They only
         # receive STOCK VIDEO when the visual bible is available, so the clip
@@ -1524,6 +1830,27 @@ class MediaFetcher:
         bible_gate = self._media_strategy.get("hook_climax_video_requires_bible", True)
         has_bible = bool(getattr(self, "_visual_bible", None))
         hook_video_blocked = bible_gate and not has_bible
+
+        # Fase 4b: action/verb boost (reuses the Fase 4a vocabulary). Imported
+        # lazily and fail-open so classification never breaks if it is missing.
+        action_boost_enabled = bool(
+            self._media_strategy.get("action_scene_boost", True)
+        )
+        _scene_has_action = None
+        _derive_depiction_mode = None
+        if action_boost_enabled:
+            try:
+                from pipeline.cinematic_staging import scene_has_action
+
+                _scene_has_action = scene_has_action
+            except Exception:
+                _scene_has_action = None
+            try:
+                from pipeline.scene_context import derive_depiction_mode
+
+                _derive_depiction_mode = derive_depiction_mode
+            except Exception:
+                _derive_depiction_mode = None
 
         # Build candidate list sorted by priority
         candidates: list[tuple[int, int]] = []  # (priority, idx) — higher = better
@@ -1544,14 +1871,36 @@ class MediaFetcher:
             # bible gate blocks stock video for them (C7).
             if tipo in ("hook", "climax"):
                 priority = 0 if hook_video_blocked else 100
-            # Long scene in first half of runtime
-            elif dur >= min_dur and pos_in_runtime <= first_half_pct:
-                # Priority decays as we get further into the video
-                pos_factor = 1.0 - (pos_in_runtime / first_half_pct)
+            # Fase 4b: ANY sufficiently long scene across the FULL runtime is a
+            # candidate. Position only decays its priority (never excludes it).
+            elif dur >= min_dur:
+                if preferred_pct > 0 and pos_in_runtime <= preferred_pct:
+                    # Gentle decay inside the preferred (first) window.
+                    pos_factor = 1.0 - 0.5 * (pos_in_runtime / preferred_pct)
+                else:
+                    # Late scenes stay eligible: decay faster but with a floor
+                    # so a strong action scene can still outrank weak early ones.
+                    tail = (pos_in_runtime - preferred_pct) / max(
+                        1e-6, 1.0 - preferred_pct
+                    )
+                    pos_factor = max(0.35, 0.5 * (1.0 - tail))
                 dur_factor = min(1.0, dur / max(min_dur * 2, 20))
                 priority = int(50 * (pos_factor * 0.6 + dur_factor * 0.4))
                 if tipo == "desarrollo":
                     priority += 5  # slight boost for desarrollo over otros
+                # Action/verb scenes are much more likely to have a good clip.
+                if _scene_has_action is not None:
+                    try:
+                        if _scene_has_action(s):
+                            priority += 25
+                    except Exception:
+                        pass
+                if _derive_depiction_mode is not None:
+                    try:
+                        if _derive_depiction_mode(s) == "literal":
+                            priority += 10
+                    except Exception:
+                        pass
 
             if priority > 0:
                 candidates.append((priority, idx))
@@ -1807,25 +2156,35 @@ class MediaFetcher:
         """Decide whether to keep searching for stock videos.
 
         Rules:
-          - videos_found < 20% minimum → always continue.
-          - videos_found ≥ 30% maximum → always stop.
-          - Between 20% and 30% → continue only if average quality ≥ threshold.
+          - videos_found < min% minimum → always continue.
+          - videos_found ≥ max% maximum (or the optional hard cap) → stop.
+          - Between min% and max% → continue only if average quality ≥ threshold.
+
+        Fase 4b: ``video_scene_pct_max`` defaults to 80 and
+        ``video_scene_hard_cap=0`` means "no fixed cap", so the search keeps
+        going up to the target share (image fallback handles unsuitable clips).
         """
         min_pct = self._media_strategy.get("video_scene_pct_min", 20) / 100.0
-        max_pct = self._media_strategy.get("video_scene_pct_max", 30) / 100.0
-        hard_cap = self._media_strategy.get("video_scene_hard_cap", 12)
+        max_pct = self._media_strategy.get("video_scene_pct_max", 80) / 100.0
+        try:
+            hard_cap = int(self._media_strategy.get("video_scene_hard_cap", 0) or 0)
+        except (TypeError, ValueError):
+            hard_cap = 0
         threshold = self._media_strategy.get("video_quality_threshold", 0.5)
 
         min_videos = max(1, round(min_pct * n_scenes))
-        max_videos = min(round(max_pct * n_scenes), hard_cap)
+        max_videos = round(max_pct * n_scenes)
+        if hard_cap > 0:
+            max_videos = min(max_videos, hard_cap)
+        max_videos = max(min_videos, min(max_videos, n_scenes))
 
         if videos_found < min_videos:
-            return True   # haven't reached 20% minimum yet
+            return True   # haven't reached the minimum yet
 
         if videos_found >= max_videos:
-            return False  # already at 30% / hard cap
+            return False  # already at the max / hard cap
 
-        # Between 20% and 30% — check average quality
+        # Between min and max — check average quality
         if self._video_quality_scores:
             avg = sum(self._video_quality_scores) / len(self._video_quality_scores)
             return avg >= threshold
@@ -2526,8 +2885,32 @@ class MediaFetcher:
             return cfg.get("SCRIPT_STRUCTURE", []) or []
         return getattr(cfg, "SCRIPT_STRUCTURE", []) or []
 
+    @staticmethod
+    def _scene_snippet(scene: object) -> str:
+        """Narration text of a scene range (fragment first, then full text)."""
+        if not isinstance(scene, dict):
+            return ""
+        return (
+            scene.get("fragment_text")
+            or scene.get("texto")
+            or scene.get("search_query_en")
+            or ""
+        )
+
     def _scene_context(self, scene: dict, scene_idx: int = 0) -> "SceneVisualContext":
         from pipeline.scene_context import build_scene_context
+
+        # Fase 3: resolve neighbouring narration snippets from the scene list
+        # currently being fetched.  Missing list → empty snippets (fail-open).
+        prev_snippet = ""
+        next_snippet = ""
+        scenes = getattr(self, "_current_scenes", []) or []
+        if scenes and 0 <= scene_idx < len(scenes):
+            if scene_idx - 1 >= 0:
+                prev_snippet = self._scene_snippet(scenes[scene_idx - 1])
+            if scene_idx + 1 < len(scenes):
+                next_snippet = self._scene_snippet(scenes[scene_idx + 1])
+
         return build_scene_context(
             scene,
             scene_idx=scene_idx,
@@ -2535,122 +2918,182 @@ class MediaFetcher:
             visual_bible=getattr(self, "_visual_bible", None),
             structure=self._scene_structure(),
             script_title=scene.get("video_title", ""),
+            prev_snippet=prev_snippet,
+            next_snippet=next_snippet,
+            temporal_overrides_enabled=self._temporal_overrides_enabled(),
         )
+
+    def _temporal_overrides_enabled(self) -> bool:
+        """Channel kill-switch for Fase 3 temporal segments (default True)."""
+        cfg = getattr(self, "_config", None)
+        if isinstance(cfg, dict):
+            return bool(cfg.get("THEME_TEMPORAL_OVERRIDES_ENABLED", True))
+        return bool(getattr(cfg, "THEME_TEMPORAL_OVERRIDES_ENABLED", True))
+
+    def _enrich_with_intent(self, sctx, scene: dict):
+        """Fill missing filmable-intent fields with deterministic heuristics.
+
+        Fase 4a: the visual bible may omit ``subject``/``action``/… (or be
+        absent).  ``derive_scene_intent`` never raises and is used ONLY to fill
+        empty fields, so an explicit bible intent always wins.
+        """
+        try:
+            if getattr(sctx, "action", "") and getattr(sctx, "subject", ""):
+                return sctx
+            from pipeline.scene_context import derive_scene_intent
+
+            intent = derive_scene_intent(
+                scene, setting=getattr(sctx, "setting", "") or ""
+            )
+            if not getattr(sctx, "subject", ""):
+                sctx.subject = intent.get("subject", "") or ""
+            if not getattr(sctx, "action", ""):
+                sctx.action = intent.get("action", "") or ""
+            if not getattr(sctx, "object", ""):
+                sctx.object = intent.get("object", "") or ""
+            if not getattr(sctx, "setting", ""):
+                sctx.setting = intent.get("setting", "") or ""
+            if not getattr(sctx, "must_show", None):
+                sctx.must_show = list(intent.get("must_show", []) or [])
+        except Exception:
+            pass
+        return sctx
 
     def _build_query_pool(self, scene: dict, ctx, scene_idx: int = 0) -> list[str]:
         """Build an ordered list of query variations for a scene.
 
-        Order (narrative priority): narrative-first queries try first,
-        theme-anchored queries are fallbacks. This ensures that what you
-        SEE matches what you HEAR, while maintaining visual context.
+        Fase 4a — explicit fallback ladder (``build_fallback_ladder``):
+        ``action_exact → action_compatible → context → symbolic``.  The stock
+        search consumes the list in order, so a concrete, action-grounded query
+        is never degraded to a generic one while action variants remain.
 
-        Returns deduplicated list of non-empty queries (~11-13 variants).
+        Additional guarantees:
+          - the first variant is the action-exact query (subject+action+object+
+            setting) when the scene carries filmable intent;
+          - the era anchor is appended to EVERY non-timeless variant;
+          - deduplicated, every variant fits the provider ``max_len``.
+
+        Returns deduplicated list of non-empty queries.
         """
-        from pipeline.cinematic_staging import enrich_scene_query, sanitize_person_query
-        base = enrich_scene_query(
+        from pipeline.cinematic_staging import (
+            FALLBACK_LADDER,
+            build_contextual_fallback,
+            build_fallback_ladder,
+            enrich_scene_query,
+            has_person_reference,
+            sanitize_person_query,
+            sanitize_shot_direction,
+        )
+
+        raw_base = enrich_scene_query(
             scene.get("search_query_en", ""),
             ctx,
             scene.get("texto", ""),
         )
-        base = sanitize_person_query(base)
+        base = sanitize_person_query(raw_base)
 
-        pool = []
-
-        # 1. Base query (narrative + theme, roughly 60-70% / 30-40% ratio
-        #    thanks to the improved LLM prompt in script_generator.py)
-        if base and base.strip():
-            pool.append(base.strip())
-
-        # 1b. Bible-derived variant (Phase 3, C2): grounds the scene in the
-        #     video's GLOBAL visual world (visual concept / entity / motif /
-        #     era). Comes right after the narrative-first query so "lo que ves
-        #     = lo que oyes" stays dominant while stock clips also respect the
-        #     bible's protagonist/bridge/recurring-motif direction.
-        if getattr(self, "_visual_bible", None):
-            sctx = self._scene_context(scene, scene_idx=scene_idx)
-            bv = sctx.to_query_variant()
-            if bv and bv != (base or "").strip() and bv not in pool:
-                pool.append(bv)
-
-        scene_tipo = scene.get("tipo", "desarrollo")
-
-        # 2. Narrative-heavy variant: strip most theme words, keep 1 anchor.
-        #    This prioritizes narrative content with minimal theme anchoring.
-        #    Comes BEFORE directional variations so narrative specificity
-        #    wins over theme-heavy angle variations.
-        narrative_heavy = self._extract_narrative_keywords(base, ctx) if base else ""
-        if narrative_heavy and narrative_heavy != base and narrative_heavy.strip():
-            pool.append(narrative_heavy.strip())
-
-        # 2b. Era-anchored variant (HIGH priority for historical scenes).
-        #     Guarantees the FIRST search of a historical scene carries the
-        #     era anchor, even though the exhaustive path uses pool queries
-        #     directly (they never pass through _build_search_query).
+        # ── Era anchor: required on every non-timeless variant ──
         era_phrase = None
         if ctx and self._media_strategy.get("era_anchor_enabled", True):
             from pipeline.era_terms import era_anchor
             try:
-                era_phrase = era_anchor(ctx.era_decade, ctx.era)
+                era_phrase = era_anchor(
+                    getattr(ctx, "era_decade", ""), getattr(ctx, "era", "")
+                )
             except Exception:
                 era_phrase = None
-        if era_phrase and base:
-            v_narr = f"{narrative_heavy} {era_phrase}" if narrative_heavy else None
-            v_base = f"{base} {era_phrase}"
-            if v_narr and len(v_narr) <= 100 and v_narr not in pool:
-                pool.append(v_narr)
-            elif len(v_base) <= 100 and v_base not in pool:
-                pool.append(v_base)
 
-        # 3. Base + directional variations (reduced to 3 from 5 — keep the
-        #    most distinct ones; wide/close/distant have most visual variety)
+        from pipeline.cinematic_staging import fit_query
+
+        def with_era(query: str) -> str:
+            query = (query or "").strip()
+            if not query:
+                return ""
+            if not era_phrase:
+                return fit_query(query, 100)
+            if era_phrase.lower() in query.lower():
+                return fit_query(query, 100)
+            # Drop a trailing partial era fragment (e.g. left behind after
+            # stripping theme keywords) so we never emit
+            # "… 17th  17th century wooden sailing ship".
+            phrase_words = era_phrase.lower().split()
+            qwords = query.split()
+            for k in range(min(len(qwords), len(phrase_words) - 1), 0, -1):
+                tail = [w.lower().strip(" ,.") for w in qwords[-k:]]
+                if tail == phrase_words[:k]:
+                    query = " ".join(qwords[:-k]).rstrip(" ,.")
+                    break
+            # Reserve budget so the era anchor is NEVER the part trimmed away:
+            # guarantee it is present in every non-timeless variant.
+            budget = max(10, 100 - len(era_phrase) - 1)
+            return f"{fit_query(query, budget)} {era_phrase}".strip()
+
+        # ── Filmable intent (bible first, deterministic fallback) ──
+        concept_sctx = self._scene_context(scene, scene_idx=scene_idx)
+        sctx = self._enrich_with_intent(
+            self._scene_context(scene, scene_idx=scene_idx), scene
+        )
+        action_phrase = (getattr(sctx, "action", "") or "").strip()
+        search_query_en = (scene.get("search_query_en") or "").strip()
+
+        # Action-exact query: prefer the LLM query when it already encodes the
+        # action; otherwise compose subject+action+object+setting.
+        if action_phrase and search_query_en and any(
+            w and w in search_query_en.lower() for w in action_phrase.split()
+        ):
+            action_exact = base
+        else:
+            intent_phrase = ""
+            try:
+                intent_phrase = sctx._intent_phrase()
+            except Exception:
+                intent_phrase = ""
+            action_exact = (
+                sanitize_person_query(intent_phrase) if intent_phrase else base
+            )
+
+        tiers: dict[str, list[str]] = {tier: [] for tier in FALLBACK_LADDER}
+
+        def add(tier: str, query: str) -> None:
+            q = with_era(query)
+            if q:
+                tiers[tier].append(q)
+
+        # 1. Action-exact (subject + action + object + setting + era).
+        add("action_exact", action_exact)
+
+        # 2. Action-compatible: the narrative/theme-grounded query, its
+        #    narrative-heavy variant, directional variants and simplified
+        #    variants (which now keep the verb — see ``_simplify_query``).
+        add("action_compatible", base)
+        narrative_heavy = self._extract_narrative_keywords(base, ctx) if base else ""
+        add("action_compatible", narrative_heavy)
         if base:
-            from pipeline.cinematic_staging import has_person_reference, sanitize_shot_direction
             has_person = has_person_reference(base)
             for suffix in [
                 "wide shot establishing",
                 sanitize_shot_direction("close-up detail", has_person=has_person),
                 "distant view atmospheric",
             ]:
-                v = f"{base} {suffix}"
-                if len(v) <= 100:
-                    pool.append(v)
+                add("action_compatible", f"{base} {suffix}")
+        add("action_compatible", self._simplify_query(base) if base else "")
+        add("action_compatible", self._simplify_query(base, max_keywords=2) if base else "")
 
-        # 4. Simplified: just the key nouns (3-4 words, no style modifiers)
-        simple = self._simplify_query(base) if base else ""
-        if simple and simple != base and simple.strip():
-            pool.append(simple)
+        # 3. Context / establishment: bible-derived variant, anti-theme clean
+        #    query and dynamic theme fallbacks anchored to the video world.
+        if getattr(self, "_visual_bible", None):
+            bible_variant = concept_sctx.to_query_variant()
+            add("context", bible_variant)
+        if ctx and getattr(ctx, "theme_keywords_en", None) and base:
+            add("context", _strip_theme_keywords(base, ctx.theme_keywords_en))
+        scene_tipo = scene.get("tipo", "desarrollo")
+        if ctx and getattr(ctx, "primary_subject", ""):
+            add("context", build_contextual_fallback(scene_tipo, ctx))
+            add("context", self._build_themed_fallback(scene_tipo, ctx))
 
-        # 4b. Ultra-simplified: 2 core nouns. Drops overly-specific proper
-        #     nouns (site names, etc.) that stock providers can't match, so
-        #     the general subject still has a chance before generic fallbacks.
-        ultra_simple = self._simplify_query(base, max_keywords=2) if base else ""
-        if ultra_simple and ultra_simple not in pool and ultra_simple.strip():
-            pool.append(ultra_simple)
-
-        # 5. Without theme keywords — anti-poisoning fallback
-        if ctx and ctx.theme_keywords_en and base:
-            clean = _strip_theme_keywords(base, ctx.theme_keywords_en)
-            if clean and clean != base and clean.strip():
-                pool.append(clean)
-
-        # 6. Themed fallback queries: built dynamically from ThemeContext.
-        #    Topic-aware and moved BEFORE the generic type fallback so the
-        #    video stays anchored to its actual subject.
-        if ctx and hasattr(ctx, 'primary_subject') and ctx.primary_subject:
-            from pipeline.cinematic_staging import build_contextual_fallback
-            contextual_fb = build_contextual_fallback(scene_tipo, ctx)
-            if contextual_fb and contextual_fb not in pool:
-                pool.append(contextual_fb)
-            themed_fb = self._build_themed_fallback(scene_tipo, ctx)
-            if themed_fb and themed_fb not in pool:
-                pool.append(themed_fb)
-
-        # 7. Type-specific fallback queries (generic, near the end)
-        type_fb = self._FALLBACK_BY_TYPE.get(scene_tipo, "")
-        if type_fb and type_fb not in pool:
-            pool.append(type_fb)
-
-        # 8. Channel-configured fallback queries (absolute last resort)
+        # 4. Symbolic / absolute last resort: type-specific then channel
+        #    configured generic fallbacks.
+        add("symbolic", self._FALLBACK_BY_TYPE.get(scene_tipo, ""))
         fallbacks = self._media_strategy.get("fallback_queries", [
             "historical documentary archival photography cinematic 16:9",
             "ancient history artifacts museum exhibition documentary",
@@ -2660,19 +3103,9 @@ class MediaFetcher:
             "dark mystery abandoned exploration atmosphere cinematic",
         ])
         for fb in fallbacks:
-            if fb and fb.strip() and fb not in pool:
-                pool.append(fb.strip())
+            add("symbolic", fb)
 
-        # Remove empty/whitespace and deduplicate while preserving order
-        seen = set()
-        result = []
-        for q in pool:
-            qs = q.strip()
-            if qs and qs not in seen:
-                seen.add(qs)
-                result.append(qs)
-
-        return result
+        return build_fallback_ladder(tiers, max_len=100)
 
     # ── Relevance & anachronism filtering (v9) ─────────────────
 
@@ -2740,6 +3173,24 @@ class MediaFetcher:
             return False
         return bool(anachronism_hits(text))
 
+    def _is_anachronistic_for_scene(self, candidate: dict, ctx, scene_context) -> bool:
+        """Anachronism veto honouring the per-scene era (Fase 3).
+
+        When ``scene_context.era`` resolves to a timeless/present era (a
+        deliberate temporal jump), the global historical veto does NOT apply —
+        real modern footage is allowed for that scene.
+        """
+        era = getattr(scene_context, "era", "") or ""
+        if era:
+            try:
+                from pipeline.era_terms import era_anchor
+
+                if era_anchor("", era) is None:
+                    return False
+            except Exception:
+                return False
+        return self._is_anachronistic(candidate, ctx)
+
     def _relevance_score(self, candidate: dict, scene: dict, ctx) -> float:
         """Score how well a candidate matches the scene's narrative keywords.
 
@@ -2775,6 +3226,79 @@ class MediaFetcher:
             score -= penalty
 
         return max(0.0, score)
+
+    def _legacy_relevance_order(
+        self, asset_candidates: list[dict], scene: dict, ctx,
+    ) -> list[dict]:
+        """Pre-Fase-4a ordering kept as a fail-open fallback.
+
+        Scores by ``_relevance_score``, prefers candidates clearing
+        ``relevance_min_overlap`` and otherwise keeps the whole page.
+        """
+        try:
+            scored: list[tuple[float, dict]] = []
+            for candidate in asset_candidates:
+                if self._is_asset_duplicate(candidate):
+                    continue
+                if self._is_anachronistic(candidate, ctx):
+                    continue
+                scored.append((self._relevance_score(candidate, scene, ctx), candidate))
+            if not scored:
+                return []
+            scored.sort(key=lambda pair: pair[0], reverse=True)
+            try:
+                min_overlap = float(self._media_strategy.get("relevance_min_overlap", 1))
+            except (TypeError, ValueError):
+                min_overlap = 1.0
+            if scored[0][0] >= min_overlap:
+                return [c for s, c in scored if s >= min_overlap]
+            return [c for _, c in scored]
+        except Exception:
+            return list(asset_candidates)
+
+    # ── Fase 4a: generic-fallback accounting (advisory only) ──────────
+
+    def _reset_fallback_tracker(self) -> None:
+        """Start a fresh per-script generic-fallback accounting window."""
+        try:
+            from pipeline.cinematic_staging import GenericFallbackTracker
+
+            max_pct = self._media_strategy.get("max_generic_fallback_pct", 20)
+            self._fallback_tracker = GenericFallbackTracker(max_pct=max_pct)
+        except Exception:
+            self._fallback_tracker = None
+
+    def _record_fallback_tier(self, query: str) -> None:
+        """Classify the query that produced an asset and count its tier."""
+        tracker = getattr(self, "_fallback_tracker", None)
+        if tracker is None:
+            return
+        try:
+            from pipeline.cinematic_staging import classify_query_tier
+
+            tier = classify_query_tier(
+                query, getattr(self, "_last_scene_context", None)
+            )
+            tracker.record(tier)
+        except Exception:
+            pass
+
+    def _warn_generic_fallback(self) -> None:
+        """Log a warning when too many scenes ended on a generic tier."""
+        tracker = getattr(self, "_fallback_tracker", None)
+        if tracker is None:
+            return
+        try:
+            if tracker.exceeds():
+                logger.warning(
+                    "Generic fallback tier used by %.0f%% of scenes "
+                    "(%.0f%% > max_generic_fallback_pct=%.0f%%, %d/%d) — "
+                    "consider enriching scene intent/queries",
+                    tracker.generic_pct, tracker.generic_pct,
+                    tracker.max_pct, tracker.generic, tracker.total,
+                )
+        except Exception:
+            pass
 
     def _llm_relevance_filter(
         self, candidates: list[dict], scene: dict, scene_context=None
@@ -2869,59 +3393,89 @@ class MediaFetcher:
     def _try_download_best_candidate(
         self, asset_candidates: list[dict], provider, scene: dict, ctx,
     ) -> dict | None:
-        """Score one page of candidates by narrative relevance (era-aware),
-        skip anachronistic ones, optionally refine with an LLM call, and
-        download the best non-duplicate that succeeds.
+        """Rank one page of candidates with ONE unified score and download the
+        best non-duplicate that succeeds.
 
-        Defensive by design: candidates without metadata score 0 and are
-        still downloadable (conservative fallback — never blocks a page).
+        Fase 4a: ordering is decided ONCE by ``rank_candidates`` (action +
+        context + era + narrative relevance + ``must_avoid`` penalty).  The
+        result is respected as-is — it is never re-sorted by a second score.
+        Deduplication and a defensive anachronism skip are still applied.
+
+        Fail-open: if the new scorer fails, we fall back to the previous
+        ``_relevance_score`` ordering; candidates without metadata still score
+        0 and remain downloadable.
         """
-        # Use the actual narration as a first-pass ordering signal.  The
-        # existing relevance score, historical rejection, deduplication and
-        # optional LLM reranking remain authoritative below; this ordering
-        # only prevents a generic label match from winning a more observable
-        # action match when both candidates otherwise tie.
-        # C4: pass the full scene context so ranking uses the whole-video brief
-        # (fase, vecinos, concepto visual) instead of only the bare fragment.
-        scene_context = self._scene_context(scene, scene.get("scene_idx", 0))
-        from pipeline.cinematic_staging import rank_candidates
-        ranked_candidates = rank_candidates(
-            asset_candidates,
-            scene.get("texto", "") or scene.get("search_query_en", ""),
-            ctx,
-            scene_context=scene_context,
+        scene_context = self._enrich_with_intent(
+            self._scene_context(scene, scene.get("scene_idx", 0)), scene
         )
-        if ranked_candidates:
-            asset_candidates = ranked_candidates
+        # Stashed so the exhaustive loop can attribute the used query to a
+        # fallback tier (generic-fallback accounting).
+        self._last_scene_context = scene_context
 
-        scored: list[tuple[float, dict]] = []
-        for candidate in asset_candidates:
+        action_boost = bool(self._media_strategy.get("action_scene_boost", True))
+        require_action = bool(self._media_strategy.get("require_action_match", False))
+
+        ordered: list[dict] | None = None
+        try:
+            from pipeline.cinematic_staging import rank_candidates
+
+            ranked_candidates = rank_candidates(
+                asset_candidates,
+                scene.get("texto", "") or scene.get("search_query_en", ""),
+                ctx,
+                scene_context=scene_context,
+                action_scene_boost=action_boost,
+            )
+            if ranked_candidates:
+                ordered = ranked_candidates
+        except Exception:
+            ordered = None
+
+        if ordered is None:
+            # Fail-open: previous behavior (relevance score only, era-aware).
+            ordered = self._legacy_relevance_order(asset_candidates, scene, ctx)
+
+        # ── Dedup + defensive anachronism skip (keeps rank order) ──
+        filtered: list[dict] = []
+        for candidate in ordered:
             if self._is_asset_duplicate(candidate):
                 continue
-            if self._is_anachronistic(candidate, ctx):
+            if self._is_anachronistic_for_scene(candidate, ctx, scene_context):
                 text = self._candidate_text(candidate)
                 logger.info(
                     "Skipping anachronistic candidate for historical scene: %s",
                     text[:100] or candidate.get("url", "")[:60],
                 )
                 continue
-            score = self._relevance_score(candidate, scene, ctx)
-            scored.append((score, candidate))
+            filtered.append(candidate)
 
-        if not scored:
+        if not filtered:
             return None
 
-        scored.sort(key=lambda pair: pair[0], reverse=True)
+        # ── require_action_match (Fase 4a, default OFF) ──
+        # A scene with a concrete action refuses candidates without any action
+        # overlap — unless NO candidate matches, in which case the full list is
+        # kept (last resort; never blocks the pipeline).
+        if require_action and (getattr(scene_context, "action", "") or "").strip():
+            from pipeline.cinematic_staging import candidate_matches_action
 
-        # Prefer candidates that clear the relevance threshold; if none do
-        # (e.g. no metadata), fall back to the full page (current behavior).
-        min_overlap = float(self._media_strategy.get("relevance_min_overlap", 1))
-        if scored[0][0] >= min_overlap:
-            ordered = [c for s, c in scored if s >= min_overlap]
-        else:
-            ordered = [c for _, c in scored]
+            matched = [
+                c for c in filtered if candidate_matches_action(c, scene_context)
+            ]
+            if matched:
+                filtered = matched
+            else:
+                logger.info(
+                    "require_action_match: no candidate matches action %r — "
+                    "keeping full list (last resort)",
+                    scene_context.action[:60],
+                )
 
-        # Optional LLM refinement (opt-in per channel via media strategy)
+        ordered = filtered
+
+        # Optional LLM refinement (opt-in per channel via media strategy).
+        # It may reorder, but only AFTER the deterministic unified score — and
+        # only when explicitly enabled by the channel.
         if (
             self._media_strategy.get("llm_relevance_filter", False)
             and len(ordered) >= 2
@@ -2930,12 +3484,70 @@ class MediaFetcher:
             if reordered:
                 ordered = reordered
 
-        for candidate in ordered:
+        # ── Fase 1: prefer large image downloads (non-blocking) ──
+        # Defer image candidates whose DECLARED width is known and below the
+        # configured minimum. Large candidates are tried first; if none of
+        # them succeed we still accept a deferred low-res candidate, flagged
+        # with quality_flag="low_res" (never blocks the pipeline).
+        prefer_large = bool(self._media_strategy.get("prefer_large_download", True))
+        try:
+            min_w = int(self._media_strategy.get("min_stock_image_width", 1280) or 0)
+        except (TypeError, ValueError):
+            min_w = 0
+
+        def _is_low_res_image(cand: dict) -> bool:
+            if cand.get("type") != "image":
+                return False
+            try:
+                w = int(cand.get("width") or 0)
+            except (TypeError, ValueError):
+                return False
+            return w > 0 and min_w > 0 and w < min_w
+
+        if prefer_large and min_w > 0:
+            preferred = [c for c in ordered if not _is_low_res_image(c)]
+            deferred = [c for c in ordered if _is_low_res_image(c)]
+        else:
+            preferred = list(ordered)
+            deferred = []
+
+        _target_dur = float(scene.get("duration", 5) or 5)
+
+        for candidate in preferred:
             downloaded = self._download_candidate(provider, candidate)
             if downloaded and downloaded.get("path"):
+                # Fase 4b: enforce may discard a confirmed-logo/low-res candidate
+                # and continue with the next one on this page (budget applies).
+                if not self._visual_candidate_ok(downloaded, scene, _target_dur):
+                    logger.info(
+                        "visual_verify(enforce): discarded candidate for scene %s (%s)",
+                        scene.get("scene_idx"), downloaded.get("path"),
+                    )
+                    continue
                 self._record_asset_used(candidate)
                 self._record_asset_for_history(downloaded)
                 return downloaded
+
+        for candidate in deferred:
+            downloaded = self._download_candidate(provider, candidate)
+            if downloaded and downloaded.get("path"):
+                if not self._visual_candidate_ok(downloaded, scene, _target_dur):
+                    logger.info(
+                        "visual_verify(enforce): discarded low-res candidate for scene %s (%s)",
+                        scene.get("scene_idx"), downloaded.get("path"),
+                    )
+                    continue
+                downloaded.setdefault("quality_flag", "low_res")
+                logger.info(
+                    "Accepted low-res image (quality_flag=%s, declared width=%s < %d): %s",
+                    downloaded.get("quality_flag"),
+                    candidate.get("width"), min_w,
+                    downloaded.get("path", ""),
+                )
+                self._record_asset_used(candidate)
+                self._record_asset_for_history(downloaded)
+                return downloaded
+
         return None
 
     # ── Exhaustive asset search with cross-rotation + pagination ─
@@ -2983,6 +3595,7 @@ class MediaFetcher:
                         asset_candidates, provider, scene, ctx,
                     )
                     if downloaded:
+                        self._record_fallback_tier(query)
                         return downloaded
 
                     # Check if there are more pages
@@ -3013,6 +3626,7 @@ class MediaFetcher:
                             asset_candidates, provider, scene, ctx,
                         )
                         if downloaded:
+                            self._record_fallback_tier(query)
                             return downloaded
                         total = asset_candidates[0].get("_total_available", 0)
                         per_page = asset_candidates[0].get("_per_page", 20)
@@ -3156,6 +3770,12 @@ class MediaFetcher:
                     "provider": pname,
                     "download_url": img.get("download_url", ""),
                     "fallback_download_url": img.get("fallback_download_url"),
+                    # Fase 1: keep declared dimensions/description so the
+                    # downloader can prefer large assets and quality_flag
+                    # low-res ones without re-querying the provider.
+                    "width": img.get("width", 0) or 0,
+                    "height": img.get("height", 0) or 0,
+                    "description": img.get("description", "") or "",
                     "_total_available": total_available,
                     "_per_page": 50,
                 })
@@ -3201,19 +3821,36 @@ class MediaFetcher:
 
             path = self._download_image(download_url, filename)
             if path:
-                return {
+                w, h = self._probe_image_dimensions(path)
+                asset = {
                     "path": str(path), "type": "image",
                     "duration": None, "source": source,
+                    "width": w, "height": h,
                 }
-            # Pixabay fallback: retry with webformatURL
+                # Fase 1: declared provider dimensions are authoritative when
+                # the file probe fails (e.g. non-JPEG edge cases).
+                if not w and candidate.get("width"):
+                    asset["width"] = int(candidate.get("width") or 0)
+                if not h and candidate.get("height"):
+                    asset["height"] = int(candidate.get("height") or 0)
+                return asset
+            # Pixabay fallback: retry with webformatURL (~640px). Mark the
+            # resulting asset low-res so the audit can trace blurry scenes.
             fb_url = candidate.get("fallback_download_url")
             if fb_url and fb_url != download_url:
                 fb_filename = f"{source}_{img_id}_fb.jpg" if img_id else filename
                 path = self._download_image(fb_url, fb_filename)
                 if path:
+                    w, h = self._probe_image_dimensions(path)
+                    logger.info(
+                        "Downloaded image via fallback URL (quality_flag=low_res_fallback) "
+                        "for %s: %dx%d", fb_filename, w, h,
+                    )
                     return {
                         "path": str(path), "type": "image",
                         "duration": None, "source": source,
+                        "width": w, "height": h,
+                        "quality_flag": "low_res_fallback",
                     }
 
         return None
@@ -3336,11 +3973,14 @@ class MediaFetcher:
                     if skip_urls is not None:
                         skip_urls.add(download_url)
                         self._used_image_urls.add(download_url)
+                    w, h = self._probe_image_dimensions(path)
                     return {
                         "path": path,
                         "type": "image",
                         "duration": None,
                         "source": source,
+                        "width": w,
+                        "height": h,
                     }
 
                 # ── Pixabay fallback: retry with webformatURL if largeImageURL failed ──
@@ -3355,11 +3995,15 @@ class MediaFetcher:
                         if skip_urls is not None:
                             skip_urls.add(fallback_url)
                             self._used_image_urls.add(fallback_url)
+                        w, h = self._probe_image_dimensions(fb_path)
                         return {
                             "path": fb_path,
                             "type": "image",
                             "duration": None,
                             "source": source,
+                            "width": w,
+                            "height": h,
+                            "quality_flag": "low_res_fallback",
                         }
 
             if skip_urls:
@@ -3449,20 +4093,23 @@ class MediaFetcher:
                 settings.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
                 filepath.write_bytes(content)
 
-                # Dimension check for Ken Burns viability
+                # Dimension check for Ken Burns viability (Fase 1: always log
+                # the REAL dimensions so audits can correlate asset size).
                 try:
                     from PIL import Image
                     from io import BytesIO
-                    pil_img = Image.open(BytesIO(content))
-                    w, h = pil_img.size
+                    with Image.open(BytesIO(content)) as pil_img:
+                        w, h = pil_img.size
                     min_dim = min(w, h)
+                    logger.info(
+                        "Image dimensions: %s is %dx%d", filename, w, h,
+                    )
                     if min_dim < 800:
                         logger.warning(
                             "Image %s is %dx%d — below 800px minimum for Ken Burns zoom",
                             filename, w, h,
                         )
                         # Don't reject — still usable if closest match — but warn
-                    pil_img.close()
                 except Exception:
                     logger.warning("Could not verify image dimensions for %s", filename)
 
@@ -3507,6 +4154,24 @@ class MediaFetcher:
         self._bad_image_urls.add(url)
         self._bad_image_urls_ts = _time.time()
         return None
+
+    @staticmethod
+    def _probe_image_dimensions(filepath) -> tuple[int, int]:
+        """Return ``(width, height)`` of an image file, or ``(0, 0)``.
+
+        Fase 1 (calidad-coherencia): best-effort and never raises — callers use
+        the result only to annotate the asset for logging/quality flags.
+        """
+        try:
+            path = Path(filepath)
+            if not path.exists():
+                return (0, 0)
+            from PIL import Image
+            with Image.open(path) as pil_img:
+                w, h = pil_img.size
+            return int(w), int(h)
+        except Exception:
+            return (0, 0)
 
     @staticmethod
     def _is_valid_image(filepath: Path) -> bool:
@@ -3668,10 +4333,14 @@ class MediaFetcher:
     def _simplify_query(query: str, max_keywords: int = 4) -> str:
         """Take first N keywords from a query (skip style modifiers).
 
+        Fase 4a: when the query contains a known English action verb, the verb
+        is ALWAYS kept (plus its nearest keywords) so simplification never
+        drops the narrated action.  Fully deterministic, no LLM.
+
         ``max_keywords=4`` returns a 3-4 word query; ``max_keywords=2``
-        returns an ultra-simplified query that drops overly-specific
-        proper nouns (e.g. site names) so stock providers have a chance
-        of matching the general subject.
+        returns an ultra-simplified query that drops overly-specific proper
+        nouns (e.g. site names) so stock providers have a chance of matching
+        the general subject.
         """
         words = query.split()
         # Skip known style words
@@ -3681,8 +4350,41 @@ class MediaFetcher:
             "atmosphere", "slow", "motion", "tracking", "shot", "aerial",
             "overhead", "style", "film", "video", "stock",
         }
-        keywords = [w for w in words if w.lower() not in style_words]
-        return " ".join(keywords[:max_keywords])
+
+        def _clean(word: str) -> str:
+            return word.lower().strip(",.!?;:\"'()")
+
+        keywords = [w for w in words if _clean(w) not in style_words]
+        if not keywords:
+            return ""
+
+        try:
+            from pipeline.cinematic_staging import ACTION_VERBS_EN
+        except Exception:  # fail-open: behave like the previous implementation
+            ACTION_VERBS_EN = frozenset()
+
+        max_kw = max(1, int(max_keywords))
+        verb_idx = next(
+            (i for i, w in enumerate(keywords) if _clean(w) in ACTION_VERBS_EN),
+            None,
+        )
+        if verb_idx is None:
+            return " ".join(keywords[:max_kw])
+
+        # Keep the verb and fill the remaining slots with the closest keywords
+        # on either side, then emit them in the original order.
+        chosen = {verb_idx}
+        left, right = verb_idx - 1, verb_idx + 1
+        while len(chosen) < max_kw and (left >= 0 or right < len(keywords)):
+            if right < len(keywords):
+                chosen.add(right)
+                right += 1
+            if len(chosen) >= max_kw:
+                break
+            if left >= 0:
+                chosen.add(left)
+                left -= 1
+        return " ".join(keywords[i] for i in sorted(chosen))
 
     # ── Internal: smart query builder ────────────────────────────
     _STYLE_WORDS: set[str] = {
