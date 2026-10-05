@@ -27,8 +27,14 @@ Incluye tanto los proveedores de stock (video/imagen) como los de generación IA
 
 | # | Nombre | Modelo | Auth | Rate limit | ¿Ya funciona? | Detalles |
 |---|--------|--------|------|------------|---------------|----------|
-| 9 | **Pollinations.ai** | Flux | ❌ Ninguna | Ilimitado (generoso) | ✅ Implementado | `pipeline/providers/pollinations_provider.py` |
+| 9 | **Pollinations.ai** | Flux | ❌ Ninguna | Ilimitado (generoso) | ⚠️ 402 (oct 2026) | `pipeline/providers/pollinations_provider.py` |
 | 10 | **SD 1.5 Local (CPU)** | SD 1.5 | ❌ Ninguna | CPU: 2-3 paralelo | ✅ Implementado | `pipeline/providers/local_sd_provider.py` |
+
+> **Nota (oct 2026):** la API anónima de Pollinations responde **HTTP 402 Payment
+> Required**, así que SD 1.5 Local es el proveedor IA efectivo. Para descargar la
+> casa, la generación SD se reparte por la flota con la definición
+> **`autotube-ai-image`** de SuperServer (flag `AUTOTUBE_DIST_IMAGES=1`, fallback
+> local). Ver `AGENTS.md` §Ejecución distribuida y el doc de SuperServer `projects/autotube.md`.
 
 ## Nuevos proveedores — IA (Fase 2: requieren cuenta gratuita)
 

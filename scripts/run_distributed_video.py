@@ -198,11 +198,13 @@ def main() -> int:
         os.environ["AUTOTUBE_DIST_RENDER"] = "0"
         os.environ["AUTOTUBE_DIST_RENDER_V2"] = "0"
         os.environ["AUTOTUBE_DIST_CONCAT"] = "0"
+        os.environ["AUTOTUBE_DIST_IMAGES"] = "0"
         _log("Distribución DESACTIVADA (--no-dist): control A/B local.")
     else:
         os.environ["AUTOTUBE_DIST_RENDER"] = "0"      # v1 (reimplementado) OFF
         os.environ["AUTOTUBE_DIST_RENDER_V2"] = "1"   # render identity-preserving
         os.environ["AUTOTUBE_DIST_CONCAT"] = "1"      # concat por batches
+        os.environ["AUTOTUBE_DIST_IMAGES"] = "1"      # imágenes IA (SD 1.5) en la flota
 
     # Imports tardíos (dependen de DATABASE_PATH).
     from config.settings import LOGS_DIR

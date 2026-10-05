@@ -1,0 +1,52 @@
+# Runtime de generación de imágenes IA (Local SD 1.5 CPU) para el pool de
+# SuperServer.
+#
+# Imagen portable: sólo necesita un Docker que arranque. El CÓDIGO del proyecto
+# y el MODELO SD 1.5 se montan en solo lectura desde el nodo (igual que TTS);
+# actualizar código no exige reconstruir. El sandbox efímero va en /work.
+#
+#   docker run --rm --network=none -e HF_HOME=/hfcache -e HF_HUB_OFFLINE=1 \
+#     -e OUTPUT_DIR=/tmp/worker_output -e PYTHONPATH=/app \
+#     -v /run/taildeck/jobs/<id>/push/in:/work/in:ro \
+#     -v /run/taildeck/jobs/<id>/out:/work/out \
+#     -v /opt/taildeck/autotube:/app:ro \
+#     -v /opt/taildeck/autotube/.hfcache:/hfcache:ro \
+#     -w /work autotube-sd:1 \
+#     python3 /app/pipeline_dist/image_worker.py \
+#       --request /work/in/request.json --out-dir /work/out
+FROM python:3.10-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    HF_HUB_OFFLINE=1 \
+    PYTHONPATH=/app \
+    HF_HOME=/hfcache
+
+# libglib2.0-0: opencv headless. libgomp1: OpenMP de torch. ca-certificates:
+# descarga del peso ESPCN en build.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libglib2.0-0 libgomp1 ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# torch CPU primero (índice CPU, sin CUDA) y luego el resto pineado.
+RUN pip install --upgrade pip \
+ && pip install torch --extra-index-url https://download.pytorch.org/whl/cpu \
+ && pip install \
+        diffusers==0.39.0 \
+        transformers \
+        accelerate \
+        safetensors \
+        opencv-contrib-python-headless==4.10.0.84 \
+        numpy==1.26.4 \
+        Pillow \
+        requests \
+        python-dotenv
+
+# ESPCN_x2 horneado FUERA de /app (que se monta read-only). Sin red en runtime.
+RUN mkdir -p /opt/upscale \
+ && python3 -c "import urllib.request; urllib.request.urlretrieve('https://raw.githubusercontent.com/fannymonori/TF-ESPCN/master/export/ESPCN_x2.pb','/opt/upscale/espcn_x2.pb')" \
+ && test -s /opt/upscale/espcn_x2.pb
+
+WORKDIR /work
+CMD ["python3", "-V"]
