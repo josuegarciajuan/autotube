@@ -372,12 +372,26 @@ PIXABAY_API_TIMEOUT = 30
 # MEDIA STRATEGY DEFAULTS
 # ═══════════════════════════════════════════════════════════════════
 
+# Fase 0 (calidad-coherencia): structured per-scene asset decision log.
+# One `asset_decision ...` line per chosen scene (ASSET_DECISION_LOG_ENABLED).
+# Default True (observability only — never changes behaviour). Channels may
+# override it via their config / DB config_json.
+ASSET_DECISION_LOG_ENABLED = True
+
 MEDIA_STRATEGY = {
     # ── Existing ────────────────────────────────────────────────
     "media_per_block": 1,
     "prefer_video": True,
     "max_video_blocks_pct": 80,
     "target_video_pct": 80,
+    # ── Stock image resolution preference (Fase 1) ──────────────
+    # When True, image candidates whose declared width is known and below
+    # `min_stock_image_width` are deferred in favour of larger candidates.
+    # If every candidate is small, the low-res one is still accepted with
+    # quality_flag="low_res" (never blocks the pipeline).
+    "prefer_large_download": True,
+    "min_stock_image_width": 1280,
+    "min_stock_image_height": 720,
     "max_placeholder_pct": 0,
     "video_fallback_to_image": True,
     "video_min_duration": 4,

@@ -43,6 +43,10 @@ _MEDIA_STRATEGY_RULES: List[Tuple[str, float, float, float, str]] = [
     ("max_video_blocks_pct",  10.0,  90.0, 50.0,  "media_strategy max_video_blocks_pct"),
     ("max_placeholder_pct",    0.0,  50.0,  0.0,  "media_strategy max_placeholder_pct"),
     ("stock_image_pct",        0.0,  60.0, 15.0,  "media_strategy stock_image_pct"),
+    # Fase 1 (calidad-coherencia): minimum acceptable stock-image resolution
+    # before deferring a candidate in favour of a larger one.
+    ("min_stock_image_width",  640.0, 4000.0, 1280.0, "media_strategy min_stock_image_width"),
+    ("min_stock_image_height", 360.0, 2160.0, 720.0,  "media_strategy min_stock_image_height"),
 ]
 
 # Minimum sum of RGB channels for COLOR_PALETTE.secondary
@@ -276,6 +280,28 @@ def validate_channel_config(slug: str, config: Dict[str, Any]) -> List[str]:
                     f"[{slug}] MEDIA_STRATEGY.{param}={fval} out of range [{lo}, {hi}] — forcing {default} ({desc})"
                 )
                 media[param] = default
+
+        # ── Tolerant boolean checks (never break existing configs) ──
+        # `prefer_large_download` toggles the low-res deferral heuristic.
+        if "prefer_large_download" in media:
+            val = media.get("prefer_large_download")
+            if not isinstance(val, bool):
+                warnings.append(
+                    f"[{slug}] MEDIA_STRATEGY.prefer_large_download={val!r} "
+                    f"is not boolean — forcing True"
+                )
+                media["prefer_large_download"] = True
+
+    # ── Top-level feature flags: tolerant, default True ────────
+    # `ASSET_DECISION_LOG_ENABLED` controls the structured per-scene log.
+    if "ASSET_DECISION_LOG_ENABLED" in config:
+        val = config.get("ASSET_DECISION_LOG_ENABLED")
+        if not isinstance(val, bool):
+            warnings.append(
+                f"[{slug}] ASSET_DECISION_LOG_ENABLED={val!r} "
+                f"is not boolean — forcing True"
+            )
+            config["ASSET_DECISION_LOG_ENABLED"] = True
 
     # ── Log results ────────────────────────────────────────────
     if warnings:

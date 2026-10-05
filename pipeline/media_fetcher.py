@@ -109,6 +109,12 @@ class MediaFetcher:
         # P3: Theme context for enriched search queries
         self._theme_context = None
 
+        # Fase 0 (calidad-coherencia): structured per-scene asset decision log.
+        # Observability only; never alters the fetch chain. Default True.
+        self._asset_decision_log_enabled = bool(
+            getattr(self._config, "ASSET_DECISION_LOG_ENABLED", True)
+        )
+
         # ── Video provider chain ───────────────────────────────
         self.video_providers: list = []
         self._build_video_provider_chain()
@@ -330,6 +336,49 @@ class MediaFetcher:
                 "source": asset.get("source", ""),
                 "url": asset.get("url", "") or asset.get("download_url", ""),
             })
+
+    def _asset_decision_record(
+        self,
+        scene_idx: int,
+        scene: dict | None,
+        asset: dict | None,
+        query_used: str = "",
+        score=None,
+        reason: str = "",
+    ) -> None:
+        """Emit ONE structured (key=value) log line per chosen scene asset.
+
+        Fase 0 (calidad-coherencia): pure observability. Includes real asset
+        dimensions when the candidate/downloader exposed them. Gated by
+        ``ASSET_DECISION_LOG_ENABLED`` (default True) and defensive by design:
+        it never mutates state and never raises, even with an empty/missing
+        asset (baseline auditing must never break a render).
+        """
+        try:
+            if not getattr(self, "_asset_decision_log_enabled", True):
+                return
+            scene = scene or {}
+            asset = asset if isinstance(asset, dict) else {}
+            query = (query_used or scene.get("search_query_en", "") or "")
+            logger.info(
+                "asset_decision scene=%s tipo=%s type=%s source=%s "
+                "provider=%s width=%s height=%s resolution=%s score=%s "
+                "reason=%s query=%r path=%s",
+                scene_idx,
+                scene.get("tipo", "?"),
+                asset.get("type", "unknown"),
+                asset.get("source", ""),
+                asset.get("provider", asset.get("source", "")),
+                asset.get("width", "?"),
+                asset.get("height", "?"),
+                asset.get("resolution", "?"),
+                score,
+                reason or "selected",
+                query,
+                asset.get("path", "") or "",
+            )
+        except Exception as exc:  # never let logging break the pipeline
+            logger.debug("asset_decision log failed: %s", exc)
 
     def flush_asset_history(self, db, video_id: int) -> int:
         """Record all pending assets for this video in the history table.
@@ -705,6 +754,7 @@ class MediaFetcher:
             )
 
             # ── Score video quality for dynamic control ───────────
+            _asset_score = (quality_info or {}).get("score")
             if asset and asset.get("type") == "video":
                 provider = asset.get("source", "unknown")
                 resolution = asset.get("resolution", "unknown")
@@ -717,6 +767,7 @@ class MediaFetcher:
                     queries_tried=_video_queries_tried.get(i, 1),
                 )
                 self._video_quality_scores.append(score)
+                _asset_score = score
                 logger.info(
                     "Video quality score: %.2f (provider=%s, res=%s)",
                     score, provider, resolution,
@@ -750,6 +801,17 @@ class MediaFetcher:
             else:
                 _consecutive_black = 0
                 self._record_asset_for_history(asset)
+
+            # ── Fase 0: structured decision log (observability only) ──
+            self._asset_decision_record(
+                scene_idx=i,
+                scene=scene,
+                asset=asset,
+                query_used=scene.get("search_query_en", ""),
+                score=_asset_score,
+                reason=("placeholder" if asset.get("type") == "placeholder"
+                        else "tier_selected"),
+            )
 
             # ── Count for stats ───────────────────────────────
             atype = asset.get("type", "?")
@@ -2930,12 +2992,54 @@ class MediaFetcher:
             if reordered:
                 ordered = reordered
 
-        for candidate in ordered:
+        # ── Fase 1: prefer large image downloads (non-blocking) ──
+        # Defer image candidates whose DECLARED width is known and below the
+        # configured minimum. Large candidates are tried first; if none of
+        # them succeed we still accept a deferred low-res candidate, flagged
+        # with quality_flag="low_res" (never blocks the pipeline).
+        prefer_large = bool(self._media_strategy.get("prefer_large_download", True))
+        try:
+            min_w = int(self._media_strategy.get("min_stock_image_width", 1280) or 0)
+        except (TypeError, ValueError):
+            min_w = 0
+
+        def _is_low_res_image(cand: dict) -> bool:
+            if cand.get("type") != "image":
+                return False
+            try:
+                w = int(cand.get("width") or 0)
+            except (TypeError, ValueError):
+                return False
+            return w > 0 and min_w > 0 and w < min_w
+
+        if prefer_large and min_w > 0:
+            preferred = [c for c in ordered if not _is_low_res_image(c)]
+            deferred = [c for c in ordered if _is_low_res_image(c)]
+        else:
+            preferred = list(ordered)
+            deferred = []
+
+        for candidate in preferred:
             downloaded = self._download_candidate(provider, candidate)
             if downloaded and downloaded.get("path"):
                 self._record_asset_used(candidate)
                 self._record_asset_for_history(downloaded)
                 return downloaded
+
+        for candidate in deferred:
+            downloaded = self._download_candidate(provider, candidate)
+            if downloaded and downloaded.get("path"):
+                downloaded.setdefault("quality_flag", "low_res")
+                logger.info(
+                    "Accepted low-res image (quality_flag=%s, declared width=%s < %d): %s",
+                    downloaded.get("quality_flag"),
+                    candidate.get("width"), min_w,
+                    downloaded.get("path", ""),
+                )
+                self._record_asset_used(candidate)
+                self._record_asset_for_history(downloaded)
+                return downloaded
+
         return None
 
     # ── Exhaustive asset search with cross-rotation + pagination ─
@@ -3156,6 +3260,12 @@ class MediaFetcher:
                     "provider": pname,
                     "download_url": img.get("download_url", ""),
                     "fallback_download_url": img.get("fallback_download_url"),
+                    # Fase 1: keep declared dimensions/description so the
+                    # downloader can prefer large assets and quality_flag
+                    # low-res ones without re-querying the provider.
+                    "width": img.get("width", 0) or 0,
+                    "height": img.get("height", 0) or 0,
+                    "description": img.get("description", "") or "",
                     "_total_available": total_available,
                     "_per_page": 50,
                 })
@@ -3201,19 +3311,36 @@ class MediaFetcher:
 
             path = self._download_image(download_url, filename)
             if path:
-                return {
+                w, h = self._probe_image_dimensions(path)
+                asset = {
                     "path": str(path), "type": "image",
                     "duration": None, "source": source,
+                    "width": w, "height": h,
                 }
-            # Pixabay fallback: retry with webformatURL
+                # Fase 1: declared provider dimensions are authoritative when
+                # the file probe fails (e.g. non-JPEG edge cases).
+                if not w and candidate.get("width"):
+                    asset["width"] = int(candidate.get("width") or 0)
+                if not h and candidate.get("height"):
+                    asset["height"] = int(candidate.get("height") or 0)
+                return asset
+            # Pixabay fallback: retry with webformatURL (~640px). Mark the
+            # resulting asset low-res so the audit can trace blurry scenes.
             fb_url = candidate.get("fallback_download_url")
             if fb_url and fb_url != download_url:
                 fb_filename = f"{source}_{img_id}_fb.jpg" if img_id else filename
                 path = self._download_image(fb_url, fb_filename)
                 if path:
+                    w, h = self._probe_image_dimensions(path)
+                    logger.info(
+                        "Downloaded image via fallback URL (quality_flag=low_res_fallback) "
+                        "for %s: %dx%d", fb_filename, w, h,
+                    )
                     return {
                         "path": str(path), "type": "image",
                         "duration": None, "source": source,
+                        "width": w, "height": h,
+                        "quality_flag": "low_res_fallback",
                     }
 
         return None
@@ -3336,11 +3463,14 @@ class MediaFetcher:
                     if skip_urls is not None:
                         skip_urls.add(download_url)
                         self._used_image_urls.add(download_url)
+                    w, h = self._probe_image_dimensions(path)
                     return {
                         "path": path,
                         "type": "image",
                         "duration": None,
                         "source": source,
+                        "width": w,
+                        "height": h,
                     }
 
                 # ── Pixabay fallback: retry with webformatURL if largeImageURL failed ──
@@ -3355,11 +3485,15 @@ class MediaFetcher:
                         if skip_urls is not None:
                             skip_urls.add(fallback_url)
                             self._used_image_urls.add(fallback_url)
+                        w, h = self._probe_image_dimensions(fb_path)
                         return {
                             "path": fb_path,
                             "type": "image",
                             "duration": None,
                             "source": source,
+                            "width": w,
+                            "height": h,
+                            "quality_flag": "low_res_fallback",
                         }
 
             if skip_urls:
@@ -3449,20 +3583,23 @@ class MediaFetcher:
                 settings.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
                 filepath.write_bytes(content)
 
-                # Dimension check for Ken Burns viability
+                # Dimension check for Ken Burns viability (Fase 1: always log
+                # the REAL dimensions so audits can correlate asset size).
                 try:
                     from PIL import Image
                     from io import BytesIO
-                    pil_img = Image.open(BytesIO(content))
-                    w, h = pil_img.size
+                    with Image.open(BytesIO(content)) as pil_img:
+                        w, h = pil_img.size
                     min_dim = min(w, h)
+                    logger.info(
+                        "Image dimensions: %s is %dx%d", filename, w, h,
+                    )
                     if min_dim < 800:
                         logger.warning(
                             "Image %s is %dx%d — below 800px minimum for Ken Burns zoom",
                             filename, w, h,
                         )
                         # Don't reject — still usable if closest match — but warn
-                    pil_img.close()
                 except Exception:
                     logger.warning("Could not verify image dimensions for %s", filename)
 
@@ -3507,6 +3644,24 @@ class MediaFetcher:
         self._bad_image_urls.add(url)
         self._bad_image_urls_ts = _time.time()
         return None
+
+    @staticmethod
+    def _probe_image_dimensions(filepath) -> tuple[int, int]:
+        """Return ``(width, height)`` of an image file, or ``(0, 0)``.
+
+        Fase 1 (calidad-coherencia): best-effort and never raises — callers use
+        the result only to annotate the asset for logging/quality flags.
+        """
+        try:
+            path = Path(filepath)
+            if not path.exists():
+                return (0, 0)
+            from PIL import Image
+            with Image.open(path) as pil_img:
+                w, h = pil_img.size
+            return int(w), int(h)
+        except Exception:
+            return (0, 0)
 
     @staticmethod
     def _is_valid_image(filepath: Path) -> bool:

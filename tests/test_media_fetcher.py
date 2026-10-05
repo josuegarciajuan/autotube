@@ -933,3 +933,192 @@ class TestHookClimaxVideoGate:
         f = self._fetcher(has_bible=False, flag=False)
         video_scenes, _, _ = f._classify_scenes(scenes)
         assert 0 in video_scenes  # gate disabled → hook gets video anyway
+
+
+# ── Fase 1 (calidad-coherencia): metadata & large-download preference ──
+
+class TestImageCandidateMetadata:
+    """_search_image_provider_page must NOT discard width/height/description."""
+
+    def test_search_image_provider_page_preserves_dimensions(self):
+        from pipeline.media_fetcher import MediaFetcher
+
+        fetcher = MediaFetcher(config=_make_config())
+        provider = MagicMock()
+        provider.search_paginated.return_value = ([{
+            "id": "123",
+            "download_url": "https://cdn.test/x.jpg",
+            "fallback_download_url": None,
+            "width": 1920,
+            "height": 1080,
+            "description": "a church at dawn",
+        }], 42)
+
+        candidates = fetcher._search_image_provider_page(provider, "church dawn", page=1)
+
+        assert len(candidates) == 1
+        cand = candidates[0]
+        assert cand["width"] == 1920, f"width lost: {cand}"
+        assert cand["height"] == 1080, f"height lost: {cand}"
+        assert cand["description"] == "a church at dawn", f"description lost: {cand}"
+        assert cand["type"] == "image"
+        assert cand["_total_available"] == 42
+
+
+class TestPreferLargeDownload:
+    """Low-res image candidates are deferred; accepted with a flag only when
+    no larger candidate could be downloaded (never blocks the pipeline)."""
+
+    def _fetcher(self, **overrides):
+        from pipeline.media_fetcher import MediaFetcher
+
+        fetcher = MediaFetcher(config=_make_config(**overrides))
+        fetcher._scene_context = MagicMock(return_value=None)
+        fetcher._is_asset_duplicate = MagicMock(return_value=False)
+        fetcher._is_anachronistic = MagicMock(return_value=False)
+        fetcher._relevance_score = MagicMock(return_value=0.0)
+        return fetcher
+
+    @staticmethod
+    def _img(img_id, width):
+        return {
+            "id": img_id,
+            "url": f"https://cdn.test/{img_id}.jpg",
+            "download_url": f"https://cdn.test/{img_id}.jpg",
+            "type": "image",
+            "source": "pixabay_photo",
+            "width": width,
+            "height": 480,
+        }
+
+    def test_low_res_deferred_for_larger_candidate(self):
+        from unittest.mock import patch as _patch
+
+        fetcher = self._fetcher(min_stock_image_width=1280)
+        low = self._img("low", 640)
+        high = self._img("high", 1920)
+
+        calls = []
+
+        def fake_download(provider, candidate):
+            calls.append(candidate["id"])
+            return {
+                "path": f"/tmp/{candidate['id']}.jpg",
+                "type": "image",
+                "source": candidate["source"],
+                "width": candidate.get("width"),
+                "height": candidate.get("height"),
+            }
+
+        fetcher._download_candidate = MagicMock(side_effect=fake_download)
+
+        with _patch("pipeline.cinematic_staging.rank_candidates", return_value=None):
+            result = fetcher._try_download_best_candidate(
+                [low, high], MagicMock(), _make_scene_range(), None,
+            )
+
+        assert result is not None
+        assert result["path"].endswith("high.jpg"), f"chose {result['path']}"
+        assert calls[0] == "high", f"low-res tried first: {calls}"
+
+    def test_all_low_res_accepted_with_flag(self):
+        from unittest.mock import patch as _patch
+
+        fetcher = self._fetcher(min_stock_image_width=1280)
+        low1 = self._img("low1", 640)
+        low2 = self._img("low2", 800)
+
+        def fake_download(provider, candidate):
+            return {
+                "path": f"/tmp/{candidate['id']}.jpg",
+                "type": "image",
+                "source": candidate["source"],
+            }
+
+        fetcher._download_candidate = MagicMock(side_effect=fake_download)
+
+        with _patch("pipeline.cinematic_staging.rank_candidates", return_value=None):
+            result = fetcher._try_download_best_candidate(
+                [low1, low2], MagicMock(), _make_scene_range(), None,
+            )
+
+        assert result is not None, "low-res candidate must still be accepted"
+        assert result.get("quality_flag") == "low_res"
+
+    def test_video_candidate_not_deferred(self):
+        """Video candidates (type=video) must never be treated as low-res."""
+        from unittest.mock import patch as _patch
+
+        fetcher = self._fetcher(min_stock_image_width=1280)
+        video = {
+            "id": "",
+            "url": "https://cdn.test/clip.mp4",
+            "type": "video",
+            "source": "pexels",
+            "duration": 8,
+        }
+        fetcher._download_candidate = MagicMock(return_value={
+            "path": "/tmp/clip.mp4", "type": "video",
+            "duration": 8, "source": "pexels",
+        })
+
+        with _patch("pipeline.cinematic_staging.rank_candidates", return_value=None):
+            result = fetcher._try_download_best_candidate(
+                [video], MagicMock(), _make_scene_range(), None,
+            )
+
+        assert result is not None
+        assert result["type"] == "video"
+        assert "quality_flag" not in result
+
+
+class TestAssetDecisionRecord:
+    """Fase 0: structured per-scene decision log must never raise."""
+
+    def test_no_raise_with_empty_or_missing_asset(self, caplog):
+        from pipeline.media_fetcher import MediaFetcher
+
+        fetcher = MediaFetcher(config=_make_config())
+        caplog.set_level("INFO", logger="pipeline.media_fetcher")
+        # None of these must raise.
+        fetcher._asset_decision_record(0, {}, {}, "", None, "")
+        fetcher._asset_decision_record(1, None, None)
+        fetcher._asset_decision_record(2, {"texto": "x"}, {"type": "image", "path": None})
+
+    def test_logs_single_structured_line(self, caplog):
+        from pipeline.media_fetcher import MediaFetcher
+
+        fetcher = MediaFetcher(config=_make_config())
+        caplog.set_level("INFO", logger="pipeline.media_fetcher")
+
+        fetcher._asset_decision_record(
+            scene_idx=3,
+            scene={"tipo": "desarrollo", "search_query_en": "ancient ruins"},
+            asset={"type": "image", "source": "pixabay_photo",
+                   "path": "/tmp/x.jpg", "width": 1920, "height": 1080},
+            query_used="ancient ruins",
+            score=0.42,
+            reason="tier_selected",
+        )
+
+        messages = [r.getMessage() for r in caplog.records
+                    if "asset_decision" in r.getMessage()]
+        assert len(messages) == 1
+        line = messages[0]
+        assert "scene=3" in line
+        assert "width=1920" in line
+        assert "height=1080" in line
+        assert "reason=tier_selected" in line
+
+    def test_disabled_flag_suppresses_log(self, caplog):
+        from pipeline.media_fetcher import MediaFetcher
+
+        fetcher = MediaFetcher(config=_make_config())
+        fetcher._asset_decision_log_enabled = False
+        caplog.set_level("INFO", logger="pipeline.media_fetcher")
+
+        fetcher._asset_decision_record(
+            0, {"texto": "x"}, {"type": "image", "path": "/tmp/x.jpg"},
+        )
+        assert not [r for r in caplog.records if "asset_decision" in r.getMessage()]
+
