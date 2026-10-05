@@ -1189,19 +1189,10 @@ class MediaFetcher:
         """
         ai_providers_cfg = self._media_strategy.get("ai_image_providers", ["pollinations", "local_sd"])
 
-        # Build shared prompt once per scene (it doesn't change per provider).
-        prompt, seed = self._build_ai_prompt(scene, scene_idx, total_scenes)
+        # Petición congelada una vez por escena (misma para todos los proveedores).
+        prompt, negative, seed = self._build_ai_request(scene, scene_idx, total_scenes)
         # Record the full prompt for the verification report.
         self._ai_prompt_log[scene_idx] = prompt
-        # Negative prompt: global terms + forbidden_elements (anacronismos) del
-        # theme extractor, que hoy solo se filtraban en queries de stock. La IA
-        # necesita verlos como negative para no generar elementos fuera de época.
-        negative = self._coherence_engine.build_negative_prompt_for_config(self._config)
-        tc = self._theme_context
-        if tc is not None and getattr(tc, "forbidden_elements", None):
-            forbidden = [f for f in tc.forbidden_elements if f]
-            if forbidden:
-                negative = f"{negative}, {', '.join(forbidden)}"
         output_dir = Path(settings.OUTPUT_DIR) / "ai_images" / scene.get("tipo", "escena")
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / f"scene_{scene_idx:03d}_{hashlib.md5(prompt.encode()).hexdigest()[:10]}.jpg"
@@ -1284,6 +1275,31 @@ class MediaFetcher:
             scene_idx + 1, total_scenes,
         )
         return None
+
+    def _build_ai_request(
+        self,
+        scene: dict,
+        scene_idx: int,
+        total_scenes: int,
+    ) -> tuple[str, str, int | None]:
+        """Petición IA congelada de una escena: ``(prompt, negative, seed)``.
+
+        Centraliza lo que antes se calculaba inline en ``_try_ai_image_chain``
+        para que la ruta local y la pre-generación distribuida (SuperServer)
+        produzcan exactamente la misma petición.
+        """
+        prompt, seed = self._build_ai_prompt(scene, scene_idx, total_scenes)
+        # Negative prompt: términos globales + forbidden_elements (anacronismos)
+        # del theme extractor. La IA necesita verlos para no salirse de época.
+        if self._coherence_engine is None:
+            self._coherence_engine = VisualCoherenceEngine(self._config, self._visual_bible)
+        negative = self._coherence_engine.build_negative_prompt_for_config(self._config)
+        tc = self._theme_context
+        if tc is not None and getattr(tc, "forbidden_elements", None):
+            forbidden = [f for f in tc.forbidden_elements if f]
+            if forbidden:
+                negative = f"{negative}, {', '.join(forbidden)}"
+        return prompt, negative, seed
 
     def _build_ai_prompt(
         self,

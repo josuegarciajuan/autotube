@@ -15,6 +15,7 @@ Garantías:
 from __future__ import annotations
 
 import logging
+import hashlib
 import json
 import os
 import shutil
@@ -28,6 +29,7 @@ from typing import Optional
 from config import settings as settings_mod
 from orchestrator import PipelineOrchestrator
 from . import dsl_client
+from .ai_image_cache import CachedLocalSDProvider
 from .model import atomic_write_json, sanitize_id
 from .render_plan import build_scene_plans
 from .scene_plan import (
@@ -49,6 +51,9 @@ def _env_flag(name: str, default: bool = False) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+AI_IMAGES_CACHE = "_dist_cache"
 
 
 class DistributedOrchestrator(PipelineOrchestrator):
@@ -93,6 +98,163 @@ class DistributedOrchestrator(PipelineOrchestrator):
         if _env_flag("AUTOTUBE_DIST_CONCAT", False):
             self._install_dist_concat()
         return super().phase_video(script, audio_data, media_assets, job_id=job_id)
+
+    # ── Imágenes IA: pre-generación distribuida (opt-in, all-or-nothing) ─────
+    def _prefetch_ai_images(self, bloques, scene_ranges, script=None):
+        """Pre-genera las imágenes IA en la flota y sirve a `local_sd` de caché.
+
+        Sin `AUTOTUBE_DIST_IMAGES=1` es no-op (ruta local intacta). Cualquier
+        fallo se registra y deja el pipeline local sin cambios.
+        """
+        if not _env_flag("AUTOTUBE_DIST_IMAGES", False):
+            return None
+        if not scene_ranges:
+            return None
+        if getattr(self.media_fetcher, "_local_sd", None) is None:
+            logger.info("[%s] ai-image: sin proveedor local_sd; ruta local.", self.canal)
+            return None
+        try:
+            return self._prefetch_ai_images_dist(scene_ranges, script)
+        except Exception as exc:  # noqa: BLE001 — cualquier fallo => local
+            logger.warning(
+                "[%s] Pre-generación IA distribuida no aplicable (%s: %s); local.",
+                self.canal, type(exc).__name__, exc,
+            )
+            return None
+
+    def _prefetch_ai_images_dist(self, scene_ranges: list, script: Optional[dict]):
+        mf = self.media_fetcher
+        provider = mf._local_sd
+        n_scenes = len(scene_ranges)
+        video_id = int(self.db_video_id or 0)
+        script_id = str((script or {}).get("id") or "")
+        seed_salt = f"{self.canal}:{video_id}:{script_id}"
+
+        # Parámetros congelados del proveedor local (mismos que usaría la casa).
+        steps = int(getattr(provider, "num_inference_steps", 8) or 8)
+        width = int(getattr(provider, "width", 768) or 768)
+        height = int(getattr(provider, "height", 432) or 432)
+        model_id = str(getattr(provider, "model_id", "") or "")
+        upscale_min = getattr(provider, "upscale_min", None)
+        upscale_model = getattr(provider, "upscale_model", None)
+        upscale_sharpen = bool(getattr(provider, "upscale_sharpen", True))
+        upscale_amount = float(getattr(provider, "upscale_sharpen_amount", 0.4))
+        upscale_sigma = float(getattr(provider, "upscale_sharpen_sigma", 2.0))
+
+        # Staging ABSOLUTO: el engine hace `existsSync` desde su cwd.
+        cache_root = (Path(settings_mod.OUTPUT_DIR) / "ai_images" /
+                      AI_IMAGES_CACHE / str(video_id or "adhoc")).resolve()
+        cache_root.mkdir(parents=True, exist_ok=True)
+        staging = (cache_root / "_staging").resolve()
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True, exist_ok=True)
+
+        images_params = []
+        prompt_by_key: dict[str, str] = {}
+        for i, scene in enumerate(scene_ranges):
+            prompt, negative, _seed = mf._build_ai_request(scene, i, n_scenes)
+            digest8 = hashlib.sha1(
+                f"{seed_salt}:{i}:{prompt}".encode("utf-8")
+            ).hexdigest()[:8]
+            seed = int(digest8, 16) % (2 ** 31)
+            key = f"{i:04d}"
+            d = staging / f"scene_{i:04d}"
+            d.mkdir(parents=True, exist_ok=True)
+            request = {
+                "key": key,
+                "index": i,
+                "prompt": prompt,
+                "negative_prompt": negative,
+                "seed": seed,
+                "width": width,
+                "height": height,
+                "steps": steps,
+                "output": f"scene_{i:04d}.jpg",
+                "model_id": model_id or None,
+                "upscale_min": list(upscale_min) if upscale_min else None,
+                "upscale_model": upscale_model,
+                "upscale_sharpen": upscale_sharpen,
+                "upscale_sharpen_amount": upscale_amount,
+                "upscale_sharpen_sigma": upscale_sigma,
+            }
+            atomic_write_json(str(d / "request.json"), request)
+            images_params.append({"key": key, "dir": d.name, "request": "request.json"})
+            prompt_by_key[key] = prompt
+
+        nonce = os.environ.get("AUTOTUBE_DIST_EXEC_NONCE", "").strip()
+        base = f"atube-img-{self.canal}-{video_id or 'x'}"
+        exec_id = sanitize_id(
+            f"{base}-{nonce}" if nonce else f"{base}-{uuid.uuid4().hex[:8]}"
+        )
+        tags = [t.strip() for t in
+                os.environ.get("AUTOTUBE_SD_TAGS", "local-sd").split(",") if t.strip()]
+        params = {
+            "stagingDir": str(staging),
+            "images": images_params,
+            "image": os.environ.get("AUTOTUBE_SD_IMAGE", "autotube-sd:1"),
+            "worker": "pipeline_dist/image_worker.py",
+            "codeDir": os.environ.get("AUTOTUBE_RUNTIME_DIR", "/opt/taildeck/autotube"),
+            "modelDir": os.environ.get(
+                "AUTOTUBE_SD_MODELS", "/opt/taildeck/autotube/.hfcache"
+            ),
+            "threads": int(os.environ.get("AUTOTUBE_DIST_SD_THREADS", "3") or 3),
+            "memMb": int(os.environ.get("AUTOTUBE_DIST_SD_MEM_MB", "4600") or 4600),
+            "requiresTags": tags,
+        }
+        self._emit_progress(43, "images", f"Imágenes IA en la flota: 0/{n_scenes}")
+        eid = dsl_client.submit(
+            "autotube-ai-image", params, exec_id=exec_id,
+            label=f"autotube ai-image {self.canal}",
+            max_inflight=int(os.environ.get("AUTOTUBE_DIST_SD_MAX_INFLIGHT", "0") or 0) or None,
+            max_attempts=3, max_units=len(images_params) + 16,
+            req={"cores": params["threads"], "memMb": params["memMb"]},
+        )
+        logger.info("[%s] ai-image exec=%s (%d escenas)", self.canal, eid, n_scenes)
+        timeout = float(os.environ.get("AUTOTUBE_DIST_SD_TIMEOUT_SEC", "3600") or 3600)
+
+        def _progress(summary: dict) -> None:
+            p = (summary or {}).get("progress") or {}
+            acc = int(p.get("accepted") or 0)
+            self._emit_progress(
+                43 + int(8 * acc / max(1, n_scenes)), "images",
+                f"Imágenes IA en la flota: {acc}/{n_scenes}",
+            )
+
+        summary = dsl_client.wait(
+            eid, timeout=timeout + 120.0, poll=2.0, progress_cb=_progress,
+        )
+        if summary.get("status") != "done":
+            raise ScenePlanError(
+                f"ai-image {summary.get('status')}: {summary.get('error')}"
+            )
+        entries = (summary.get("result") or {}).get("images") or []
+        if len(entries) != n_scenes:
+            raise ScenePlanError(
+                f"ai-image devolvió {len(entries)} imágenes, esperaba {n_scenes}"
+            )
+
+        cache_by_hash: dict[str, str] = {}
+        for entry in entries:
+            key = str(entry.get("key"))
+            out_dir, fn = entry.get("outDir"), entry.get("filename")
+            if not out_dir or not fn:
+                raise ScenePlanError(f"imagen {key} sin outDir/filename")
+            src = os.path.join(str(out_dir), str(fn))
+            if not os.path.exists(src) or os.path.getsize(src) < 1024:
+                raise ScenePlanError(f"imagen {key} inválida o vacía")
+            digest = hashlib.md5(
+                (prompt_by_key.get(key) or "").encode("utf-8")
+            ).hexdigest()[:10]
+            dst = cache_root / f"dist_{video_id or 'x'}_{key}.jpg"
+            shutil.copy2(src, dst)
+            cache_by_hash[digest] = str(dst)
+
+        # Instala la caché: `_try_ai_image_chain` la consulta por hash de prompt.
+        mf._local_sd = CachedLocalSDProvider(mf._local_sd, cache_by_hash)
+        logger.info("[%s] ai-image OK: %d imágenes en caché (%s)",
+                    self.canal, len(cache_by_hash), cache_root)
+        return cache_by_hash
 
     # ── Render v2: mismo código, estado congelado, todo-o-nada ──────────────
     @staticmethod

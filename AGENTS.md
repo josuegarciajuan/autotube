@@ -719,6 +719,24 @@ python3 main.py stats --canal canal2
 curl localhost:8000/api/channels/1/youtube-stats
 ```
 
+## 🛰️ Ejecución distribuida (SuperServer)
+
+Las fases pesadas se reparten por la flota vía el motor distribuido de SuperServer
+(`/root/superserver`; ver `spec/20` y `spec/22`). Se activan con flags de entorno y
+**siempre caen a local** ante cualquier fallo (all-or-nothing):
+
+| Flag | Fase | Definición |
+|---|---|---|
+| `AUTOTUBE_DIST_RENDER_V2=1` | render de escena | `autotube-render-scene` |
+| `AUTOTUBE_DIST_CONCAT=1` | concat por batches | `autotube-concat-batch` |
+| `AUTOTUBE_DIST_IMAGES=1` | imágenes IA (SD 1.5) | `autotube-ai-image` |
+
+- Puente al motor: `pipeline_dist/dsl_client.py` (escribe en el spool; sin cookies).
+- Enganche de imágenes: `pipeline_dist/orchestrator_dist.py::_prefetch_ai_images`.
+- Provisioning SD: `deploy/docker/build_sd.sh` + `distribute_sd_runtime.sh` (tag `local-sd`).
+- Invocación manual: `ss-execute submit --definition autotube-ai-image --params '<json>' --wait`.
+- Detalle de la fase de imágenes: `specs/ai-image-providers.md` y el doc de SuperServer `projects/autotube.md`.
+
 ## 🧵 Cambios en paralelo (worktree + merge a producción)
 
 El árbol principal (`/root/autotube`) queda **fijo en la rama de producción** (`master`).

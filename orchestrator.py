@@ -1614,6 +1614,20 @@ class PipelineOrchestrator:
             "cta_audio_path": res.get("cta_audio_path"),
         }
 
+    def _prefetch_ai_images(self, bloques: list, scene_ranges: Optional[list],
+                            script: Optional[dict] = None) -> Optional[object]:
+        """Gancho de pre-generación de imágenes IA en la flota (no-op por defecto).
+
+        El orquestador distribuido (`pipeline_dist.DistributedOrchestrator`) lo
+        sobreescribe para generar las imágenes con la definición
+        `autotube-ai-image` de SuperServer y servir a `local_sd` desde esa
+        caché. Sin override, el pipeline local no cambia en absoluto.
+
+        Devuelve un valor opaco para el llamador; lo relevante es el efecto
+        (instalar la caché en `media_fetcher`). Nunca debe romper el pipeline.
+        """
+        return None
+
     def phase_media(self, script: dict, audio_data: Optional[dict] = None, job_id: int = None) -> Optional[list[dict]]:
         """Fetch media (video/image) for each enforceable scene range.
 
@@ -1661,6 +1675,10 @@ class PipelineOrchestrator:
             # ── Phase 3: Visual Bible (LLM-generated visual direction) ──
             if self._media_strategy.get("visual_bible_enabled", False):
                 self._generate_and_inject_visual_bible(bloques, scene_ranges)
+
+            # ── SuperServer (opt-in): pre-genera las imágenes IA en la flota y
+            # las sirve desde caché. No-op por defecto; si falla, cae a local.
+            self._prefetch_ai_images(bloques, scene_ranges, script)
 
             logger.info("[%s] Fetching media for %d scenes", self.canal,
                         len(scene_ranges) if scene_ranges else len(bloques))
