@@ -737,6 +737,17 @@ Las fases pesadas se reparten por la flota vía el motor distribuido de SuperSer
 - Invocación manual: `ss-execute submit --definition autotube-ai-image --params '<json>' --wait`.
 - Detalle de la fase de imágenes: `specs/ai-image-providers.md` y el doc de SuperServer `projects/autotube.md`.
 
+**Estado (oct 2026):** nodos con `local-sd` = `mail`, `oficina`, `vps649560`.
+`dedi3133109` y `josue` no pueden crear hilos en su contenedor (`can't start new thread`),
+así que quedan fuera. La casa no se etiqueta (no debe auto-cargarse).
+
+**Activación en producción:** `deploy/autotube-panel.service` exporta
+`AUTOTUBE_DIST_IMAGES=1` (vía drop-in en `/etc/systemd/system/autotube-panel.service.d/`).
+Ajustes por entorno (sin tocar código):
+`AUTOTUBE_DIST_SD_THREADS` (def. 2), `AUTOTUBE_DIST_SD_MAX_INFLIGHT` (def. 8),
+`AUTOTUBE_DIST_SD_TIMEOUT_SEC` / `AUTOTUBE_DIST_SD_PER_IMAGE_SEC` (timeout escalado),
+`AUTOTUBE_DIST_SD_STALL_SEC` (def. 900 s → cancela y cae a local si no hay nodo elegible).
+
 ## 🧵 Cambios en paralelo (worktree + merge a producción)
 
 El árbol principal (`/root/autotube`) queda **fijo en la rama de producción** (`master`).

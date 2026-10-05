@@ -3613,7 +3613,7 @@ def make_orchestrator(*args, **kwargs):
     def _on(name: str) -> bool:
         return str(_os.environ.get(name, "")).strip().lower() in ("1", "true", "yes", "on")
 
-    if _on("AUTOTUBE_DIST_RENDER_V2") or _on("AUTOTUBE_DIST_CONCAT"):
+    if _on("AUTOTUBE_DIST_RENDER_V2") or _on("AUTOTUBE_DIST_CONCAT") or _on("AUTOTUBE_DIST_IMAGES"):
         try:
             from pipeline_dist.orchestrator_dist import DistributedOrchestrator
             return DistributedOrchestrator(*args, **kwargs)
