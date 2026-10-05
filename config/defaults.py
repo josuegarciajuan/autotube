@@ -398,6 +398,23 @@ OBS_LOG_RETENTION_DAYS = 14
 # 0.0 = descarta eventos de escena; 1.0 = todos. Solo aplica en detail/trace.
 OBS_LOG_SAMPLE_RATE = 1.0
 
+# ── Alertas de error agregadas (oct 2026) ──────────────────────────
+# Cualquier record ERROR+ de todo el sistema y las excepciones no capturadas
+# se convierten en UNA alerta crítica agregada por (tipo/entidad) con contador,
+# en vez de una alerta por incidente. Independiente de OBS_LOG_ENABLED/LEVEL:
+# apagar el detalle fino NO silencia los errores. El kill-switch total es
+# OBS_ERROR_ALERTS_ENABLED=False.
+OBS_ERROR_ALERTS_ENABLED = True
+# debug | info | warning | error | critical (record level mínimo a alertar).
+OBS_ERROR_ALERTS_MIN_LEVEL = "error"
+# Minutos de cooldown in-process por clave antes de reescribir en la DB.
+# El contador se sigue acumulando y se refleja en la siguiente escritura.
+OBS_ERROR_ALERT_COOLDOWN_MIN = 30
+# Substrings case-insensitive contra logger.name + mensaje: si casan, no alerta.
+OBS_ERROR_ALERT_IGNORE = []
+# Tamaño de la cola acotada del handler (si se llena, descarta y cuenta).
+OBS_ERROR_ALERT_QUEUE_SIZE = 500
+
 # Fase 2 (calidad-coherencia): editorial review of generated scripts.
 # ON by default (oct 2026): generate_v2 attempts at most
 # SCRIPT_EDITORIAL_REVIEW_MAX_CALLS repair passes and keeps the ORIGINAL

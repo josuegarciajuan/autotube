@@ -444,7 +444,7 @@ def validate_channel_config(slug: str, config: Dict[str, Any]) -> List[str]:
         else:
             config["OBS_LOG_LEVEL"] = level
 
-    for obs_bool in ("OBS_LOG_ENABLED",):
+    for obs_bool in ("OBS_LOG_ENABLED", "OBS_ERROR_ALERTS_ENABLED"):
         if obs_bool in config:
             val = config.get(obs_bool)
             if not isinstance(val, bool):
@@ -487,6 +487,54 @@ def validate_channel_config(slug: str, config: Dict[str, Any]) -> List[str]:
                 config["OBS_LOG_SAMPLE_RATE"] = clamped
             else:
                 config["OBS_LOG_SAMPLE_RATE"] = rate
+
+    # ── Alertas de error agregadas (tolerant, never break configs) ──
+    # `OBS_ERROR_ALERTS_MIN_LEVEL` is a logging-level enum; malformed values
+    # fall back to "error". `OBS_ERROR_ALERT_IGNORE` is coerced to a list of
+    # lowercased non-empty strings. Integers must be >= their minimum.
+    _OBS_ERR_LEVELS = ("debug", "info", "warning", "error", "critical")
+    if "OBS_ERROR_ALERTS_MIN_LEVEL" in config:
+        val = config.get("OBS_ERROR_ALERTS_MIN_LEVEL")
+        level = val.strip().lower() if isinstance(val, str) else ""
+        if level not in _OBS_ERR_LEVELS:
+            warnings.append(
+                f"[{slug}] OBS_ERROR_ALERTS_MIN_LEVEL={val!r} is not one of "
+                f"{_OBS_ERR_LEVELS} — forcing 'error'"
+            )
+            config["OBS_ERROR_ALERTS_MIN_LEVEL"] = "error"
+        else:
+            config["OBS_ERROR_ALERTS_MIN_LEVEL"] = level
+
+    for obs_int, obs_default, obs_min in (
+        ("OBS_ERROR_ALERT_COOLDOWN_MIN", 30, 0),
+        ("OBS_ERROR_ALERT_QUEUE_SIZE", 500, 1),
+    ):
+        if obs_int in config:
+            val = config.get(obs_int)
+            if isinstance(val, bool) or not isinstance(val, (int, float)) or int(val) < obs_min:
+                warnings.append(
+                    f"[{slug}] {obs_int}={val!r} is not an integer >= {obs_min} "
+                    f"— forcing {obs_default}"
+                )
+                config[obs_int] = obs_default
+            else:
+                config[obs_int] = int(val)
+
+    if "OBS_ERROR_ALERT_IGNORE" in config:
+        val = config.get("OBS_ERROR_ALERT_IGNORE")
+        try:
+            if isinstance(val, str):
+                items = [p.strip().lower() for p in val.replace(";", ",").split(",")]
+            elif isinstance(val, (list, tuple, set, frozenset)):
+                items = [str(p).strip().lower() for p in val]
+            else:
+                items = []
+            config["OBS_ERROR_ALERT_IGNORE"] = [p for p in items if p]
+        except Exception:
+            warnings.append(
+                f"[{slug}] OBS_ERROR_ALERT_IGNORE={val!r} is malformed — forcing []"
+            )
+            config["OBS_ERROR_ALERT_IGNORE"] = []
 
     # ── Log results ────────────────────────────────────────────
     if warnings:
