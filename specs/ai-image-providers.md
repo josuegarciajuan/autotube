@@ -35,6 +35,15 @@ Incluye tanto los proveedores de stock (video/imagen) como los de generación IA
 > casa, la generación SD se reparte por la flota con la definición
 > **`autotube-ai-image`** de SuperServer (flag `AUTOTUBE_DIST_IMAGES=1`, fallback
 > local). Ver `AGENTS.md` §Ejecución distribuida y el doc de SuperServer `projects/autotube.md`.
+>
+> **Equivalencia local ↔ flota.** La ruta distribuida es un espejo funcional de
+> la local: mismos pesos (mismo snapshot SD 1.5), mismo código
+> (`LocalSDProvider` + `AIImageUpscaler`), misma petición
+> (`media_fetcher._build_ai_request`), mismo post-proceso/resolución e integración.
+> No hay igualdad bit-a-bit (SD es estocástico; `torch` 2.14 en contenedor vs 2.13
+> en la casa; `diffusers 0.39` coincide). Semilla determinista por escena según
+> `spec/20 §4`. Verificación: `scripts/verify_dist_image_equivalence.py` y
+> `tests/test_ai_image_request.py`.
 
 ## Nuevos proveedores — IA (Fase 2: requieren cuenta gratuita)
 

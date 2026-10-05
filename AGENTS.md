@@ -748,6 +748,24 @@ Ajustes por entorno (sin tocar código):
 `AUTOTUBE_DIST_SD_TIMEOUT_SEC` / `AUTOTUBE_DIST_SD_PER_IMAGE_SEC` (timeout escalado),
 `AUTOTUBE_DIST_SD_STALL_SEC` (def. 900 s → cancela y cae a local si no hay nodo elegible).
 
+**Equivalencia funcional (local ↔ flota).** El objetivo es que la ejecución en
+la flota produzca el mismo resultado que en la casa. Garantizado por construcción:
+mismos **pesos** (mismo snapshot `runwayml/stable-diffusion-v1-5`), **mismo
+código** (`LocalSDProvider` + `AIImageUpscaler`, no una reimplementación), **mismos
+parámetros** (la petición se construye en `media_fetcher._build_ai_request()`,
+consumida por ambas rutas), **mismo post-proceso y resolución** (ESPCN multi-pase
++ LANCZOS + cap final) y **misma integración** (ruta canónica, dedup, escena 1:1).
+
+No se garantiza igualdad **bit-a-bit** de los píxeles: Stable Diffusion es
+estocástico y la versión de `torch` del contenedor (2.14) puede no coincidir con
+la de la casa (2.13; `diffusers 0.39` sí coincide). La semilla es **determinista
+por escena** (`sha1(video:idx:script)`), como exige `spec/20 §4` para que un
+reintento sea idempotente aunque local use semilla aleatoria.
+
+Verificación: `python3 scripts/verify_dist_image_equivalence.py` (local nativo vs
+contenedor; compara resolución/formato/validez y reporta los sha256) y
+`tests/test_ai_image_request.py` (estabilidad de la petición).
+
 ## 🧵 Cambios en paralelo (worktree + merge a producción)
 
 El árbol principal (`/root/autotube`) queda **fijo en la rama de producción** (`master`).
