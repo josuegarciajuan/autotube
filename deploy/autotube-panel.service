@@ -22,6 +22,11 @@ Environment=UV_USE_IO_URING=0
 # pre-genere las imágenes en los nodos con tag `local-sd` (fallback local si no hay
 # nodo elegible). Desactivar: Environment=AUTOTUBE_DIST_IMAGES=0 (y daemon-reload).
 Environment=AUTOTUBE_DIST_IMAGES=1
+# Render y concat distribuidos por la flota (activa el 2º long-form concurrente:
+# effective_max_concurrent_longform_jobs() devuelve 2 solo con AUTOTUBE_DIST_RENDER_V2=1).
+# Se habilitan vía drop-in 10-superserver-dist.conf (fuente de verdad en producción).
+# Environment=AUTOTUBE_DIST_RENDER_V2=1
+# Environment=AUTOTUBE_DIST_CONCAT=1
 
 # Ensure DB is migrated, then start
 # Use /bin/sh -c to safely handle semicolons in Python -c code

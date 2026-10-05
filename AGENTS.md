@@ -380,17 +380,25 @@ independiente** (`api/services/shorts_worker.py`) lanzado por `_spawn_short_work
 | GET | `/api/channels/{id}/youtube-stats` | Stats en tiempo real del canal |
 | GET | `/api/videos/{id}/stats-history` | Histórico de stats del video |
 
-### 🔒 Invariante de concurrencia — SOLO UNA generación a la vez
-**NUNCA debe haber más de una generación de video larga (long-form) ejecutándose simultáneamente.**
+### 🔒 Invariante de concurrencia — máx. 2 long-forms **con render distribuido**
 
-- La concurrencia de renders de ffmpeg causa contención de RAM que puede matar decoders y producir videos corruptos o incompletos.
-- **Mecanismo de enforcement:**
-  - `_DISPATCH_LOCK` (`threading.Lock` en `api/services/generation_service.py`) — serializa todos los puntos de entrada de dispatch.
-  - `count_active_jobs()` en `database/db_extended.py` — guardia global.
-  - Guardia secundario en `start_generation_job_subprocess()` — cierra ventana TOCTOU residual.
-- **Si un segundo dispatch pasa los guards por error**, el guardia secundario lo bloquea y limpia los registros huérfanos (video → `error`, planned_slot → `pending`, job → `failed`).
-- Los shorts (generate_native_short, generate_clip_short) y uploads F2 están **excluidos** de este límite (pueden correr en paralelo con una generación long-form).
-- Los reassemble también están limitados: solo uno a la vez.
+**Límite configurable:** `MAX_CONCURRENT_LONGFORM_JOBS` (`config/settings.py`, env,
+default 2). El **límite efectivo** lo calcula
+`effective_max_concurrent_longform_jobs()`: devuelve **1** salvo que
+`AUTOTUBE_DIST_RENDER_V2=1` (render repartido por la flota de SuperServer). Es decir,
+**nunca corren 2 renders locales a la vez** — eso satura el host y fue el motivo del
+capado histórico.
+
+- **Mecanismo de enforcement** (todos consultan el límite efectivo):
+  - `_DISPATCH_LOCK` (`threading.Lock` en `api/services/generation_service.py`) — serializa los puntos de entrada de dispatch.
+  - `count_active_longform_jobs()` / `count_running_longform_jobs()` en `database/db_extended.py`.
+  - Guardia en `start_generation_job_subprocess()` (marca el job `running` antes de contar y bloquea si `count_running_longform_jobs() > límite`).
+- **Si un dispatch supera el límite**, el guardia lo bloquea y limpia (`video → error`, `planned_slot → pending`, `job → failed`).
+- Los **shorts** (generate_native_short, generate_clip_short, standalone) y uploads F2 están **excluidos** de este límite (colas y guard propio, pueden correr en paralelo).
+- Los **reassembly** usan el mismo límite efectivo.
+- **Pausa de generación (`generation_hold`):** los centinelas long-form (`phase='hold'`, action `generate_only`) se crean en número = límite efectivo (`generation_hold.desired_hold_counts()`), de modo que la pausa ocupa **todos** los slots. Shorts mantienen 1 centinela.
+- **Para volver a 1 concurrente:** `MAX_CONCURRENT_LONGFORM_JOBS=1` o desactivar `AUTOTUBE_DIST_RENDER_V2`.
+- **Para permitir 2:** `AUTOTUBE_DIST_RENDER_V2=1` (requiere nodos `render` provisionados con `autotube-worker:1`). Ver `superserver/projects/autotube.md`.
 
 ### 🎬 Invariante de escenas — NO repetir jamás
 **Un video generado NUNCA repetirá escenas visuales.** Cada escena debe tener un asset visual único (video o imagen distinta).

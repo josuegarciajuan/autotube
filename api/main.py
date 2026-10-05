@@ -36,7 +36,8 @@ from database.db_extended import migrate_v2, ExtendedDatabase
 from database.db import init_db
 from config.settings import (TOKENS_DIR, DATABASE_PATH, STATS_ENABLED, STATS_AUTO_COLLECT,
                              YT_REMEDIATION_MODE, THUMBNAIL_VERIFY_ENABLED,
-                             UPLOAD_HEALTH_CHECKER_ENABLED)
+                             UPLOAD_HEALTH_CHECKER_ENABLED,
+                             effective_max_concurrent_longform_jobs)
 
 logger = logging.getLogger("autotube.main")
 
@@ -685,12 +686,13 @@ async def _queue_consumer():
                         next_job["channel_id"], active_for_channel["id"])
             return
         
-        # Global guard: defer dispatch if a long-form job is running
-        # Uses count_running_longform_jobs (not count_active_longform_jobs)
+        # Global guard: defer dispatch while the long-form concurrency limit is
+        # reached. Uses count_running_longform_jobs (not count_active_longform_jobs)
         # so queued marathon jobs do not block the consumer.
-        if db.count_running_longform_jobs() > 0:
-            logger.debug("Queue consumer deferred: %d running long-form job(s) — retrying next tick",
-                        db.count_running_longform_jobs())
+        _lf_limit = effective_max_concurrent_longform_jobs()
+        if db.count_running_longform_jobs() >= _lf_limit:
+            logger.debug("Queue consumer deferred: %d running long-form job(s) (limit %d) — retrying next tick",
+                        db.count_running_longform_jobs(), _lf_limit)
             return
         
         # RAM gate: need at least 4 GB free
@@ -2312,7 +2314,7 @@ async def _process_planned_slots():
         # avoids creating records that would be immediately rejected.
         try:
             active_count = _db.count_active_longform_jobs()
-            if active_count >= 1:
+            if active_count >= effective_max_concurrent_longform_jobs():
                 avail_gb = _get_available_ram_gb()
                 if avail_gb < 3.0:
                     logger.debug(
@@ -2593,10 +2595,11 @@ def _process_due_schedules_sync() -> list[dict]:
                 pass
             continue
         
-        # ── Global guard: skip if a long-form job is running ──
-        if db.count_active_longform_jobs() > 0:
-            logger.debug("Schedule #%d deferred: %d active long-form job(s) running globally",
-                        s["id"], db.count_active_longform_jobs())
+        # ── Global guard: skip if long-form concurrency limit reached ──
+        _lf_limit = effective_max_concurrent_longform_jobs()
+        if db.count_active_longform_jobs() >= _lf_limit:
+            logger.debug("Schedule #%d deferred: %d active long-form job(s) running globally (limit %d)",
+                        s["id"], db.count_active_longform_jobs(), _lf_limit)
             try:
                 conn.execute(
                     "UPDATE content_schedules SET next_run_at = datetime('now', 'localtime', '+5 minutes') "
@@ -2615,8 +2618,8 @@ def _process_due_schedules_sync() -> list[dict]:
                 # Re-check global guard under lock (belts-and-suspenders)
                 from database.db_extended import ExtendedDatabase
                 _db2 = ExtendedDatabase()
-                if _db2.count_active_longform_jobs() > 0:
-                    logger.debug("Schedule #%d deferred (under lock): active long-form job detected", s["id"])
+                if _db2.count_active_longform_jobs() >= effective_max_concurrent_longform_jobs():
+                    logger.debug("Schedule #%d deferred (under lock): long-form limit reached", s["id"])
                     try:
                         conn.execute(
                             "UPDATE content_schedules SET next_run_at = datetime('now', 'localtime', '+5 minutes') "

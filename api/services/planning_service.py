@@ -23,6 +23,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 import pytz
 from api.time_utils import local_to_utc, sqlite_utc, MADRID, UTC
+from config.settings import effective_max_concurrent_longform_jobs
 
 logger = logging.getLogger("autotube.planning")
 
@@ -3364,14 +3365,14 @@ def process_planned_slots(db=None, loop=None) -> dict | None:
     except Exception:
         pass
     
-    # 2c. Phase-pipelining guard: allow up to 1 render + 1 prep concurrently.
-    #     - If no render is active → dispatch any job (it will claim render slot).
-    #     - If 1 render is active → allow dispatching 1 PREP worker (2 total).
-    #     - If 2 jobs already active → defer dispatch.
+    # 2c. Global concurrency guard: up to MAX concurrent long-form jobs.
+    #     El límite efectivo es 2 solo con render distribuido activo; si no, 1.
+    #     - Si hay hueco → dispatch (reclamará su slot de render).
+    #     - Si no → diferir.
     active_count = db.count_active_longform_jobs()
     render_count = db.count_render_phase_jobs()
-    MAX_TOTAL_JOBS = 1
-    MAX_RENDER_JOBS = 1
+    MAX_TOTAL_JOBS = effective_max_concurrent_longform_jobs()
+    MAX_RENDER_JOBS = MAX_TOTAL_JOBS
     
     if active_count >= MAX_TOTAL_JOBS:
         logger.info(
