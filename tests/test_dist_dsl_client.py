@@ -19,13 +19,15 @@ def _reload_client(tmp_dir):
 def test_submit_escribe_spool_y_wait_lee_resultado(tmp_path):
     client = _reload_client(str(tmp_path))
     eid = client.submit("synth-sum", {"start": 1, "end": 10}, exec_id="test-exec-1",
-                        max_inflight=2, req={"cores": 1, "memMb": 128})
+                        max_inflight=2, deadline_sec=1234,
+                        req={"cores": 1, "memMb": 128})
     assert eid == "test-exec-1"
     spool = os.path.join(str(tmp_path), "spool", "test-exec-1.json")
     assert os.path.exists(spool)
     payload = json.load(open(spool, encoding="utf-8"))
     assert payload["definition"] == "synth-sum"
     assert payload["maxInflight"] == 2
+    assert payload["deadlineSec"] == 1234
     assert payload["req"] == {"cores": 1, "memMb": 128}
 
     # El motor publicaría el resumen aquí; lo simulamos.

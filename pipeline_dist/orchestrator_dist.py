@@ -54,6 +54,17 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _env_int(name: str, default: int = 0) -> int:
+    """Entero de entorno tolerante: vacío o no numérico → ``default``."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 AI_IMAGES_CACHE = "_dist_cache"
 
 
@@ -266,24 +277,35 @@ class DistributedOrchestrator(PipelineOrchestrator):
             "memMb": int(os.environ.get("AUTOTUBE_DIST_SD_MEM_MB", "4600") or 4600),
             "requiresTags": tags,
         }
+        # La espera debe cubrir TODAS las imágenes (se reparten de forma
+        # concurrente). Ceiling generoso; `wait` retorna al acabar. Se puede
+        # fijar explícitamente con AUTOTUBE_DIST_SD_TIMEOUT_SEC.
+        _per_img = float(os.environ.get("AUTOTUBE_DIST_SD_PER_IMAGE_SEC", "600") or 600)
+        _ceiling = float(os.environ.get("AUTOTUBE_DIST_SD_TIMEOUT_SEC", "0") or 0)
+        if _ceiling <= 0:
+            _ceiling = max(1800.0, n_expected * _per_img)
+        timeout = _ceiling
+
+        # Cota dura del MOTOR (deadlineSec): evita que una unidad nunca
+        # planificada (nodo no elegible, engine caído) bloquee la ejecución.
+        # Coherente con maxAttempts=3 → presupuesto base × 3 + 300 s de margen.
+        _deadline_env = _env_int("AUTOTUBE_DIST_DEADLINE_SEC", 0)
+        if _deadline_env > 0:
+            _deadline = _deadline_env
+        else:
+            _deadline = int(max(1800.0, n_expected * _per_img) * 3 + 300)
+
         self._emit_progress(43, "images", f"Imágenes IA en la flota: 0/{n_expected}")
         eid = dsl_client.submit(
             "autotube-ai-image", params, exec_id=exec_id,
             label=f"autotube ai-image {self.canal}",
             max_inflight=int(os.environ.get("AUTOTUBE_DIST_SD_MAX_INFLIGHT", "6") or 6),
             max_attempts=3, max_units=len(images_params) + 16,
+            deadline_sec=_deadline,
             req={"cores": params["threads"], "memMb": params["memMb"]},
         )
         logger.info("[%s] ai-image exec=%s (%d escenas AI-tier de %d)",
                     self.canal, eid, n_expected, n_scenes)
-        # La espera debe cubrir TODAS las imágenes (se reparten de forma
-        # concurrente). Ceiling generoso; `wait` retorna al acabar. Se puede
-        # fijar explícitamente con AUTOTUBE_DIST_SD_TIMEOUT_SEC.
-        _ceiling = float(os.environ.get("AUTOTUBE_DIST_SD_TIMEOUT_SEC", "0") or 0)
-        if _ceiling <= 0:
-            _per_img = float(os.environ.get("AUTOTUBE_DIST_SD_PER_IMAGE_SEC", "600") or 600)
-            _ceiling = max(1800.0, n_expected * _per_img)
-        timeout = _ceiling
 
         def _progress(summary: dict) -> None:
             p = (summary or {}).get("progress") or {}
@@ -349,15 +371,19 @@ class DistributedOrchestrator(PipelineOrchestrator):
         return cache_by_hash
 
     def _wait_dist_stall_aware(self, eid: str, timeout: float,
-                               progress_cb=None, stall_sec: float = 900.0) -> dict:
+                               progress_cb=None, stall_sec: float = 900.0,
+                               phase: str = "images") -> dict:
         """Espera una ejecución distribuida con guardia de estancamiento.
 
         El latido de progreso es la **salida real** (``accepted`` o ``generated``
         creciendo), no el mero hecho de que haya unidades ``inflight``: un worker
         colgado deja ``inflight>0`` indefinidamente y antes se interpretaba como
         "vivo", lo que podía colgar el vídeo hasta el timeout completo. Si no se
-        acepta ninguna imagen nueva durante ``stall_sec``, se cancela y se lanza
-        para caer al render local.
+        acepta ninguna unidad nueva durante ``stall_sec``, se cancela y se lanza
+        para caer a la ruta local.
+
+        Genérico para cualquier fase distribuida (``phase``): solo depende de
+        ``dsl_client`` y del reloj, no de atributos de la fase de imágenes.
         """
         deadline = time.time() + float(timeout)
         last_progress = time.time()
@@ -397,7 +423,7 @@ class DistributedOrchestrator(PipelineOrchestrator):
                 try:
                     from pipeline.observability import obs_event
                     obs_event(
-                        "dist_ai_prefetch_stall", phase="images",
+                        "dist_ai_prefetch_stall", phase=phase,
                         exec_id=eid, stall_sec=stall_sec,
                         accepted=accepted, generated=generated,
                         inflight=inflight, pending=pending,
@@ -411,7 +437,7 @@ class DistributedOrchestrator(PipelineOrchestrator):
                 )
             time.sleep(2.0)
         dsl_client.cancel(eid)
-        raise ScenePlanError(f"ai-image timeout {timeout:.0f}s; cancelado")
+        raise ScenePlanError(f"{phase} timeout {timeout:.0f}s; cancelado")
 
     # ── Render v2: mismo código, estado congelado, todo-o-nada ──────────────
     @staticmethod
@@ -501,20 +527,39 @@ class DistributedOrchestrator(PipelineOrchestrator):
             "memMb": int(os.environ.get("AUTOTUBE_DIST_MEM_MB", "2048") or 2048),
             "requiresTags": tags,
         }
+        _render_timeout = float(os.environ.get("AUTOTUBE_DIST_TIMEOUT_SEC", "1800") or 1800) + 120
+        # Cota dura del MOTOR (deadlineSec): evita que una unidad nunca
+        # planificada bloquee la ejecución. maxAttempts=3 → ×3 + margen.
+        _render_deadline_env = _env_int("AUTOTUBE_DIST_RENDER_DEADLINE_SEC", 0)
+        if _render_deadline_env > 0:
+            _render_deadline = _render_deadline_env
+        else:
+            _render_deadline = int(_render_timeout * 3 + 300)
         self._emit_progress(38, "video", f"Render v2 distribuido: {len(scenes_params)} escenas")
         eid = dsl_client.submit(
             "autotube-render-scene", params, exec_id=exec_id,
             label=f"autotube render v2 {self.canal}",
             max_inflight=int(os.environ.get("AUTOTUBE_DIST_MAX_INFLIGHT", "0") or 0) or None,
             max_attempts=3, max_units=len(scenes_params) + 16,
+            deadline_sec=_render_deadline,
             req={"cores": 2, "memMb": 2048},
         )
         logger.info("[%s] Render v2 exec=%s (%d escenas)",
                     self.canal, eid, len(scenes_params))
-        summary = dsl_client.wait(
-            eid,
-            timeout=float(os.environ.get("AUTOTUBE_DIST_TIMEOUT_SEC", "1800")) + 120,
-            poll=2.0,
+
+        def _progress(summary: dict) -> None:
+            p = (summary or {}).get("progress") or {}
+            acc = int(p.get("accepted") or 0)
+            tot = len(scenes_params)
+            self._emit_progress(
+                38 + int(23 * acc / max(1, tot)), "video",
+                f"Render v2 distribuido: {acc}/{tot} escenas",
+            )
+
+        summary = self._wait_dist_stall_aware(
+            eid, _render_timeout, _progress,
+            stall_sec=float(os.environ.get("AUTOTUBE_DIST_RENDER_STALL_SEC", "900") or 900),
+            phase="render v2",
         )
         if summary.get("status") != "done":
             raise ScenePlanError(
@@ -636,19 +681,40 @@ class DistributedOrchestrator(PipelineOrchestrator):
             "requiresTags": tags,
             "memMb": int(os.environ.get("AUTOTUBE_DIST_MEM_MB", "2048") or 2048),
         }
+        _concat_timeout = float(os.environ.get("AUTOTUBE_DIST_TIMEOUT_SEC", "1800") or 1800) + 120
+        # Cota dura del MOTOR (deadlineSec): evita que un batch nunca planificado
+        # bloquee la ejecución. maxAttempts=2 → base × 2 + margen.
+        _concat_deadline_env = _env_int("AUTOTUBE_DIST_CONCAT_DEADLINE_SEC", 0)
+        if _concat_deadline_env > 0:
+            _concat_deadline = _concat_deadline_env
+        else:
+            _concat_deadline = int(
+                float(os.environ.get("AUTOTUBE_DIST_TIMEOUT_SEC", "1800") or 1800) * 2 + 300
+            )
         self._emit_progress(70, "video", f"Concat distribuido: {len(batches)} batches")
         eid = dsl_client.submit(
             "autotube-concat-batch", params, exec_id=exec_id,
             label=f"autotube concat {self.canal}",
             max_inflight=min(4, len(batches)), max_attempts=2,
-            max_units=len(batches) + 8, req={"cores": 4, "memMb": 2048},
+            max_units=len(batches) + 8, deadline_sec=_concat_deadline,
+            req={"cores": 4, "memMb": 2048},
         )
         logger.info("[%s] Concat distribuido exec=%s (%d batches)",
                     self.canal, eid, len(batches))
-        summary = dsl_client.wait(
-            eid,
-            timeout=float(os.environ.get("AUTOTUBE_DIST_TIMEOUT_SEC", "1800")) + 120,
-            poll=2.0,
+
+        def _progress(summary: dict) -> None:
+            p = (summary or {}).get("progress") or {}
+            acc = int(p.get("accepted") or 0)
+            tot = len(batches)
+            self._emit_progress(
+                70 + int(15 * acc / max(1, tot)), "video",
+                f"Concat distribuido: {acc}/{tot} batches",
+            )
+
+        summary = self._wait_dist_stall_aware(
+            eid, _concat_timeout, _progress,
+            stall_sec=float(os.environ.get("AUTOTUBE_DIST_CONCAT_STALL_SEC", "900") or 900),
+            phase="concat",
         )
         if summary.get("status") != "done":
             raise ScenePlanError(
