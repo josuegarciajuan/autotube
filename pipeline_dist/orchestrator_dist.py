@@ -199,7 +199,7 @@ class DistributedOrchestrator(PipelineOrchestrator):
             "modelDir": os.environ.get(
                 "AUTOTUBE_SD_MODELS", "/opt/taildeck/autotube/.hfcache"
             ),
-            "threads": int(os.environ.get("AUTOTUBE_DIST_SD_THREADS", "2") or 2),
+            "threads": int(os.environ.get("AUTOTUBE_DIST_SD_THREADS", "3") or 3),
             "memMb": int(os.environ.get("AUTOTUBE_DIST_SD_MEM_MB", "4600") or 4600),
             "requiresTags": tags,
         }
@@ -207,7 +207,7 @@ class DistributedOrchestrator(PipelineOrchestrator):
         eid = dsl_client.submit(
             "autotube-ai-image", params, exec_id=exec_id,
             label=f"autotube ai-image {self.canal}",
-            max_inflight=int(os.environ.get("AUTOTUBE_DIST_SD_MAX_INFLIGHT", "8") or 8),
+            max_inflight=int(os.environ.get("AUTOTUBE_DIST_SD_MAX_INFLIGHT", "6") or 6),
             max_attempts=3, max_units=len(images_params) + 16,
             req={"cores": params["threads"], "memMb": params["memMb"]},
         )
