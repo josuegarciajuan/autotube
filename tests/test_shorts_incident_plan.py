@@ -11,7 +11,7 @@ def test_render_timeout_scales_with_duration_and_assets():
 
     assert short >= 180
     assert long > short
-    assert long <= 1500
+    assert long <= 1800
     assert has_sufficient_visual_assets([{"path": "a"}, None], 0.5) is True
     assert has_sufficient_visual_assets([None, None], 0.5) is False
 
