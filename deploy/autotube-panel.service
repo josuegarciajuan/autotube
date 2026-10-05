@@ -17,6 +17,11 @@ Environment=PATH=/usr/local/bin:/usr/bin:/bin
 # C5: evitar cuelgues de node en estado D (io_uring). Ver specs/io_uring-cuelgues.md.
 # Debe coincidir con el unit instalado en /etc/systemd/system/autotube-panel.service.
 Environment=UV_USE_IO_URING=0
+# Distribución de la fase de imágenes IA (SD 1.5) por la flota de SuperServer.
+# Hace que make_orchestrator() use DistributedOrchestrator y que _prefetch_ai_images
+# pre-genere las imágenes en los nodos con tag `local-sd` (fallback local si no hay
+# nodo elegible). Desactivar: Environment=AUTOTUBE_DIST_IMAGES=0 (y daemon-reload).
+Environment=AUTOTUBE_DIST_IMAGES=1
 
 # Ensure DB is migrated, then start
 # Use /bin/sh -c to safely handle semicolons in Python -c code
