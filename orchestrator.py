@@ -7,6 +7,7 @@ thumbnail generation, metadata creation and YouTube upload.
 
 import json
 import logging
+import os
 import random
 import sys
 import time
@@ -37,6 +38,19 @@ logger = logging.getLogger(__name__)
 
 # Channel configurations — populated via config bridge
 CHANNEL_CONFIGS: dict[str, object] = {}
+
+
+def _tts_local_fallback_enabled() -> bool:
+    """¿Se permite caer al TTS local si la delegación al pool falla?
+
+    Default **ON** (robustez: un fallo del pool no debe tirar el vídeo entero).
+    Se desactiva explícitamente con ``AUTOTUBE_TTS_LOCAL_FALLBACK`` en
+    ``0`` / ``false`` / ``no`` / ``off`` (case-insensitive).
+    """
+    raw = os.environ.get("AUTOTUBE_TTS_LOCAL_FALLBACK")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in ("0", "false", "no", "off")
 
 
 def _safe_log_error(db, canal: str, phase: str, error_msg: str):
@@ -1555,9 +1569,18 @@ class PipelineOrchestrator:
         """Ruta SuperServer de TTS (opción A, sin DB en el worker).
 
         Devuelve el mismo ``result`` que la ruta local, o ``None`` si la
-        delegación no aplica (modo local o motor no Kokoro). Si el proyecto está
-        encendido y la delegación falla, **aborta** la fase (no cae a local: evita
-        que el mismo audio se genere dos veces).
+        delegación no aplica (modo local o motor no Kokoro).
+
+        Fallback local: si el proyecto está encendido y ``tts_bridge.delegar``
+        lanza, por defecto se avisa y se devuelve ``None`` para que ``phase_tts``
+        continúe por la ruta local Kokoro existente (``AUTOTUBE_TTS_LOCAL_FALLBACK``
+        =ON). Solo si ese flag se desactiva explícitamente se re-lanza, abortando
+        la fase como antes.
+
+        Invariante anti-duplicado: ``tts_bridge.delegar`` solo aplica artefactos
+        cuando recibió ``estado.json`` con ``ok`` y ``rid`` coincidente; si lanza
+        (timeout, sin resultado ok, etc.) **no escribió audio**. Por tanto generar
+        en local tras el fallo no duplica nada.
         """
         try:
             from api.services import tts_bridge
@@ -1598,7 +1621,22 @@ class PipelineOrchestrator:
                 cta_text=cta_text or None,
             )
         except Exception as e:  # noqa: BLE001
-            logger.error("[%s] TTS delegado al pool falló: %s", self.canal, e)
+            logger.warning(
+                "[%s] TTS delegado al pool falló (%s: %s)",
+                self.canal, type(e).__name__, e,
+            )
+            if _tts_local_fallback_enabled():
+                # El puente no aplicó artefactos (solo lo hace con estado.json
+                # ok) → generar en local no duplica audio. Devolver None deja que
+                # phase_tts siga por la ruta local Kokoro.
+                logger.warning(
+                    "[%s] TTS delegado no disponible; generando en local",
+                    self.canal,
+                )
+                self._emit_progress(
+                    31, "tts", "TTS delegado no disponible; generando en local"
+                )
+                return None
             _safe_log_error(self.db, self.canal, "tts", f"pool: {e}")
             raise
 
