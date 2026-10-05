@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import time
 import urllib.parse
 from pathlib import Path
@@ -46,6 +47,14 @@ DEFAULT_MODEL = "flux"
 DEFAULT_WIDTH = 1280
 DEFAULT_HEIGHT = 720
 REQUEST_TIMEOUT = 60  # seconds
+
+# Pollinations puso la API legacy de imagen detrás de un muro de pago x402
+# ("402 Payment Required", pago en USDC) para tráfico anónimo: la primera
+# petición pasa y el resto cae al muro. Un token registrado (tier gratuito
+# "Seed", https://auth.pollinations.ai) se envía como `?token=` y/o cabecera
+# `Authorization: Bearer`. Si aun así llega un 402, se activa un disyuntor
+# para no martillear la API escena tras escena.
+DEFAULT_402_COOLDOWN_SEC = 1800
 
 
 class PollinationsProvider:
@@ -91,6 +100,8 @@ class PollinationsProvider:
         upscale_sharpen: bool = True,
         upscale_sharpen_amount: float = 0.4,
         upscale_sharpen_sigma: float = 2.0,
+        token: Optional[str] = None,
+        referrer: Optional[str] = None,
     ) -> None:
         self.model = model
         self.width = width
@@ -98,6 +109,20 @@ class PollinationsProvider:
         self.cache_dir = Path(cache_dir) if cache_dir else None
         if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
+        # Autenticación opcional. Sin token, el tier anónimo está limitado a
+        # ~1 imagen y después devuelve 402 (muro x402). Con token (gratuito en
+        # https://auth.pollinations.ai) se evita el muro. Se leen de env si no
+        # se pasan explícitamente.
+        self.token = (token or os.getenv("POLLINATIONS_TOKEN", "")).strip() or None
+        self.referrer = (referrer or os.getenv("POLLINATIONS_REFERRER", "")).strip() or None
+        try:
+            self._wall_cooldown = float(
+                os.getenv("POLLINATIONS_X402_COOLDOWN_SEC", str(DEFAULT_402_COOLDOWN_SEC))
+            )
+        except ValueError:
+            self._wall_cooldown = DEFAULT_402_COOLDOWN_SEC
+        # Marca temporal (monotonic) hasta la que se omite la API tras un 402.
+        self._wall_until = 0.0
         # Resolución mínima objetivo (w, h). Si la imagen devuelta por la API
         # es menor, se upscalea localmente (ESPCN_x2 + unsharp mask).
         self.upscale_min: Optional[tuple[int, int]] = None
@@ -160,12 +185,21 @@ class PollinationsProvider:
         w = width or self.width
         h = height or self.height
 
+        # Disyuntor: si la API devolvió 402 (muro x402) hace poco, no insistir
+        # en cada escena. El fallback (local_sd/flota) se encarga mientras tanto.
+        if self._wall_until and time.monotonic() < self._wall_until:
+            logger.info(
+                "Pollinations: muro x402 activo (%.0fs restantes); se omite la API.",
+                self._wall_until - time.monotonic(),
+            )
+            return None
+
         try:
             url = self._build_url(prompt, w, h, seed)
             logger.info("Pollinations request: %s...", prompt[:80])
 
             start = time.monotonic()
-            resp = requests.get(url, timeout=REQUEST_TIMEOUT)
+            resp = requests.get(url, timeout=REQUEST_TIMEOUT, headers=self._headers())
             resp.raise_for_status()
             elapsed = time.monotonic() - start
 
@@ -189,11 +223,23 @@ class PollinationsProvider:
             logger.error("Pollinations request timed out after %ds", REQUEST_TIMEOUT)
         except requests.HTTPError as exc:
             status = exc.response.status_code if exc.response else 0
-            if status == 429:
+            if status == 402:
+                self._wall_until = time.monotonic() + self._wall_cooldown
+                logger.warning(
+                    "Pollinations 402 (muro x402 de pago): %s. Se omite la API "
+                    "durante %.0fs y se usa el fallback. Para restaurarla, "
+                    "registra un token gratuito en https://auth.pollinations.ai "
+                    "y exporta POLLINATIONS_TOKEN=... ",
+                    "token ya configurado (puede requerir pago)" if self.token
+                    else "sin token (tier anónimo agotado)",
+                    self._wall_cooldown,
+                )
+            elif status == 429:
                 logger.warning("Pollinations rate-limited (429) — sleeping 30s and retrying once")
                 time.sleep(30)
                 try:
-                    resp = requests.get(self._build_url(prompt, w, h, seed), timeout=REQUEST_TIMEOUT)
+                    resp = requests.get(self._build_url(prompt, w, h, seed),
+                                        timeout=REQUEST_TIMEOUT, headers=self._headers())
                     resp.raise_for_status()
                     output_path.write_bytes(resp.content)
                     self._maybe_upscale(output_path)
@@ -226,8 +272,18 @@ class PollinationsProvider:
         }
         if seed is not None:
             params["seed"] = str(seed)
+        if self.token:
+            params["token"] = self.token
+        if self.referrer:
+            params["referrer"] = self.referrer
         qs = urllib.parse.urlencode(params)
         return f"{BASE_URL}/{encoded}?{qs}"
+
+    def _headers(self) -> dict:
+        """Cabeceras de autenticación (Bearer) cuando hay token."""
+        if not self.token:
+            return {}
+        return {"Authorization": f"Bearer {self.token}"}
 
     def _cache_key(self, prompt: str) -> str:
         """Deterministic cache key from prompt text."""
