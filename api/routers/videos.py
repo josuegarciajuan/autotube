@@ -13,6 +13,7 @@ from api.schemas.models import (
 )
 from api.services.generation_service import start_generation_job, _run_reassembly_job, start_upload_job
 from api.services.generation_service import start_generation_job_subprocess, USE_SUBPROCESS_WORKER, _DISPATCH_LOCK
+from config.settings import effective_max_concurrent_longform_jobs
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -119,9 +120,9 @@ async def generate_video(data: VideoGenerateRequest, background_tasks: Backgroun
         if active:
             raise HTTPException(409, "Ya hay una generacion en curso para este canal. Espera a que termine.")
         
-        # Guard 2: don't start if ANY generation is running globally
-        if db.count_active_longform_jobs() > 0:
-            raise HTTPException(409, "Ya hay una generacion en curso en otro canal. Solo una a la vez.")
+        # Guard 2: long-form concurrency limit (1 sin render distribuido, 2 con él)
+        if db.count_active_longform_jobs() >= effective_max_concurrent_longform_jobs():
+            raise HTTPException(409, "Se ha alcanzado el límite de generaciones largas simultáneas.")
         
         import sqlite3
         with db._connect() as conn:
@@ -994,9 +995,9 @@ def force_retry_video(video_id: int, background_tasks: BackgroundTasks):
     if active:
         raise HTTPException(409, "Ya hay una generacion en curso para este canal. Espera a que termine.")
     
-    # Guard 2: don't start if ANY generation is running globally
-    if db.count_active_longform_jobs() > 0:
-        raise HTTPException(409, "Ya hay una generacion en curso en otro canal. Solo una video largo a la vez.")
+    # Guard 2: long-form concurrency limit (1 sin render distribuido, 2 con él)
+    if db.count_active_longform_jobs() >= effective_max_concurrent_longform_jobs():
+        raise HTTPException(409, "Se ha alcanzado el límite de generaciones largas simultáneas.")
     
     # Check we have checkpoint data to reassemble
     import json

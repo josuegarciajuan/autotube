@@ -39,6 +39,7 @@ def _legacy_disabled(name: str) -> bool:
 
 # ── Dispatch lock (serializes all generation dispatches) ────────
 from api.services.generation_service import _DISPATCH_LOCK
+from config.settings import effective_max_concurrent_longform_jobs
 
 # ── Target windows (Europe/Madrid local time) ──────────────
 TARGET_WINDOWS = [
@@ -691,9 +692,9 @@ def dispatch_next_due_slot(db=None) -> dict | None:
                      next_slot["channel_id"], active["id"])
         return None
 
-    # 5c. Global guard: defer if ANY generation is running across all channels
+    # 5c. Global guard: defer if the long-form concurrency limit is reached
     active_count = db.count_active_longform_jobs()
-    if active_count > 0:
+    if active_count >= effective_max_concurrent_longform_jobs():
         logger.info("Smart dispatch deferred: %d active job(s) running — retrying next tick",
                     active_count)
         return None
@@ -701,7 +702,7 @@ def dispatch_next_due_slot(db=None) -> dict | None:
     # ── Enter dispatch critical section ──────────────────────────
     with _DISPATCH_LOCK:
         # Re-check global guard under lock (belts-and-suspenders)
-        if db.count_active_longform_jobs() > 0:
+        if db.count_active_longform_jobs() >= effective_max_concurrent_longform_jobs():
             logger.info("Smart dispatch deferred (under lock): active job detected")
             return None
 

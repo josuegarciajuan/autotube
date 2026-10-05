@@ -73,6 +73,28 @@ def test_ensure_hold_creates_running_sentinels(db):
     assert gh.is_generation_hold_active(db) is True
 
 
+def test_ensure_hold_creates_n_longform_sentinels_with_dist_render(db, monkeypatch):
+    """Con render distribuido (límite 2) la pausa necesita 2 centinelas long-form."""
+    monkeypatch.setenv("AUTOTUBE_DIST_RENDER_V2", "1")
+    res = gh.ensure_hold(db, ttl_days=2)
+    assert res["created"] == 3
+    actions = [r["action"] for r in _rows(db, "SELECT action FROM generation_jobs WHERE phase='hold'")]
+    assert actions.count("generate_only") == 2
+    assert actions.count("generate_native_short") == 1
+
+
+def test_ensure_hold_shrinks_when_limit_drops(db, monkeypatch):
+    """Si el límite baja de 2 a 1, el centinela long-form sobrante se cancela."""
+    monkeypatch.setenv("AUTOTUBE_DIST_RENDER_V2", "1")
+    gh.ensure_hold(db)
+    monkeypatch.delenv("AUTOTUBE_DIST_RENDER_V2", raising=False)
+    gh.ensure_hold(db)
+    rows = _rows(db, "SELECT action, status FROM generation_jobs WHERE phase='hold'")
+    running = [r for r in rows if r["status"] == "running"]
+    assert len(running) == 2
+    assert sum(1 for r in running if r["action"] == "generate_only") == 1
+
+
 def test_ensure_hold_is_idempotent(db):
     gh.ensure_hold(db)
     gh.ensure_hold(db)
