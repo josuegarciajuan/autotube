@@ -14,6 +14,7 @@ endpoint (api/routers/shorts.py), and the standalone NativeShortsPipeline.
 
 import hashlib
 import logging
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -22,6 +23,20 @@ from typing import Any
 import requests
 
 logger = logging.getLogger(__name__)
+
+# ── Perfil de encode de los renders de shorts (fix oct 2026) ──────────────
+# Un short se re-encoda en YouTube, así que "veryfast" recorta ~2-3x el tiempo
+# de x264 frente a "fast" sin pérdida perceptible. Bajo carga concurrente
+# (varios shorts y/o un long-form a la vez) esa diferencia decidía entre
+# terminar y agotar el timeout de render.
+FFMPEG_VIDEO_PRESET = os.getenv("SHORTS_FFMPEG_PRESET", "veryfast")
+FFMPEG_VIDEO_CRF = os.getenv("SHORTS_FFMPEG_CRF", "23")
+try:
+    # Acota los hilos por render para que varios ffmpeg concurrentes no se
+    # maten entre sí por CPU (10 cores → 4 hilos/render permite 2-3 a la vez).
+    FFMPEG_VIDEO_THREADS = max(2, min(8, int(os.getenv("SHORTS_FFMPEG_THREADS", "4"))))
+except (TypeError, ValueError):
+    FFMPEG_VIDEO_THREADS = 4
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Module-level constants
@@ -1303,8 +1318,10 @@ def render_short_hybrid(
         asset_path = str(asset["path"])
 
         if asset_type == "video":
-            # Video: scale + crop to 9:16, trim to visual_dur
-            inputs.extend(["-i", asset_path])
+            # Video: limitar la LECTURA al tramo necesario (-t antes de -i evita
+            # decodificar el clip entero, clave con fuentes 4K/alta tasa) y
+            # luego scale+crop a 9:16.
+            inputs.extend(["-t", f"{visual_dur:.3f}", "-i", asset_path])
             filter_parts.append(
                 f"[{i}:v]scale=1080:1920:force_original_aspect_ratio=increase,"
                 f"crop=1080:1920,setsar=1,fps=30,"
@@ -1361,12 +1378,12 @@ def render_short_hybrid(
     filter_graph = ";".join(filter_parts)
 
     cmd = [
-        "ffmpeg", "-y",
+        "ffmpeg", "-y", "-nostdin",
         *inputs,
         "-filter_complex", filter_graph,
         "-map", "[v]", "-map", f"{audio_idx}:a",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "22",
-        "-pix_fmt", "yuv420p", "-r", "30",
+        "-c:v", "libx264", "-preset", FFMPEG_VIDEO_PRESET, "-crf", FFMPEG_VIDEO_CRF,
+        "-pix_fmt", "yuv420p", "-r", "30", "-threads", str(FFMPEG_VIDEO_THREADS),
         "-c:a", "aac", "-b:a", "128k",
         "-shortest", "-movflags", "+faststart",
         str(output_path),
@@ -1391,7 +1408,8 @@ def render_short_hybrid(
         attempt_timeout = render_timeout * (2 if attempt else 1)
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=attempt_timeout
+                cmd, capture_output=True, text=True, timeout=attempt_timeout,
+                stdin=subprocess.DEVNULL,
             )
         except subprocess.TimeoutExpired as exc:
             last_error = f"timeout after {attempt_timeout}s"
@@ -1646,7 +1664,7 @@ def render_slideshow_with_images(
     if not image_paths:
         filter_str = _build_solid_bg_filter(bg_color_hex, srt_path)
         cmd = [
-            "ffmpeg", "-y",
+            "ffmpeg", "-y", "-nostdin",
             "-f", "lavfi", "-i",
             f"color=c=0x{bg_color_hex}:s=1080x1920:d={audio_duration}:r=30",
             "-i", str(audio_path),
@@ -1658,7 +1676,8 @@ def render_slideshow_with_images(
             "-shortest", "-movflags", "+faststart",
             str(output_path),
         ]
-        subprocess.run(cmd, capture_output=True, timeout=180)
+        subprocess.run(cmd, capture_output=True, timeout=180,
+                       stdin=subprocess.DEVNULL)
         return output_path
 
     # ── Images → slideshow with crossfade ────────────────────
@@ -1714,18 +1733,19 @@ def render_slideshow_with_images(
 
     filter_graph = ";".join(filter_parts)
     cmd = [
-        "ffmpeg", "-y",
+        "ffmpeg", "-y", "-nostdin",
         *inputs,
         "-filter_complex", filter_graph,
         "-map", "[v]", "-map", f"{audio_idx}:a",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "22",
-        "-pix_fmt", "yuv420p", "-r", "30",
+        "-c:v", "libx264", "-preset", FFMPEG_VIDEO_PRESET, "-crf", FFMPEG_VIDEO_CRF,
+        "-pix_fmt", "yuv420p", "-r", "30", "-threads", str(FFMPEG_VIDEO_THREADS),
         "-c:a", "aac", "-b:a", "128k",
         "-shortest", "-movflags", "+faststart",
         str(output_path),
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=180,
+                            stdin=subprocess.DEVNULL)
     if result.returncode != 0:
         logger.error("FFmpeg slideshow failed: %s", result.stderr[-400:])
         raise RuntimeError(f"FFmpeg slideshow render failed: {result.stderr[-300:]}")

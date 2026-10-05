@@ -284,10 +284,18 @@ class PexelsVideoProvider(BaseVideoProvider):
     ) -> Optional[dict]:
         """Select the best quality video file from the available options.
 
-        Priority: exact match > same-or-higher resolution > highest available.
+        Priority: exact match > closest same-or-higher resolution > highest
+        available.
+
+        Se elige la resolución MÁS PEQUEÑA que cubra la pedida (no la mayor):
+        antes se escogía el mayor fichero ≥ preferred, así que un vídeo con
+        1080x1920 y 2160x4096 podía descargar el 4K — decodificarlo costaba
+        ~4x y agotaba el timeout de render de shorts (fix oct 2026). Igual que
+        Pixabay.
         """
         pw, ph = preferred
         best = None
+        best_area = None
 
         for vf in video_files:
             w = vf.get("width", 0)
@@ -297,15 +305,20 @@ class PexelsVideoProvider(BaseVideoProvider):
                 return vf  # exact match
 
             if w >= pw and h >= ph:
-                if best is None or w > best.get("width", 0):
+                area = w * h
+                if best is None or area < best_area:
                     best = vf
+                    best_area = area
 
         if best:
             return best
 
         # Fallback: highest resolution available
+        best_area = -1
         for vf in video_files:
-            if best is None or vf.get("width", 0) > best.get("width", 0):
+            area = vf.get("width", 0) * vf.get("height", 0)
+            if area > best_area:
                 best = vf
+                best_area = area
 
         return best
