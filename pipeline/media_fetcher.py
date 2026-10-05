@@ -406,6 +406,31 @@ class MediaFetcher:
                 query,
                 asset.get("path", "") or "",
             )
+            # Structured JSONL event (fail-open, no huge objects).
+            try:
+                from pipeline.observability import obs_event
+                try:
+                    _target_pct = float(self._media_strategy.get("target_video_time_pct", 80))
+                except (TypeError, ValueError, AttributeError):
+                    _target_pct = None
+                obs_event(
+                    "scene_asset_selected",
+                    scene_idx=scene_idx,
+                    tipo=scene.get("tipo", "?"),
+                    asset_type=asset.get("type", "unknown"),
+                    provider=asset.get("provider", asset.get("source", "")),
+                    width=asset.get("width"),
+                    height=asset.get("height"),
+                    resolution=asset.get("resolution"),
+                    quality_flag=asset.get("quality_flag"),
+                    score=score,
+                    reason=reason or "selected",
+                    query=query,
+                    fallback=bool(asset.get("type") in ("placeholder", "duplicate")),
+                    target_video_time_pct=_target_pct,
+                )
+            except Exception:
+                pass
         except Exception as exc:  # never let logging break the pipeline
             logger.debug("asset_decision log failed: %s", exc)
 
@@ -822,6 +847,23 @@ class MediaFetcher:
             self._media_strategy.get("video_scene_pct_max", 80),
             self._media_strategy.get("target_video_time_pct", 80),
         )
+        try:
+            from pipeline.observability import obs_event
+            obs_event(
+                "media_classification",
+                scenes=n_scenes,
+                video_priority=len(video_scenes),
+                stock_image_priority=len(stock_image_scenes),
+                ai_image=n_scenes - len(video_scenes) - len(stock_image_scenes),
+                max_absolute_videos=MAX_ABSOLUTE_VIDEOS,
+                hard_cap=hard_cap if hard_cap > 0 else None,
+                target_video_time_pct=self._media_strategy.get("target_video_time_pct", 80),
+                require_action_match=bool(
+                    self._media_strategy.get("require_action_match", False)
+                ),
+            )
+        except Exception:
+            pass
 
         # ── Phase 2: fetch per scene (tier-based) ──────────────
         results: list[dict] = [{} for _ in range(n_scenes)]
@@ -3437,10 +3479,14 @@ class MediaFetcher:
 
         # ── Dedup + defensive anachronism skip (keeps rank order) ──
         filtered: list[dict] = []
+        _dup_skipped = 0
+        _ana_skipped = 0
         for candidate in ordered:
             if self._is_asset_duplicate(candidate):
+                _dup_skipped += 1
                 continue
             if self._is_anachronistic_for_scene(candidate, ctx, scene_context):
+                _ana_skipped += 1
                 text = self._candidate_text(candidate)
                 logger.info(
                     "Skipping anachronistic candidate for historical scene: %s",
@@ -3472,6 +3518,34 @@ class MediaFetcher:
                 )
 
         ordered = filtered
+
+        # Structured observability (fail-open): top-N candidates, dedup and
+        # anachronism decisions for this scene. Cheap: no object serialisation.
+        try:
+            from pipeline.observability import obs_event
+            _top = []
+            for _cand in ordered[:5]:
+                if not isinstance(_cand, dict):
+                    continue
+                _top.append({
+                    "title": (self._candidate_text(_cand)[:80]
+                              or str(_cand.get("url", ""))[:60]),
+                    "provider": _cand.get("provider", _cand.get("source", "")),
+                    "type": _cand.get("type", ""),
+                })
+            obs_event(
+                "scene_candidates",
+                scene_idx=scene.get("scene_idx", getattr(self, "_current_scene_idx", None)),
+                query=(scene.get("search_query_en", "") or "")[:120],
+                raw_candidates=len(asset_candidates),
+                dedup_skipped=_dup_skipped,
+                anachronism_skipped=_ana_skipped,
+                kept=len(ordered),
+                require_action=bool(require_action),
+                top_candidates=_top,
+            )
+        except Exception:
+            pass
 
         # Optional LLM refinement (opt-in per channel via media strategy).
         # It may reorder, but only AFTER the deterministic unified score — and

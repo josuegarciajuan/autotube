@@ -53,7 +53,9 @@ async def lifespan(app: FastAPI):
             "innecesariamente. Debe ser False siempre. La recoleccion de stats "
             "solo se activa manualmente desde el dashboard."
         )
-    # ── File-based logging (adds FileHandler to root logger) ──
+    # ── File-based logging (adds RotatingFileHandler to root logger) ──
+    # Rotación por tamaño: evita que logs/api.log crezca sin límite (se
+    # observó un único archivo de 193 MB). 50 MB × 10 backups ≈ 550 MB techo.
     LOG_DIR = Path(__file__).parent.parent / "logs"
     LOG_DIR.mkdir(exist_ok=True)
     root_logger = logging.getLogger()
@@ -61,14 +63,21 @@ async def lifespan(app: FastAPI):
     if not any(isinstance(h, logging.FileHandler) and 
                str(LOG_DIR / "api.log") in getattr(h, 'baseFilename', '')
                for h in root_logger.handlers):
-        fh = logging.FileHandler(LOG_DIR / "api.log")
-        _formatter = logging.Formatter(
-            "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+        from pipeline.observability import build_api_log_handler
+        fh = build_api_log_handler(
+            LOG_DIR / "api.log", max_bytes=50 * 1024 * 1024, backup_count=10,
         )
-        _formatter.converter = time.gmtime  # UTC — same as DB CURRENT_TIMESTAMP
-        fh.setFormatter(_formatter)
         root_logger.addHandler(fh)
     logging.getLogger("autotube").info("File logging enabled → logs/api.log")
+
+    # ── Observabilidad estructurada (JSONL correlacionado) ──
+    try:
+        from pipeline.observability import setup_obs_logging
+        setup_obs_logging()
+    except Exception as _obs_exc:  # never block startup on logging
+        logging.getLogger("autotube").debug(
+            "obs logging setup skipped: %s", _obs_exc
+        )
     
     # ── Systemd watchdog ping ─────────────────────────────────
     # If running under systemd with WatchdogSec set, send periodic

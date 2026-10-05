@@ -611,3 +611,15 @@ UPLOAD_HEALTH_CHECKER_ENABLED = os.getenv("UPLOAD_HEALTH_CHECKER_ENABLED", "fals
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 LOG_FILE = LOGS_DIR / "autotube.log"
+
+# ── Observabilidad estructurada (oct 2026) ─────────────────────
+# Consumidos por ``pipeline/observability.py``. Prioridad de resolución:
+# variable de entorno > este valor > default del módulo. Todos tolerantes:
+# un valor inválido cae al default sin romper el arranque.
+OBS_LOG_ENABLED = os.getenv("OBS_LOG_ENABLED", "true").lower() == "true"
+OBS_LOG_LEVEL = os.getenv("OBS_LOG_LEVEL", "detail")
+OBS_LOG_DIR = os.getenv("OBS_LOG_DIR", "logs/obs")
+OBS_LOG_MAX_MB = int(os.getenv("OBS_LOG_MAX_MB", "50") or 50)
+OBS_LOG_BACKUPS = int(os.getenv("OBS_LOG_BACKUPS", "10") or 10)
+OBS_LOG_RETENTION_DAYS = int(os.getenv("OBS_LOG_RETENTION_DAYS", "14") or 14)
+OBS_LOG_SAMPLE_RATE = float(os.getenv("OBS_LOG_SAMPLE_RATE", "1.0") or 1.0)

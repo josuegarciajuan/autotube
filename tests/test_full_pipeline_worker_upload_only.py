@@ -165,7 +165,10 @@ def test_worker_cli_upload_only_test_mode_dispatches_expected_flags(monkeypatch)
     from api.services import full_pipeline_worker as worker
 
     captured = {}
-    monkeypatch.setattr(worker, "_setup_worker_logging", lambda job_id: logging.getLogger("test-worker"))
+    monkeypatch.setattr(
+        worker, "_setup_worker_logging",
+        lambda job_id, **kwargs: logging.getLogger("test-worker"),
+    )
     monkeypatch.setattr(worker, "run_job", lambda **kwargs: captured.update(kwargs) or True)
     monkeypatch.setattr(sys, "argv", [
         "full_pipeline_worker.py", "--job-id", "1", "--channel-id", "1",

@@ -3565,6 +3565,12 @@ def setup_logging():
     # Reduce noise from third-party libraries
     for lib in ["urllib3", "googleapiclient", "google.auth", "apscheduler", "PIL"]:
         logging.getLogger(lib).setLevel(logging.WARNING)
+    # Structured, correlated observability (JSONL). Fail-open: never blocks.
+    try:
+        from pipeline.observability import setup_obs_logging
+        setup_obs_logging()
+    except Exception:
+        pass
 
 
 def run_single(canal: str, skip_upload: bool = False):

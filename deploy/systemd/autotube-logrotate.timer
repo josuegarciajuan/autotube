@@ -1,0 +1,13 @@
+[Unit]
+Description=Ejecuta logrotate de Autotube cada hora (acota el crecimiento intradía)
+Requires=autotube-logrotate.service
+
+[Timer]
+# El logrotate del sistema es diario; esto acota el crecimiento dentro del día.
+# maxsize 50M en la config fuerza la rotación si un log crece rápido.
+OnCalendar=hourly
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

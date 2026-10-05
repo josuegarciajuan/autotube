@@ -1,0 +1,19 @@
+[Unit]
+Description=Autotube — rotación horaria de logs no gestionados en proceso
+Documentation=file:///root/autotube/deploy/logrotate/autotube
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+# No competir con un render/worker en curso.
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+# Solo nuestra config y con state file propio: no interfiere con el logrotate
+# global (/etc/logrotate.conf + /etc/logrotate.d/*) ni con su estado.
+# Excluye api.log y logs/obs/** porque los rota el propio proceso.
+ExecStart=/usr/sbin/logrotate --state /var/lib/logrotate/autotube.status /etc/logrotate.d/autotube
+
+[Install]
+WantedBy=multi-user.target
