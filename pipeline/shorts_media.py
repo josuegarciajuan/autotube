@@ -1385,13 +1385,18 @@ def render_short_hybrid(
 
     last_error = ""
     for attempt in range(2):
+        # El reintento duplica el presupuesto de tiempo: bajo carga concurrente
+        # el primer intento puede agotar el timeout estimado sin que el render
+        # esté realmente colgado (fix oct 2026: cancelaba slots por timeout).
+        attempt_timeout = render_timeout * (2 if attempt else 1)
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=render_timeout
+                cmd, capture_output=True, text=True, timeout=attempt_timeout
             )
         except subprocess.TimeoutExpired as exc:
-            last_error = f"timeout after {render_timeout}s"
-            logger.warning("FFmpeg hybrid render timeout (attempt %d/2)", attempt + 1)
+            last_error = f"timeout after {attempt_timeout}s"
+            logger.warning("FFmpeg hybrid render timeout (attempt %d/2, %ss)",
+                           attempt + 1, attempt_timeout)
             if attempt == 1:
                 raise RuntimeError(last_error) from exc
             continue
@@ -1414,14 +1419,15 @@ def render_short_hybrid(
 def render_timeout_seconds(audio_duration: float | None, asset_count: int) -> int:
     """Return a bounded timeout scaled to the actual short render workload.
 
-    Cap raised from 900s to 1500s (2026-08-31): under concurrent system load
-    (other projects sharing the machine), ffmpeg renders can legitimately take
-    longer than 15 min; the previous cap caused avoidable "render produced no
-    output file" failures and slot retries.
+    Cap raised 900→1500s (2026-08-31) and 1500→1800s (2026-10-05): under
+    concurrent system load (other projects sharing the machine), ffmpeg renders
+    can legitimately take longer; the previous estimate caused "timeout after
+    ~500s" failures and slot cancellations. The render loop also DOUBLES the
+    timeout on the retry attempt.
     """
     duration = max(float(audio_duration or 20.0), 1.0)
     assets = max(int(asset_count or 1), 1)
-    return min(1500, max(180, int(120 + duration * 7 + assets * 12)))
+    return min(1800, max(240, int(240 + duration * 9 + assets * 15)))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
