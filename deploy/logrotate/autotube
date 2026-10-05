@@ -1,0 +1,75 @@
+# /etc/logrotate.d/autotube — rotación de los logs de Autotube que NO rotan
+# en proceso. Instalado por scripts/setup_log_retention.sh.
+#
+# ¿POR QUÉ EXISTE ESTE FICHERO?
+#   El logrotate del sistema (logrotate.timer) corre solo 1 vez/día. Los workers
+#   generan cientos de MB/día, así que autotube-logrotate.timer ejecuta logrotate
+#   CADA HORA con esta config y un state file propio
+#   (/var/lib/logrotate/autotube.status) para acotar el crecimiento dentro del
+#   día sin tocar el estado global de logrotate.
+#
+#   Nota: /etc/logrotate.conf incluye /etc/logrotate.d, así que el logrotate
+#   diario del sistema también procesará este fichero (con su propio estado).
+#   Es redundante pero inocuo: como máximo rota un poco más a menudo; el tope
+#   de 14 backups lo aplica igualmente cada ejecución. Lo que NO se duplica es
+#   la rotación en proceso de api.log / logs/obs/** (excluidos aquí).
+#
+# QUÉ ROTA AQUÍ (estos ficheros NO tienen rotación en proceso):
+#   worker_*.log              logging.FileHandler por job long-form
+#   shorts_worker_*.log       stdout redirigido del shorts_worker (subprocess)
+#   autotube.log              logger de orchestrator/main (LOG_FILE)
+#   scheduled_publishing.log  scheduled_publish_logger
+#   view_gap_monitor.log      view_gap_monitor
+#   dist_run_*.log            run_distributed_video
+#   test_*.log                pruebas puntuales
+#   cleanup_*.log             tareas de limpieza
+#   dup_cleanup_*.log         scheduled_dup_cleanup.sh (familia cleanup)
+#   ia_backfill*.log          backfill del marcado de contenido IA
+#   alerts_fallback.log       lifecycle_monitor (alertas si falla el envío)
+#
+# QUÉ **NO** ROTA ESTE FICHERO (lo rota el propio proceso; NO incluirlo aquí):
+#   api.log       RotatingFileHandler 50MB x10      (api/main.py)
+#   logs/obs/**   TimedRotatingFileHandler, backupCount=10 (pipeline/observability.py)
+#   Rotarlos por fuera duplicaría la rotación en proceso y descuadraría la
+#   numeración de backups. Por eso NO se usa el glob amplio logs/*.log.
+#
+# DIRECTIVAS CLAVE:
+#   copytruncate  workers/uvicorn mantienen el FD abierto. Sin copytruncate
+#                 seguirían escribiendo en el inodo antiguo (log huérfano).
+#                 Riesgo asumido: pueden perderse las líneas escritas entre el
+#                 copiado y el truncado (aceptable en logs de operación).
+#   maxsize 50M   el timer es horario; con `daily` no rotaría más de 1 vez/día,
+#                 así que maxsize fuerza la rotación al cruzar 50MB.
+#   delaycompress comprime en la pasada siguiente (menos I/O por ejecución).
+#   su root root  los ficheros son de root; evita el check de permisos.
+#
+# VERIFICACIÓN:
+#   /usr/sbin/logrotate -d /etc/logrotate.d/autotube       # dry-run, no toca nada
+#   systemctl status autotube-logrotate.timer
+#   systemctl list-timers autotube-logrotate.timer
+#   journalctl -u autotube-logrotate.service -n 50
+#   ls -lah /root/autotube/logs/ | grep -E '\.(gz|1)$'
+
+/root/autotube/logs/worker_*.log
+/root/autotube/logs/shorts_worker_*.log
+/root/autotube/logs/autotube.log
+/root/autotube/logs/scheduled_publishing.log
+/root/autotube/logs/view_gap_monitor.log
+/root/autotube/logs/dist_run_*.log
+/root/autotube/logs/test_*.log
+/root/autotube/logs/cleanup_*.log
+/root/autotube/logs/dup_cleanup_*.log
+/root/autotube/logs/ia_backfill*.log
+/root/autotube/logs/alerts_fallback.log
+{
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    maxsize 50M
+    copytruncate
+    sharedscripts
+    su root root
+}
