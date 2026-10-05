@@ -397,12 +397,35 @@ class VisualObservation:
     resolution_ok: bool = True
     width: int = 0
     rejected: bool = False
+    # Normalised rejection category for aggregated alerting:
+    # ``"logo"``, ``"low_res"``, ``"error"`` or ``""`` (not rejected).
+    # ``reason`` keeps the human-readable detail; this field is the stable key
+    # used to aggregate counts per video without changing accept/reject logic.
+    reject_reason: str = ""
     reason: str = ""
     error: str | None = None
     model_result: Any = None
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def _reject_category(obs: "VisualObservation") -> str:
+    """Return a stable category for a rejected observation (never raises)."""
+    try:
+        value = str(getattr(obs, "reject_reason", "") or "").strip().lower()
+        if value:
+            return value
+        reason = str(getattr(obs, "reason", "") or "").strip().lower()
+        if reason.startswith("logo"):
+            return "logo"
+        if reason.startswith("low_res"):
+            return "low_res"
+        if getattr(obs, "error", None):
+            return "error"
+        return reason or "unknown"
+    except Exception:  # pragma: no cover - defensive
+        return "unknown"
 
 
 def verify_asset(
@@ -491,9 +514,11 @@ def verify_asset(
         if mode == "enforce":
             if obs.logo_suspected:
                 obs.rejected = True
+                obs.reject_reason = "logo"
                 obs.reason = "logo_overlay:" + ",".join(obs.logo_corners)
             elif not obs.resolution_ok:
                 obs.rejected = True
+                obs.reject_reason = "low_res"
                 obs.reason = f"low_resolution:{obs.width}px"
             elif obs.sharpness is not None and not obs.sharpness_ok:
                 # Advisory only — the proxy is too noisy to reject on.
@@ -501,6 +526,9 @@ def verify_asset(
     except Exception as exc:  # noqa: BLE001
         obs.error = str(exc)
         obs.rejected = False
+        # Fail-open keeps the asset, but the failure mode is tagged so the
+        # per-video alerting can distinguish errors from clean verifications.
+        obs.reject_reason = "error"
         logger.debug("visual verify failed (fail-open): %s", exc)
     finally:
         if tmp_dir is not None:
@@ -524,6 +552,7 @@ def verify_asset(
             width=obs.width,
             resolution_ok=obs.resolution_ok,
             rejected=obs.rejected,
+            reject_reason=obs.reject_reason,
             reason=obs.reason,
             error=obs.error,
         )
@@ -566,6 +595,10 @@ class CandidateGate:
         self.attempts = 0
         self.observations: list[VisualObservation] = []
         self.accepted_path: str | None = None
+        # Aggregated counters for per-video alerting (never affect semantics).
+        self.rejected_count = 0
+        self.accepted_count = 0
+        self.rejected_reasons: dict[str, int] = {}
 
     def consider(self, asset: dict, scene_context: Any = None) -> bool:
         if self.mode == "off" or not isinstance(asset, dict):
@@ -596,9 +629,13 @@ class CandidateGate:
         if obs is None:
             return True
         if obs.rejected and self.mode == "enforce":
+            self.rejected_count += 1
+            category = _reject_category(obs)
+            self.rejected_reasons[category] = self.rejected_reasons.get(category, 0) + 1
             return False
         if obs.path:
             self.accepted_path = obs.path
+        self.accepted_count += 1
         return True
 
 

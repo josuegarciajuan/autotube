@@ -368,6 +368,56 @@ def validate_channel_config(slug: str, config: Dict[str, Any]) -> List[str]:
             )
             config["VISUAL_VERIFY_MAX_CANDIDATES"] = 1
 
+    # ── Fase 4b: visual verifier alerting flags (tolerant) ────
+    # `VISUAL_VERIFY_ALERT_REJECT_RATIO` must be 0.0-1.0; out-of-range or
+    # non-numeric values are clamped/forced back to the safe default.
+    if "VISUAL_VERIFY_ALERT_REJECT_RATIO" in config:
+        alert_ratio_default = 0.5
+        val = config.get("VISUAL_VERIFY_ALERT_REJECT_RATIO")
+        if isinstance(val, bool) or not isinstance(val, (int, float)):
+            warnings.append(
+                f"[{slug}] VISUAL_VERIFY_ALERT_REJECT_RATIO={val!r} "
+                f"is not numeric — forcing {alert_ratio_default}"
+            )
+            config["VISUAL_VERIFY_ALERT_REJECT_RATIO"] = alert_ratio_default
+        else:
+            fval = float(val)
+            if fval < 0.0 or fval > 1.0:
+                clamped = min(1.0, max(0.0, fval))
+                warnings.append(
+                    f"[{slug}] VISUAL_VERIFY_ALERT_REJECT_RATIO={fval} out of "
+                    f"[0.0, 1.0] — clamping to {clamped}"
+                )
+                config["VISUAL_VERIFY_ALERT_REJECT_RATIO"] = clamped
+
+    # `VISUAL_VERIFY_ALERT_MIN_CANDIDATES` must be a non-negative integer.
+    if "VISUAL_VERIFY_ALERT_MIN_CANDIDATES" in config:
+        alert_min_default = 5
+        val = config.get("VISUAL_VERIFY_ALERT_MIN_CANDIDATES")
+        if isinstance(val, bool) or not isinstance(val, (int, float)):
+            warnings.append(
+                f"[{slug}] VISUAL_VERIFY_ALERT_MIN_CANDIDATES={val!r} "
+                f"is not an integer — forcing {alert_min_default}"
+            )
+            config["VISUAL_VERIFY_ALERT_MIN_CANDIDATES"] = alert_min_default
+        elif int(val) < 0:
+            warnings.append(
+                f"[{slug}] VISUAL_VERIFY_ALERT_MIN_CANDIDATES={val!r} < 0 — forcing 0"
+            )
+            config["VISUAL_VERIFY_ALERT_MIN_CANDIDATES"] = 0
+
+    # Tolerant booleans: any non-bool falls back to the safe default (True).
+    for bool_param in (
+        "VISUAL_VERIFY_ALERT_ENABLED",
+        "VISUAL_VERIFY_ALERT_SCENE_ALL_FAILED",
+    ):
+        if bool_param in config and not isinstance(config.get(bool_param), bool):
+            warnings.append(
+                f"[{slug}] {bool_param}={config.get(bool_param)!r} "
+                f"is not boolean — forcing True"
+            )
+            config[bool_param] = True
+
     # ── Top-level feature flags: tolerant, default True ────────
     # `ASSET_DECISION_LOG_ENABLED` controls the structured per-scene log.
     if "ASSET_DECISION_LOG_ENABLED" in config:
@@ -444,7 +494,7 @@ def validate_channel_config(slug: str, config: Dict[str, Any]) -> List[str]:
         else:
             config["OBS_LOG_LEVEL"] = level
 
-    for obs_bool in ("OBS_LOG_ENABLED",):
+    for obs_bool in ("OBS_LOG_ENABLED", "OBS_ERROR_ALERTS_ENABLED"):
         if obs_bool in config:
             val = config.get(obs_bool)
             if not isinstance(val, bool):
@@ -487,6 +537,54 @@ def validate_channel_config(slug: str, config: Dict[str, Any]) -> List[str]:
                 config["OBS_LOG_SAMPLE_RATE"] = clamped
             else:
                 config["OBS_LOG_SAMPLE_RATE"] = rate
+
+    # ── Alertas de error agregadas (tolerant, never break configs) ──
+    # `OBS_ERROR_ALERTS_MIN_LEVEL` is a logging-level enum; malformed values
+    # fall back to "error". `OBS_ERROR_ALERT_IGNORE` is coerced to a list of
+    # lowercased non-empty strings. Integers must be >= their minimum.
+    _OBS_ERR_LEVELS = ("debug", "info", "warning", "error", "critical")
+    if "OBS_ERROR_ALERTS_MIN_LEVEL" in config:
+        val = config.get("OBS_ERROR_ALERTS_MIN_LEVEL")
+        level = val.strip().lower() if isinstance(val, str) else ""
+        if level not in _OBS_ERR_LEVELS:
+            warnings.append(
+                f"[{slug}] OBS_ERROR_ALERTS_MIN_LEVEL={val!r} is not one of "
+                f"{_OBS_ERR_LEVELS} — forcing 'error'"
+            )
+            config["OBS_ERROR_ALERTS_MIN_LEVEL"] = "error"
+        else:
+            config["OBS_ERROR_ALERTS_MIN_LEVEL"] = level
+
+    for obs_int, obs_default, obs_min in (
+        ("OBS_ERROR_ALERT_COOLDOWN_MIN", 30, 0),
+        ("OBS_ERROR_ALERT_QUEUE_SIZE", 500, 1),
+    ):
+        if obs_int in config:
+            val = config.get(obs_int)
+            if isinstance(val, bool) or not isinstance(val, (int, float)) or int(val) < obs_min:
+                warnings.append(
+                    f"[{slug}] {obs_int}={val!r} is not an integer >= {obs_min} "
+                    f"— forcing {obs_default}"
+                )
+                config[obs_int] = obs_default
+            else:
+                config[obs_int] = int(val)
+
+    if "OBS_ERROR_ALERT_IGNORE" in config:
+        val = config.get("OBS_ERROR_ALERT_IGNORE")
+        try:
+            if isinstance(val, str):
+                items = [p.strip().lower() for p in val.replace(";", ",").split(",")]
+            elif isinstance(val, (list, tuple, set, frozenset)):
+                items = [str(p).strip().lower() for p in val]
+            else:
+                items = []
+            config["OBS_ERROR_ALERT_IGNORE"] = [p for p in items if p]
+        except Exception:
+            warnings.append(
+                f"[{slug}] OBS_ERROR_ALERT_IGNORE={val!r} is malformed — forcing []"
+            )
+            config["OBS_ERROR_ALERT_IGNORE"] = []
 
     # ── Log results ────────────────────────────────────────────
     if warnings:

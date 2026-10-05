@@ -398,6 +398,23 @@ OBS_LOG_RETENTION_DAYS = 14
 # 0.0 = descarta eventos de escena; 1.0 = todos. Solo aplica en detail/trace.
 OBS_LOG_SAMPLE_RATE = 1.0
 
+# ── Alertas de error agregadas (oct 2026) ──────────────────────────
+# Cualquier record ERROR+ de todo el sistema y las excepciones no capturadas
+# se convierten en UNA alerta crítica agregada por (tipo/entidad) con contador,
+# en vez de una alerta por incidente. Independiente de OBS_LOG_ENABLED/LEVEL:
+# apagar el detalle fino NO silencia los errores. El kill-switch total es
+# OBS_ERROR_ALERTS_ENABLED=False.
+OBS_ERROR_ALERTS_ENABLED = True
+# debug | info | warning | error | critical (record level mínimo a alertar).
+OBS_ERROR_ALERTS_MIN_LEVEL = "error"
+# Minutos de cooldown in-process por clave antes de reescribir en la DB.
+# El contador se sigue acumulando y se refleja en la siguiente escritura.
+OBS_ERROR_ALERT_COOLDOWN_MIN = 30
+# Substrings case-insensitive contra logger.name + mensaje: si casan, no alerta.
+OBS_ERROR_ALERT_IGNORE = []
+# Tamaño de la cola acotada del handler (si se llena, descarta y cuenta).
+OBS_ERROR_ALERT_QUEUE_SIZE = 500
+
 # Fase 2 (calidad-coherencia): editorial review of generated scripts.
 # ON by default (oct 2026): generate_v2 attempts at most
 # SCRIPT_EDITORIAL_REVIEW_MAX_CALLS repair passes and keeps the ORIGINAL
@@ -428,6 +445,18 @@ VISUAL_VERIFY_MODE = "enforce"
 # Máximo de candidatos verificados por escena en modo "enforce". Al agotar
 # el presupuesto se acepta el siguiente candidato sin verificar (fail-open).
 VISUAL_VERIFY_MAX_CANDIDATES = 3
+# ── Fase 4b: alertas agregadas de sobre-rechazo visual ──────────────
+# Cuando "enforce" descarta una fracción alta de candidatos (o deja escenas
+# sin asset), se emite UNA alerta crítica agregada por vídeo con metadata
+# suficiente para estudiarlo. Solo observabilidad: no cambia la semántica de
+# aceptación/rechazo ni el presupuesto ni el fail-open del verificador.
+VISUAL_VERIFY_ALERT_ENABLED = True
+# Fracción mínima de rechazos sobre candidatos verificados para alertar.
+VISUAL_VERIFY_ALERT_REJECT_RATIO = 0.5
+# Mínimo de candidatos verificados para considerar la ratio representativa.
+VISUAL_VERIFY_ALERT_MIN_CANDIDATES = 5
+# Alerta específica si una escena se queda sin asset tras los descartes.
+VISUAL_VERIFY_ALERT_SCENE_ALL_FAILED = True
 
 MEDIA_STRATEGY = {
     # ── Existing ────────────────────────────────────────────────

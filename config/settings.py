@@ -623,3 +623,14 @@ OBS_LOG_MAX_MB = int(os.getenv("OBS_LOG_MAX_MB", "50") or 50)
 OBS_LOG_BACKUPS = int(os.getenv("OBS_LOG_BACKUPS", "10") or 10)
 OBS_LOG_RETENTION_DAYS = int(os.getenv("OBS_LOG_RETENTION_DAYS", "14") or 14)
 OBS_LOG_SAMPLE_RATE = float(os.getenv("OBS_LOG_SAMPLE_RATE", "1.0") or 1.0)
+
+# ── Alertas de error agregadas (oct 2026) ──────────────────────
+# Consumidos por ``pipeline/observability.py``. Independientes de OBS_LOG_*:
+# los errores alertan aunque el detalle de observabilidad esté apagado.
+OBS_ERROR_ALERTS_ENABLED = os.getenv("OBS_ERROR_ALERTS_ENABLED", "true").lower() == "true"
+OBS_ERROR_ALERTS_MIN_LEVEL = os.getenv("OBS_ERROR_ALERTS_MIN_LEVEL", "error")
+OBS_ERROR_ALERT_COOLDOWN_MIN = int(os.getenv("OBS_ERROR_ALERT_COOLDOWN_MIN", "30") or 30)
+OBS_ERROR_ALERT_IGNORE = [
+    p.strip() for p in os.getenv("OBS_ERROR_ALERT_IGNORE", "").split(",") if p.strip()
+]
+OBS_ERROR_ALERT_QUEUE_SIZE = int(os.getenv("OBS_ERROR_ALERT_QUEUE_SIZE", "500") or 500)
