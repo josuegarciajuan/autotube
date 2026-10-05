@@ -139,3 +139,40 @@ def test_exhaustive_candidate_selection_uses_narration_to_rank_matches():
     result = fetcher._try_download_best_candidate(candidates, object(), scene, ThemeContext())
 
     assert result["path"] == "archivist examining documents"
+
+
+# ── Fase 4a: action staging from narration ──────────────────────────
+
+class TestBuildSceneBriefActions:
+    """Narrated actions become observable staging while keeping the era."""
+
+    def test_open_book_action(self):
+        brief = build_scene_brief("the monk opens the ancient book", theme_ctx=_ctx())
+        assert "opening an old book" in brief
+
+    def test_enter_door_action(self):
+        brief = build_scene_brief("the messenger enters the temple", theme_ctx=_ctx())
+        assert "entering through a doorway" in brief
+
+    def test_build_action(self):
+        brief = build_scene_brief("workers build a stone monument", theme_ctx=_ctx())
+        assert "constructing a stone structure" in brief
+
+    def test_dig_action(self):
+        brief = build_scene_brief("archaeologists dig at the ancient site", theme_ctx=_ctx())
+        assert "excavating with hand tools" in brief
+
+    def test_horse_crossing_keeps_action_and_era(self):
+        ctx = _ctx(era="17th century", era_decade="17th century")
+        brief = build_scene_brief("the rider crosses the river", theme_ctx=ctx)
+        assert "crossing open terrain" in brief
+
+    def test_no_clear_action_keeps_current_behavior(self):
+        brief = build_scene_brief("a quiet abstract reflection", base_query="calm mood")
+        assert brief == "calm mood"
+
+    def test_no_action_branch_invents_nothing(self):
+        # A pure noun label must not become an invented action.
+        brief = build_scene_brief("", base_query="ancient temple columns")
+        assert "crossing" not in brief and "entering" not in brief
+        assert "ancient temple columns" in brief

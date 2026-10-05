@@ -1122,3 +1122,95 @@ class TestAssetDecisionRecord:
         )
         assert not [r for r in caplog.records if "asset_decision" in r.getMessage()]
 
+
+# ── Fase 4a (calidad-coherencia): query pool + fallback ladder ──────
+
+class TestActionAwareQueryPool:
+    """The pool starts with the action-exact query and never drops the action
+    while action variants remain (explicit fallback ladder)."""
+
+    def _fetcher(self, **strategy):
+        from pipeline.media_fetcher import MediaFetcher
+
+        f = MediaFetcher.__new__(MediaFetcher)
+        base = {
+            "era_anchor_enabled": True,
+            "fallback_queries": [],
+            "action_scene_boost": True,
+            "require_action_match": False,
+            "max_generic_fallback_pct": 20,
+        }
+        base.update(strategy)
+        f._media_strategy = base
+        f._config = {}
+        return f
+
+    def test_action_query_precedes_generic_fallbacks(self):
+        from pipeline.theme_extractor import ThemeContext
+
+        f = self._fetcher()
+        scene = {
+            "search_query_en": "archaeologist excavating tomb",
+            "texto": "The archaeologist excavates the ancient tomb.",
+            "tipo": "desarrollo",
+        }
+        ctx = ThemeContext(era="presente", era_decade="")
+        pool = f._build_query_pool(scene, ctx, scene_idx=0)
+
+        assert pool
+        # First variant is action-exact (contains the narrated action).
+        assert "excavat" in pool[0].lower()
+
+    def test_no_generic_before_action_variants(self):
+        from pipeline.cinematic_staging import classify_query_tier
+        from pipeline.theme_extractor import ThemeContext
+
+        f = self._fetcher()
+        scene = {
+            "search_query_en": "sailors sailing storm",
+            "texto": "The sailors sail through the storm.",
+            "tipo": "desarrollo",
+        }
+        ctx = ThemeContext(era="presente", era_decade="")
+        pool = f._build_query_pool(scene, ctx, scene_idx=0)
+
+        # Once a generic tier appears, no action-tier query may follow it.
+        seen_generic = False
+        for query in pool:
+            tier = classify_query_tier(query, None)
+            if tier in ("context", "symbolic"):
+                seen_generic = True
+            elif seen_generic and tier in ("action_exact", "action_compatible"):
+                pytest.fail(f"action query after generic tier: {query!r}")
+
+    def test_ladder_helper_orders_tiers(self):
+        from pipeline.cinematic_staging import build_fallback_ladder
+
+        ladder = build_fallback_ladder({
+            "symbolic": ["symbolic motif"],
+            "context": ["context establishing"],
+            "action_compatible": ["compatible action"],
+            "action_exact": ["exact action"],
+        })
+        assert ladder == [
+            "exact action", "compatible action", "context establishing", "symbolic motif",
+        ]
+
+    def test_bool_and_pct_config_tolerant(self):
+        """Config coercion must never break a channel (validator)."""
+        from config.config_validator import validate_channel_config
+
+        config = {
+            "MEDIA_STRATEGY": {
+                "action_scene_boost": "yes",       # not bool → True
+                "require_action_match": 1,          # not bool → False
+                "max_generic_fallback_pct": 250,    # out of range → 20
+            },
+        }
+        validate_channel_config("test_slug", config)
+        media = config["MEDIA_STRATEGY"]
+        assert media["action_scene_boost"] is True
+        assert media["require_action_match"] is False
+        assert media["max_generic_fallback_pct"] == 20.0
+
+
