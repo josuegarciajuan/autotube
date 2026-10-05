@@ -21,6 +21,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 import zlib
 from pathlib import Path
@@ -211,7 +212,14 @@ class DistributedOrchestrator(PipelineOrchestrator):
             req={"cores": params["threads"], "memMb": params["memMb"]},
         )
         logger.info("[%s] ai-image exec=%s (%d escenas)", self.canal, eid, n_scenes)
-        timeout = float(os.environ.get("AUTOTUBE_DIST_SD_TIMEOUT_SEC", "3600") or 3600)
+        # La espera debe cubrir TODAS las imágenes (se reparten de forma
+        # concurrente). Ceiling generoso; `wait` retorna al acabar. Se puede
+        # fijar explícitamente con AUTOTUBE_DIST_SD_TIMEOUT_SEC.
+        _ceiling = float(os.environ.get("AUTOTUBE_DIST_SD_TIMEOUT_SEC", "0") or 0)
+        if _ceiling <= 0:
+            _per_img = float(os.environ.get("AUTOTUBE_DIST_SD_PER_IMAGE_SEC", "600") or 600)
+            _ceiling = max(1800.0, n_scenes * _per_img)
+        timeout = _ceiling
 
         def _progress(summary: dict) -> None:
             p = (summary or {}).get("progress") or {}
@@ -221,8 +229,9 @@ class DistributedOrchestrator(PipelineOrchestrator):
                 f"Imágenes IA en la flota: {acc}/{n_scenes}",
             )
 
-        summary = dsl_client.wait(
-            eid, timeout=timeout + 120.0, poll=2.0, progress_cb=_progress,
+        summary = self._wait_dist_stall_aware(
+            eid, timeout, _progress,
+            stall_sec=float(os.environ.get("AUTOTUBE_DIST_SD_STALL_SEC", "900") or 900),
         )
         if summary.get("status") != "done":
             raise ScenePlanError(
@@ -255,6 +264,48 @@ class DistributedOrchestrator(PipelineOrchestrator):
         logger.info("[%s] ai-image OK: %d imágenes en caché (%s)",
                     self.canal, len(cache_by_hash), cache_root)
         return cache_by_hash
+
+    def _wait_dist_stall_aware(self, eid: str, timeout: float,
+                               progress_cb=None, stall_sec: float = 900.0) -> dict:
+        """Espera una ejecución distribuida con guardia de estancamiento.
+
+        A diferencia de ``dsl_client.wait``, si no hay progreso real (ninguna
+        unidad en vuelo ni aceptada) durante ``stall_sec``, cancela la ejecución
+        y lanza: evita colgar el vídeo cuando no existe un nodo elegible para la
+        definición. El progreso se considera vivo mientras haya unidades
+        ``inflight`` (una imagen puede tardar minutos sin aceptar aún).
+        """
+        deadline = time.time() + float(timeout)
+        last_progress = time.time()
+        last_accepted = -1
+        last = None
+        while time.time() < deadline:
+            st = dsl_client.status(eid)
+            if st is not None:
+                if progress_cb is not None:
+                    try:
+                        progress_cb(st)
+                    except Exception:  # noqa: BLE001 — el progreso nunca rompe
+                        pass
+                last = st
+                if st.get("status") in dsl_client.TERMINAL:
+                    return st
+                p = st.get("progress") or {}
+                inflight = int(p.get("inflight") or 0)
+                accepted = int(p.get("accepted") or 0)
+                pending = int(p.get("pending") or 0)
+                if inflight > 0 or accepted > last_accepted:
+                    last_progress = time.time()
+                    last_accepted = accepted
+                elif pending > 0 and (time.time() - last_progress) > stall_sec:
+                    dsl_client.cancel(eid)
+                    raise ScenePlanError(
+                        f"ai-image sin progreso {stall_sec:.0f}s "
+                        f"(inflight=0, pending={pending}); cancelado"
+                    )
+            time.sleep(2.0)
+        dsl_client.cancel(eid)
+        raise ScenePlanError(f"ai-image timeout {timeout:.0f}s; cancelado")
 
     # ── Render v2: mismo código, estado congelado, todo-o-nada ──────────────
     @staticmethod
