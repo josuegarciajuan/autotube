@@ -286,3 +286,36 @@ def test_worker_dispatch_clip_passes_source(monkeypatch):
     )
     assert sw._dispatch(_args(clip=True, source_video_id=2478)) == 99
     assert seen["source_video_id"] == 2478
+
+
+# ═══════════════════════════════════════════════════════════════
+# short_dispatch_failed — rechazos intencionales no alertan
+# ═══════════════════════════════════════════════════════════════
+
+def test_intentional_short_rejections_detected():
+    import api.services.shorts_scheduler as ss
+
+    assert ss._is_intentional_short_rejection(
+        "contenido no seguro: tema bloqueado por categoría 'true_crime' (patrón: 'hallaron')")
+    assert ss._is_intentional_short_rejection("tema ya consumido")
+    assert ss._is_intentional_short_rejection("título similar a short #1654 '...'")
+    assert ss._is_intentional_short_rejection(
+        "TTS falló: Short audio too long: 60.1s exceeds maximum 58.0")
+
+
+def test_real_short_failures_still_alert():
+    import api.services.shorts_scheduler as ss
+
+    assert not ss._is_intentional_short_rejection("render híbrido falló: timeout after 476s")
+    assert not ss._is_intentional_short_rejection("render híbrido falló: ffmpeg failed: ...")
+    assert not ss._is_intentional_short_rejection("")
+
+
+def test_alert_short_dispatch_failed_skips_intentional(monkeypatch):
+    import api.services.shorts_scheduler as ss
+    import api.services.lifecycle_monitor as lm
+
+    called = {"n": 0}
+    monkeypatch.setattr(lm, "create_alert", lambda *a, **k: called.__setitem__("n", called["n"] + 1))
+    ss._alert_short_dispatch_failed(1, 3, "tema ya consumido")
+    assert called["n"] == 0
