@@ -116,14 +116,15 @@ _BLOCK_PATTERNS: dict[str, list[str]] = {
         # Datos ago 2026: canal4/canal5 eliminaron "guerrilla asesinó",
         # "129 hombres desaparecieron", "5 perdidos y NUNCA regresaron",
         # "lo hallaron en el granero". Este nicho alimenta el flag de spam.
-        # "asesin" se movió a _CONTEXT_REQUIRED_PATTERNS: en contextos
-        # históricos/documentales ("asesinato de Daniel Tupý") no es spam.
-        # "hallaron"/"sin rastro" también pasan a contexto-requerido: son
-        # verbos/locuciones corrientes en expediciones y arqueología
-        # ("hallaron los restos del naufragio"), pero siguen bloqueando si
-        # co-ocurre un marcador criminal real (desapareci/víctima/arma...).
-        "desapareci", "secuestr",
-        "nunca regres", "cadaver", "encontrado muerto", "encontrado sin vida",
+        # NOTA (oct 2026): los términos de DESAPARICIÓN ("desapareci",
+        # "sin rastro", "hallaron", "nunca regres") se movieron a
+        # _CONTEXT_REQUIRED_PATTERNS: canal4 ("Expediciones sin retorno") tiene
+        # como nicho legítimo las desapariciones, y el bloqueo duro inaniciaba
+        # el canal (guiones válidos rechazados por usar su propio vocabulario).
+        # "asesin" ya estaba en contexto-requerido ("asesinato de Daniel Tupý"
+        # es documental histórico). Solo se mantiene duro lo inequívocamente
+        # criminal/exploitativo, sin ambigüedad documental.
+        "secuestr", "cadaver", "encontrado muerto", "encontrado sin vida",
         "homicid", "estrangul", "enterrado vivo", "tortura",
     ],
     "sobrenatural_como_real": [
@@ -155,6 +156,23 @@ _RISK_CONTEXT_MARKERS: tuple[str, ...] = (
     "cartel", "mafia", "narcotraf", "banda criminal",
 )
 
+# Marcadores que activan los patrones de ``true_crime`` en contexto-requerido.
+# Excluye "desapareci"/"desaparicion" (son el propio patrón a evaluar: si se
+# incluyeran, el patrón se auto-satisfaría y volvería a ser bloqueo duro) y
+# "asesin" (ídem para el patrón "asesin").
+_CRIME_CONTEXT_MARKERS: tuple[str, ...] = tuple(
+    m for m in _RISK_CONTEXT_MARKERS
+    if m not in ("desapareci", "desaparicion", "asesin")
+)
+
+# Marcadores por categoría para el tier 2. ``menores`` conserva la lista
+# completa (incluye desaparición: un menor desaparecido es child-safety);
+# ``true_crime`` usa la lista sin auto-satisfacción.
+_CONTEXT_MARKERS_BY_CATEGORY: dict[str, tuple[str, ...]] = {
+    "true_crime": _CRIME_CONTEXT_MARKERS,
+    "menores": _RISK_CONTEXT_MARKERS,
+}
+
 # ── Patrones que SOLO bloquean con contexto adverso ────────────────
 # Sustantivos neutros del nicho médico/histórico (p. ej. "recién nacido"
 # en un documental de síndromes raros) NO deben inanicionar el canal.
@@ -168,6 +186,10 @@ _CONTEXT_REQUIRED_PATTERNS: dict[str, list[str]] = {
     ],
     "true_crime": [
         "asesin", "hallaron", "sin rastro",
+        # Desaparición: canal4 ("Expediciones sin retorno") tiene este
+        # vocabulario como nicho legítimo. Solo bloquea con marcador criminal
+        # real (ver _CRIME_CONTEXT_MARKERS; no se auto-satisface).
+        "desapareci", "nunca regres",
     ],
 }
 
@@ -186,30 +208,36 @@ def _normalize(text: str) -> str:
     return text
 
 
-def _deterministic_check(texts: list[str]) -> SafetyVerdict | None:
+def _deterministic_check(texts: list[str], title_texts: list[str] | None = None) -> SafetyVerdict | None:
     """Return a FLAGGED verdict on first deterministic match, else None.
 
     Two-tier check:
       1. Hard patterns (_BLOCK_PATTERNS): always block.
       2. Context-required patterns (_CONTEXT_REQUIRED_PATTERNS): only block
-         if a _RISK_CONTEXT_MARKERS term co-occurs in the same text.
+         if a risk marker co-occurs in the same text.
+
+    ``title_texts``: fragmentos de packaging (título). El clickbait de alto
+    riesgo SOLO se evalúa aquí, nunca en el cuerpo del guion: "imposible" o
+    "increíble" en la narración es vocabulario normal y lo corrige la capa de
+    packaging; tirar el vídeo entero por eso inaniciaba canales (canal5).
     """
     joined = _normalize(" ".join(t for t in texts if t))
     if not joined:
         return None
+    title_joined = _normalize(" ".join(t for t in (title_texts or []) if t))
     for category, patterns in _BLOCK_PATTERNS.items():
-        # Clickbait: un único marcador ("imposible", "increíble") es vocabulario
-        # normal y NO debe tirar el vídeo entero — la capa de packaging ya reescribe
-        # esos títulos. Solo bloqueamos por contenido cuando se ACUMULAN >=2
-        # marcadores distintos (señal fuerte de clickbait de alto riesgo).
+        # Clickbait: solo en el título y solo cuando se ACUMULAN >=2 marcadores
+        # distintos (señal fuerte de clickbait de alto riesgo). Un único marcador
+        # en el cuerpo no debe tirar el vídeo.
         if category == "clickbait_riesgo":
-            matched = [p for p in patterns if _normalize(p) in joined]
+            scope = title_joined or joined
+            matched = [p for p in patterns if _normalize(p) in scope]
             if len(matched) >= 2:
                 return SafetyVerdict(
                     safe=False,
                     reason=(
                         "tema bloqueado por categoría 'clickbait_riesgo' "
-                        f"(marcadores: {', '.join(matched[:3])})"
+                        f"(marcadores en título: {', '.join(matched[:3])})"
                     ),
                     categories=[category],
                     source="deterministic",
@@ -224,19 +252,21 @@ def _deterministic_check(texts: list[str]) -> SafetyVerdict | None:
                     source="deterministic",
                 )
     # ── Tier 2: contexto-requerido ──
-    if any(_normalize(m) in joined for m in _RISK_CONTEXT_MARKERS):
-        for category, patterns in _CONTEXT_REQUIRED_PATTERNS.items():
-            for pat in patterns:
-                if _normalize(pat) in joined:
-                    return SafetyVerdict(
-                        safe=False,
-                        reason=(
-                            f"tema bloqueado por categoría '{category}' "
-                            f"(patrón: '{pat}' en contexto de riesgo)"
-                        ),
-                        categories=[category],
-                        source="deterministic",
-                    )
+    for category, patterns in _CONTEXT_REQUIRED_PATTERNS.items():
+        markers = _CONTEXT_MARKERS_BY_CATEGORY.get(category, _RISK_CONTEXT_MARKERS)
+        if not any(_normalize(m) in joined for m in markers):
+            continue
+        for pat in patterns:
+            if _normalize(pat) in joined:
+                return SafetyVerdict(
+                    safe=False,
+                    reason=(
+                        f"tema bloqueado por categoría '{category}' "
+                        f"(patrón: '{pat}' en contexto de riesgo)"
+                    ),
+                    categories=[category],
+                    source="deterministic",
+                )
     return None
 
 
@@ -326,8 +356,8 @@ def classify_topic_safety(
     except Exception:  # noqa: BLE001
         pass
 
-    # 2. Determinista
-    det = _deterministic_check(texts)
+    # 2. Determinista (el clickbait se evalúa sobre el título, no el cuerpo)
+    det = _deterministic_check(texts, title_texts=[title] if title else [])
     if det is not None:
         return det
 

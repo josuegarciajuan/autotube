@@ -24,20 +24,31 @@ def test_true_crime_asesinato_bloqueado():
     assert not _verdict("El capitán que la guerrilla asesinó (CASO REAL)")
 
 
-def test_true_crime_desaparicion_bloqueada():
-    assert not _verdict("129 hombres desaparecieron en el ártico")
+# Afinado oct 2026: los términos de DESAPARICIÓN pasan a contexto-requerido
+# porque son el nicho legítimo de canal4 ("Expediciones sin retorno"). Solo
+# bloquean si co-ocurre un marcador criminal inequívoco.
+def test_true_crime_desaparicion_sin_contexto_permite():
+    assert _verdict("La expedición que desapareció en el ártico")
 
 
-def test_true_crime_sin_rastro_bloqueado():
-    assert not _verdict("Desapareció sin dejar rastro")
+def test_true_crime_desaparicion_con_contexto_criminal_bloquea():
+    assert not _verdict("La guerrilla asesinó a la víctima que desapareció")
+
+
+def test_true_crime_sin_rastro_sin_contexto_permite():
+    assert _verdict("La caravana que se perdió sin dejar rastro en el desierto")
 
 
 def test_true_crime_secuestro_bloqueado():
     assert not _verdict("El secuestro que conmocionó a la ciudad")
 
 
-def test_true_crime_nunca_regreso_bloqueado():
-    assert not _verdict("5 perdidos en la montaña y NUNCA regresaron")
+def test_true_crime_nunca_regres_sin_contexto_permite():
+    assert _verdict("5 exploradores perdidos en la montaña y nunca regresaron")
+
+
+def test_true_crime_nunca_regres_con_contexto_criminal_bloquea():
+    assert not _verdict("La banda criminal los mató; nunca regresaron")
 
 
 def test_true_crime_hallaron_sin_contexto_permite():
@@ -92,6 +103,18 @@ def test_clickbait_dos_marcadores_bloquean():
 
 def test_clickbait_tres_marcadores_bloquean():
     assert not _verdict("El caso maldito imposible que NADIE te contó")
+
+
+def test_clickbait_en_cuerpo_no_bloquea():
+    # El clickbait solo se evalúa en el título: la mención en el guion es
+    # vocabulario normal y lo corrige la capa de packaging.
+    v = classify_topic_safety(
+        topic="anomalía médica",
+        title="El síndrome que desconcierta a los médicos",
+        script_texts=["Era imposible de diagnosticar", "parecía increíble", "un caso maldito"],
+        use_llm=False,
+    )
+    assert v.safe
 
 
 # ── Folklore narrativo que SOBREVIVE (no debe romperse) ───────────

@@ -613,7 +613,9 @@ def main() -> int:
 
     if total_pending == 0:
         set_state(db, STATE_FINISHED_AT, _now_local().isoformat(timespec="seconds"))
-        alert(db, "ia_backfill_complete", "critical",
+        # Notificación de ÉXITO → info (no critical): el contador crítico del
+        # panel no debe marcar en rojo una campaña terminada con normalidad.
+        alert(db, "ia_backfill_complete", "info",
               "✅ Backfill marcado IA COMPLETADO",
               "No quedan vídeos/shorts sin marcar como contenido alterado/IA.",
               {"pending": 0})
@@ -635,7 +637,8 @@ def main() -> int:
         total_done, finished = process_channel(db, canal, args, total_done)
         if finished:
             resolve_backfill_aborted(db, canal, _channel_id(db, canal))
-            alert(db, "ia_backfill_channel_done", "critical",
+            # Hito de éxito por canal → info (no critical).
+            alert(db, "ia_backfill_channel_done", "info",
                   f"✅ Marcado IA completado en {canal}",
                   f"Canal {canal} ya no tiene pendientes de marcado IA.",
                   {"canal": canal, "done_total": total_done},
@@ -671,7 +674,7 @@ def main() -> int:
             conn.commit()
     except Exception as exc:  # noqa: BLE001
         logger.warning("resolve all backfill aborted failed: %s", exc)
-    alert(db, "ia_backfill_complete", "critical",
+    alert(db, "ia_backfill_complete", "info",
           "✅ Backfill marcado IA COMPLETADO",
           f"Todos los canales al día. Total marcado en esta campaña: {total_done}.",
           {"done_total": total_done})

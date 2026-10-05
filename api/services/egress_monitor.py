@@ -68,6 +68,22 @@ def _raise_alert(db, slug: str, ip: str, expected: str) -> None:
         logger.warning("[%s] egress alert create failed: %s", slug, exc)
 
 
+def _known_channel_slugs(db) -> set[str]:
+    """Slugs de canales registrados en la DB (para descartar egress obsoletos).
+
+    ``config/egress_agents.json`` puede contener entradas de canales retirados o
+    renombrados (p. ej. 'canal6' tras un renumbering). Sin este filtro se creaba
+    una alerta crítica ``egress_ip_down`` fantasma para un canal inexistente.
+    """
+    try:
+        with db._connect() as conn:
+            rows = conn.execute("SELECT slug FROM channels").fetchall()
+            return {r["slug"] for r in rows if r and r["slug"]}
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("egress monitor: no se pudo leer channels (%s) — se comprueban todos", exc)
+        return set()
+
+
 def check_all_egress(db=None) -> dict:
     """Comprueba la salud de la IP residencial de todos los canales gestionados."""
     if db is None:
@@ -76,8 +92,15 @@ def check_all_egress(db=None) -> dict:
 
     from api.services.egress_delegation import egress_client_for
     agents = _load_agents()
+    known = _known_channel_slugs(db)
     results = {}
     for slug, cfg in agents.items():
+        # Egress huérfano (canal retirado/renombrado): no alertar. Resolvemos
+        # cualquier alerta previa para que no quede colgada en el panel.
+        if known and slug not in known:
+            logger.debug("[%s] egress agent sin canal en DB — omitido (config obsoleta)", slug)
+            _resolve_alert(db, slug)
+            continue
         expected = str(cfg.get("expected_ip", "") or "")
         client = egress_client_for(slug)
         ok = False
