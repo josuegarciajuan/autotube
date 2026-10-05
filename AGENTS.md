@@ -748,6 +748,19 @@ Ajustes por entorno (sin tocar código):
 `AUTOTUBE_DIST_SD_TIMEOUT_SEC` / `AUTOTUBE_DIST_SD_PER_IMAGE_SEC` (timeout escalado),
 `AUTOTUBE_DIST_SD_STALL_SEC` (def. 900 s → cancela y cae a local si no hay nodo elegible).
 
+**Elegibilidad de nodos (medido oct 2026).** La unidad de imagen pide
+`cores = AUTOTUBE_DIST_SD_THREADS` (def. 3). Consecuencia: un nodo con menos cores
+(p. ej. `vps649560`, 2 cores) queda **excluido** por capacidad aunque tenga la
+imagen `autotube-sd:1`, y un nodo ya cargado (`oficina`, load ~4.6/4) tampoco se usa.
+Resultado: toda la pre-generación IA cae en `mail` (10 cores) y se sobre-suscribe
+(`maxInflight=6` × `threads=3` = 18 hilos en 10 cores ≈ 3 min/imagen, sin mejora
+frente a local). Para repartir de verdad hay que **bajar `AUTOTUBE_DIST_SD_THREADS`
+a 2** (o el `req.cores` de la unidad) y/o subir `AUTOTUBE_DIST_SD_MAX_INFLIGHT`, y
+descargar `oficina`; validar con un job real antes de fijarlo. La guardia de
+estancamiento (`_wait_dist_stall_aware`) ya **no** considera `inflight>0` como
+progreso: si no crece `accepted`/`generated` en `AUTOTUBE_DIST_SD_STALL_SEC`, cancela
+y cae a local (antes un worker colgado podía colgar el vídeo hasta el timeout).
+
 **Equivalencia funcional (local ↔ flota).** El objetivo es que la ejecución en
 la flota produzca el mismo resultado que en la casa. Garantizado por construcción:
 mismos **pesos** (mismo snapshot `runwayml/stable-diffusion-v1-5`), **mismo
