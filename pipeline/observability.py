@@ -30,6 +30,20 @@ gestionan el contexto correlacionado (``contextvars``).
 ``setup_obs_logging()`` instala el handler del logger ``autotube.obs``.
 ``redact`` / ``digest_text`` sanean datos.
 ``build_api_log_handler`` construye el handler rotativo de ``logs/api.log``.
+
+Alertas de error (independientes de ``OBS_LOG_*``)
+--------------------------------------------------
+``obs_alert()`` emite una alerta fail-open vía
+``api.services.lifecycle_monitor.emit_alert``.
+``obs_error()`` escribe un evento JSONL de nivel ``error`` Y crea/actualiza una
+alerta crítica agregada por ``(entity_type, entity_id, alert_type)``.
+``CriticalErrorAlertHandler`` reenvía records ``ERROR``+ (de todo el sistema) a
+una cola acotada con hilo daemon, agregando por tipo/entidad con contador y
+aplicando cooldown in-process.
+``setup_error_alerts()`` instala ese handler en el root logger (idempotente) y
+``install_exception_hooks()`` captura excepciones no tratadas
+(``sys``/``threading``/asyncio). ``OBS_LOG_ENABLED=False`` NO silencia estas
+alertas; el kill-switch total es ``OBS_ERROR_ALERTS_ENABLED=False``.
 """
 
 from __future__ import annotations
@@ -42,12 +56,16 @@ import json
 import logging
 import logging.handlers
 import os
+import queue
 import random
 import re
+import sys
+import threading
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 # ── Constantes ───────────────────────────────────────────────────────
 OBS_LOGGER_NAME = "autotube.obs"
@@ -492,6 +510,11 @@ def setup_obs_logging(force: bool = False) -> logging.Logger:
     Idempotent: calling it twice does not duplicate handlers. Fail-open: any
     error leaves ``obs_event`` as a safe no-op. ``force=True`` rebuilds the
     handler (used by tests to switch settings).
+
+    Note: this does NOT install :class:`CriticalErrorAlertHandler`; error
+    alerts are an independent mechanism (``setup_error_alerts()``) so that
+    ``OBS_LOG_ENABLED=False`` / ``OBS_LOG_LEVEL="off"`` never silence errors.
+    Callers should wire both explicitly.
     """
     logger = logging.getLogger(OBS_LOGGER_NAME)
     try:
@@ -622,6 +645,819 @@ def obs_event(event: str, level: str = "info", **fields: Any) -> None:
         pass
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Alertas de error agregadas (ERROR logs + excepciones no capturadas)
+# ═══════════════════════════════════════════════════════════════════
+#
+# Objetivo: cualquier record de nivel ERROR (o superior) y cualquier
+# excepción no capturada se convierte en UNA alerta CRÍTICA agregada por
+# ``(entity_type, entity_id, alert_type)`` con contador y metadata, en vez de
+# una alerta por incidente. Fail-open absoluto: nunca lanza, nunca bloquea al
+# productor (cola acotada + hilo daemon) y nunca satura la DB (rate-limit
+# in-process por clave + dedup de ``emit_alert``).
+#
+# Independiente de ``OBS_LOG_ENABLED`` / ``OBS_LOG_LEVEL``: apagar el detalle
+# fino de observabilidad NO silencia los errores. El kill-switch total es
+# ``OBS_ERROR_ALERTS_ENABLED=False``.
+
+_ERROR_ALERT_LOGGER_PREFIX = "autotube.lifecycle"
+_IGNORED_ALERT_LOGGERS = frozenset({
+    "autotube.lifecycle",
+    "autotube.obs",
+    "pipeline.observability",
+})
+
+# Texto: enmascara pares ``clave=valor`` sensibles y cabeceras Bearer.
+_SECRET_TEXT_RE = re.compile(
+    r"(?i)(bearer\s+)[A-Za-z0-9._\-]+"
+    r"|((?:access[_-]?token|api[_-]?key|apikey|token|secret|password|passwd"
+    r"|cookie|authorization)\s*[=:]\s*)\S+"
+)
+_SLUG_RE = re.compile(r"[^a-z0-9]+", re.IGNORECASE)
+
+_tls = threading.local()
+
+# Estado del handler de errores (idempotencia de setup).
+_error_state: Dict[str, Any] = {
+    "configured": False,
+    "enabled": False,
+    "handler": None,
+}
+
+
+def _utc_iso() -> str:
+    try:
+        return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    except Exception:  # pragma: no cover - defensive
+        return ""
+
+
+def _slugify(value: Any, max_len: int = 80) -> str:
+    """Sanitise *value* into a stable ``[a-z0-9_]`` slug (never raises)."""
+    try:
+        text = _SLUG_RE.sub("_", str(value or "")).strip("_").lower()
+        return (text or "unknown")[: max(1, int(max_len))]
+    except Exception:  # pragma: no cover - defensive
+        return "unknown"
+
+
+def _redact_text(text: Any, max_len: int = 500) -> str:
+    """Redact sensitive ``key=value`` / Bearer patterns and cap the length."""
+    try:
+        out = str(text)
+        out = _SECRET_TEXT_RE.sub(
+            lambda m: (m.group(1) or m.group(2) or "") + _REDACTION_MARK
+            if (m.group(1) or m.group(2))
+            else _REDACTION_MARK,
+            out,
+        )
+        if max_len and len(out) > max_len:
+            out = out[:max_len] + "...<truncated>"
+        return out
+    except Exception:  # pragma: no cover - defensive
+        return "<unredactable>"
+
+
+def _to_int(value: Any) -> Optional[int]:
+    try:
+        if isinstance(value, bool) or value is None or value == "":
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_level(value: Any, default: int = logging.ERROR) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        return _LEVELS.get(value.strip().lower(), default)
+    return default
+
+
+def _as_str_list(value: Any) -> List[str]:
+    """Coerce a value to a list of lowercased, non-empty strings."""
+    try:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            parts = value.replace(";", ",").split(",")
+            return [p.strip().lower() for p in parts if p.strip()]
+        if isinstance(value, (list, tuple, set, frozenset)):
+            out = []
+            for item in value:
+                text = str(item).strip().lower()
+                if text:
+                    out.append(text)
+            return out
+        text = str(value).strip().lower()
+        return [text] if text else []
+    except Exception:  # pragma: no cover - defensive
+        return []
+
+
+def _load_error_alert_settings() -> Dict[str, Any]:
+    """Resolve error-alert settings (env > config.settings > default).
+
+    Never raises; every malformed value falls back to a safe default.
+    """
+    try:
+        enabled = _as_bool(
+            _read_env_or_setting("OBS_ERROR_ALERTS_ENABLED", True), True
+        )
+    except Exception:  # pragma: no cover - defensive
+        enabled = True
+    try:
+        min_level = _as_level(
+            _read_env_or_setting("OBS_ERROR_ALERTS_MIN_LEVEL", "error"),
+            logging.ERROR,
+        )
+    except Exception:  # pragma: no cover - defensive
+        min_level = logging.ERROR
+    try:
+        cooldown = max(
+            0,
+            _as_int(_read_env_or_setting("OBS_ERROR_ALERT_COOLDOWN_MIN", 30), 30),
+        )
+    except Exception:  # pragma: no cover - defensive
+        cooldown = 30
+    try:
+        ignore = _as_str_list(
+            _read_env_or_setting("OBS_ERROR_ALERT_IGNORE", [])
+        )
+    except Exception:  # pragma: no cover - defensive
+        ignore = []
+    try:
+        queue_size = max(
+            1,
+            _as_int(_read_env_or_setting("OBS_ERROR_ALERT_QUEUE_SIZE", 500), 500),
+        )
+    except Exception:  # pragma: no cover - defensive
+        queue_size = 500
+    return {
+        "enabled": enabled,
+        "min_level": min_level,
+        "cooldown_min": cooldown,
+        "ignore": ignore,
+        "queue_size": queue_size,
+    }
+
+
+def _is_ignored(logger_name: Any, message: Any) -> bool:
+    patterns = _load_error_alert_settings().get("ignore") or []
+    if not patterns:
+        return False
+    haystack = (str(logger_name or "") + " " + str(message or "")).lower()
+    return any(p in haystack for p in patterns)
+
+
+def _entity_from_context(ctx: Dict[str, Any]):
+    """Return ``(entity_type, entity_id, channel_id)`` inferred from context."""
+    try:
+        video_id = (ctx or {}).get("video_id")
+        channel_id = _to_int((ctx or {}).get("channel"))
+        if video_id not in (None, ""):
+            return "video", _to_int(video_id), channel_id
+    except Exception:  # pragma: no cover - defensive
+        pass
+    return "system", None, None
+
+
+def _context_subset(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    try:
+        for key in _CONTEXT_KEYS:
+            value = (ctx or {}).get(key)
+            if value not in (None, ""):
+                out[key] = value
+    except Exception:  # pragma: no cover - defensive
+        pass
+    return out
+
+
+def obs_alert(
+    alert_type: str,
+    *,
+    severity: str = "critical",
+    title: str,
+    message: Optional[str] = None,
+    metadata: Optional[dict] = None,
+    entity_type: str = "system",
+    entity_id: Optional[int] = None,
+    channel_id: Optional[int] = None,
+) -> None:
+    """Emit one alert via ``lifecycle_monitor.emit_alert`` — absolute fail-open.
+
+    The import is lazy (inside the function) to avoid an import cycle between
+    ``pipeline.observability`` and the API services. Any failure (DB down,
+    import error, handler bug) is swallowed: this function NEVER raises and
+    never lets alerting break the pipeline or an API request. ``emit_alert``
+    already journals to ``logs/alerts_fallback.log`` when the DB is down.
+
+    Also sets a per-thread re-entrancy flag so that any ERROR log produced
+    while emitting the alert is not captured again by
+    :class:`CriticalErrorAlertHandler` (anti-recursion).
+    """
+    try:
+        prev = getattr(_tls, "active", False)
+        _tls.active = True
+        try:
+            from api.services.lifecycle_monitor import emit_alert
+            emit_alert(
+                entity_type=entity_type,
+                entity_id=entity_id,
+                channel_id=channel_id,
+                alert_type=alert_type,
+                severity=severity,
+                title=title,
+                message=message,
+                metadata=metadata,
+            )
+        finally:
+            _tls.active = prev
+    except Exception:
+        pass
+
+
+class _ErrorAlertSink:
+    """In-process aggregator: one alert per key with count + rate-limit.
+
+    Key = ``(entity_type, entity_id, alert_type)``. The first event of a key
+    emits immediately; subsequent events inside ``OBS_ERROR_ALERT_COOLDOWN_MIN``
+    only accumulate the counter (the next write refreshes the DB row with the
+    updated ``count``/metadata via ``emit_alert``'s dedup update).
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._states: Dict[tuple, Dict[str, Any]] = {}
+
+    def reset(self) -> None:
+        try:
+            with self._lock:
+                self._states.clear()
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+    def submit(
+        self,
+        *,
+        alert_type: str,
+        title: str,
+        message: Optional[str],
+        severity: str,
+        entity_type: str,
+        entity_id: Optional[int],
+        channel_id: Optional[int],
+        logger_name: str = "",
+        level_name: str = "",
+        context: Optional[dict] = None,
+        extra_metadata: Optional[dict] = None,
+        now: Optional[float] = None,
+    ) -> bool:
+        """Aggregate one occurrence. Returns True if it emitted to the DB."""
+        try:
+            cfg = _load_error_alert_settings()
+            timestamp = time.monotonic() if now is None else now
+            key = (entity_type, entity_id, alert_type)
+            with self._lock:
+                state = self._states.get(key)
+                if state is None:
+                    state = {
+                        "count": 0,
+                        "first_seen": _utc_iso(),
+                        "last_seen": "",
+                        "sample_message": "",
+                        "logger": "",
+                        "level": "",
+                        "context": {},
+                        "extra": {},
+                        "last_emit": None,
+                    }
+                    self._states[key] = state
+                state["count"] += 1
+                state["last_seen"] = _utc_iso()
+                if message:
+                    state["sample_message"] = _redact_text(message, 500)
+                if logger_name:
+                    state["logger"] = str(logger_name)
+                if level_name:
+                    state["level"] = str(level_name)
+                if context:
+                    state["context"] = redact(dict(context))
+                if extra_metadata:
+                    state["extra"] = redact(dict(extra_metadata))
+
+                cooldown_sec = float(cfg["cooldown_min"]) * 60.0
+                last_emit = state.get("last_emit")
+                if last_emit is not None and (timestamp - last_emit) < cooldown_sec:
+                    return False
+                state["last_emit"] = timestamp
+
+                count = state["count"]
+                metadata = dict(state.get("extra") or {})
+                metadata.update({
+                    "count": count,
+                    "first_seen": state["first_seen"],
+                    "last_seen": state["last_seen"],
+                    "logger": state["logger"],
+                    "level": state["level"],
+                    "sample_message": state["sample_message"],
+                    "context": dict(state["context"]),
+                })
+                alert_message = message
+                if not alert_message:
+                    alert_message = state.get("sample_message")
+                aggregated_message = f"[count={count}] {alert_message}" if alert_message else f"[count={count}]"
+
+            obs_alert(
+                alert_type,
+                severity=severity,
+                title=title,
+                message=aggregated_message,
+                metadata=metadata,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                channel_id=channel_id,
+            )
+            return True
+        except Exception:
+            return False
+
+
+_error_sink = _ErrorAlertSink()
+
+
+def _submit_error_alert(
+    *,
+    alert_type: str,
+    title: str,
+    message: Optional[str],
+    logger_name: str = "",
+    level_name: str = "error",
+    context: Optional[dict] = None,
+    entity_type: str = "system",
+    entity_id: Optional[int] = None,
+    channel_id: Optional[int] = None,
+    extra_metadata: Optional[dict] = None,
+    severity: str = "critical",
+    now: Optional[float] = None,
+) -> bool:
+    """Shared entry point for the handler and :func:`obs_error`."""
+    if not _load_error_alert_settings().get("enabled"):
+        return False
+    return _error_sink.submit(
+        alert_type=alert_type,
+        title=title,
+        message=message,
+        severity=severity,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        channel_id=channel_id,
+        logger_name=logger_name,
+        level_name=level_name,
+        context=context,
+        extra_metadata=extra_metadata,
+        now=now,
+    )
+
+
+def obs_error(
+    event: str,
+    *,
+    title: Optional[str] = None,
+    message: Optional[str] = None,
+    metadata: Optional[dict] = None,
+    entity_type: str = "system",
+    entity_id: Optional[int] = None,
+    channel_id: Optional[int] = None,
+    **fields: Any,
+) -> None:
+    """Write a JSONL ``error`` event AND create/update an aggregated alert.
+
+    Always fail-open. The correlation context (``channel``/``video_id``/
+    ``job_id``/``phase``/``scene_idx``) is used to infer the alert entity. An
+    explicit ``alert_type`` may be passed through ``fields``; otherwise
+    ``"error_" + slug(event)`` is used.
+    """
+    try:
+        obs_event(event, level="error", **fields)
+    except Exception:
+        pass
+    try:
+        explicit_alert_type = fields.get("alert_type")
+        alert_type = (
+            str(explicit_alert_type)
+            if explicit_alert_type
+            else "error_" + _slugify(event)
+        )
+        ctx = get_context()
+        inferred_type, inferred_id, inferred_channel = _entity_from_context(ctx)
+        if entity_id is None and inferred_id is not None:
+            entity_type, entity_id = inferred_type, inferred_id
+        if channel_id is None and inferred_channel is not None:
+            channel_id = inferred_channel
+        context = _context_subset(ctx)
+        raw_message = message if message is not None else event
+        redacted_message = _redact_text(raw_message, 500)
+        if _is_ignored(event, redacted_message):
+            return
+        _submit_error_alert(
+            alert_type=alert_type,
+            title=title or f"Error: {event}",
+            message=redacted_message,
+            logger_name=str(event),
+            level_name="error",
+            context=context,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            channel_id=channel_id,
+            extra_metadata=metadata,
+        )
+    except Exception:
+        pass
+
+
+class CriticalErrorAlertHandler(logging.Handler):
+    """Forward ``ERROR``+ records to a bounded background queue.
+
+    A daemon worker thread aggregates by ``(entity_type, entity_id,
+    alert_type)`` and emits ONE critical alert with a counter. The producer
+    never blocks: if the bounded queue is full the record is dropped and
+    counted (``dropped``). Re-entrant per-thread flag prevents recursion if
+    ``emit_alert`` itself logs an error.
+    """
+
+    def __init__(
+        self,
+        level: Optional[int] = None,
+        queue_size: Optional[int] = None,
+    ) -> None:
+        cfg = _load_error_alert_settings()
+        super().__init__(level if level is not None else int(cfg["min_level"]))
+        size = int(queue_size if queue_size is not None else cfg["queue_size"])
+        self._queue: "queue.Queue" = queue.Queue(maxsize=max(1, size))
+        self._dropped = 0
+        self._drop_lock = threading.Lock()
+        self._stop = threading.Event()
+        self._worker = threading.Thread(
+            target=self._run, name="autotube-error-alerts", daemon=True,
+        )
+        self._worker.start()
+        try:
+            setattr(self, "_autotube_error_alert_handler", True)
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+    @property
+    def dropped(self) -> int:
+        try:
+            with self._drop_lock:
+                return self._dropped
+        except Exception:  # pragma: no cover - defensive
+            return 0
+
+    def emit(self, record: logging.LogRecord) -> None:  # noqa: A003
+        try:
+            if record.levelno < self.level:
+                return
+            # Anti-recursion: never capture logs produced while we emit alerts.
+            if getattr(_tls, "active", False):
+                return
+            name = getattr(record, "name", "") or ""
+            if name in _IGNORED_ALERT_LOGGERS or name.startswith(
+                _ERROR_ALERT_LOGGER_PREFIX
+            ):
+                return
+            try:
+                raw_message = record.getMessage()
+            except Exception:
+                raw_message = str(getattr(record, "msg", ""))
+            if _is_ignored(name, raw_message):
+                return
+            ctx = get_context()
+            try:
+                self._queue.put_nowait((record, ctx, time.monotonic()))
+            except queue.Full:
+                with self._drop_lock:
+                    self._dropped += 1
+        except Exception:
+            # A broken handler must never break logging or the pipeline.
+            pass
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                item = self._queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if item is None:
+                break
+            _tls.active = True
+            try:
+                if isinstance(item, tuple) and len(item) == 3:
+                    self._process(*item)
+            except Exception:
+                pass
+            finally:
+                _tls.active = False
+
+    def _process(
+        self,
+        record: logging.LogRecord,
+        ctx: Dict[str, Any],
+        now: float,
+    ) -> None:
+        logger_name = getattr(record, "name", "") or ""
+        explicit = getattr(record, "alert_type", None)
+        alert_type = (
+            str(explicit) if explicit else "error_" + _slugify(logger_name)
+        )
+        try:
+            raw_message = record.getMessage()
+        except Exception:
+            raw_message = str(getattr(record, "msg", ""))
+        redacted_message = _redact_text(raw_message, 500)
+        explicit_title = getattr(record, "alert_title", None)
+        title = str(explicit_title) if explicit_title else (
+            f"Errores de {logger_name or 'sistema'}"
+        )
+        entity_type, entity_id, channel_id = _entity_from_context(ctx)
+        level_name = str(getattr(record, "levelname", "error")).lower()
+        _submit_error_alert(
+            alert_type=alert_type,
+            title=title,
+            message=redacted_message,
+            logger_name=logger_name,
+            level_name=level_name,
+            context=_context_subset(ctx),
+            entity_type=entity_type,
+            entity_id=entity_id,
+            channel_id=channel_id,
+            now=now,
+        )
+
+    def close(self) -> None:
+        try:
+            self._stop.set()
+            try:
+                self._queue.put_nowait(None)
+            except Exception:
+                pass
+            if self._worker.is_alive():
+                self._worker.join(timeout=1.0)
+        except Exception:
+            pass
+        finally:
+            try:
+                super().close()
+            except Exception:  # pragma: no cover - defensive
+                pass
+
+
+def setup_error_alerts(force: bool = False) -> Optional[CriticalErrorAlertHandler]:
+    """Install :class:`CriticalErrorAlertHandler` on the root logger.
+
+    Idempotent. Installs only when ``OBS_ERROR_ALERTS_ENABLED`` is True;
+    independent from ``setup_obs_logging`` (disabling the fine-grained obs
+    detail must NOT silence error alerts). Returns the installed handler (or
+    the existing one), or ``None`` when disabled.
+
+    ``setup_obs_logging`` intentionally does NOT call this automatically so the
+    two switches stay independent; callers wire both explicitly.
+    """
+    try:
+        with _lock:
+            cfg = _load_error_alert_settings()
+            root = logging.getLogger()
+            if _error_state.get("configured") and not force:
+                return _error_state.get("handler")
+            for existing in list(root.handlers):
+                if getattr(existing, "_autotube_error_alert_handler", False):
+                    try:
+                        root.removeHandler(existing)
+                        existing.close()
+                    except Exception:
+                        pass
+            _error_state.update({
+                "configured": True,
+                "enabled": bool(cfg["enabled"]),
+                "handler": None,
+            })
+            if not cfg["enabled"]:
+                return None
+            try:
+                handler = CriticalErrorAlertHandler(
+                    level=int(cfg["min_level"]),
+                    queue_size=int(cfg["queue_size"]),
+                )
+                root.addHandler(handler)
+                _error_state["handler"] = handler
+                return handler
+            except Exception:
+                _error_state["enabled"] = False
+                return None
+    except Exception:
+        return None
+
+
+# ── Captura de excepciones no tratadas ───────────────────────────────
+
+_exc_hooks_lock = threading.RLock()
+_exc_hooks_installed = False
+_exc_hooks_labels: List[str] = []
+_ORIGINAL_SYS_EXCEPTHOOK = None
+_ORIGINAL_THREAD_EXCEPTHOOK = None
+
+
+def _bounded_traceback(
+    exc_type: Any,
+    exc_value: Any,
+    exc_tb: Any,
+    max_chars: int = 1500,
+) -> str:
+    try:
+        text = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+    except Exception:
+        try:
+            text = f"{exc_type}: {exc_value}"
+        except Exception:  # pragma: no cover - defensive
+            text = "<unprintable exception>"
+    return _redact_text(text, max_chars)
+
+
+def _emit_uncaught(label: str, exc_type: Any, exc_value: Any, exc_tb: Any) -> None:
+    try:
+        obs_error(
+            "uncaught_exception",
+            title=f"Excepción no capturada ({label})",
+            message=_bounded_traceback(exc_type, exc_value, exc_tb),
+            metadata={
+                "process": label,
+                "exception_type": getattr(exc_type, "__name__", str(exc_type)),
+            },
+            alert_type="uncaught_exception_" + _slugify(label, 40),
+        )
+    except Exception:
+        pass
+
+
+def install_exception_hooks(process_label: str) -> None:
+    """Install fail-open hooks for uncaught exceptions (idempotent).
+
+    Covers ``sys.excepthook``, ``threading.excepthook`` (when available) and the
+    running asyncio event loop's exception handler (best-effort). Each
+    uncaught exception emits a critical aggregated alert of type
+    ``uncaught_exception_<process_label>`` with a bounded, redacted traceback.
+
+    Safe to call multiple times and from multiple call sites: the hooks are
+    installed only once per process.
+    """
+    global _exc_hooks_installed, _ORIGINAL_SYS_EXCEPTHOOK
+    global _ORIGINAL_THREAD_EXCEPTHOOK
+    label = _slugify(process_label or "process", 40)
+    try:
+        with _exc_hooks_lock:
+            if label not in _exc_hooks_labels:
+                _exc_hooks_labels.append(label)
+            if _exc_hooks_installed:
+                return
+
+            # sys.excepthook
+            try:
+                _ORIGINAL_SYS_EXCEPTHOOK = sys.excepthook
+
+                def _sys_hook(exc_type, exc_value, exc_tb):
+                    try:
+                        _emit_uncaught(label, exc_type, exc_value, exc_tb)
+                    except Exception:
+                        pass
+                    try:
+                        prev = _ORIGINAL_SYS_EXCEPTHOOK
+                        if prev is not None and prev is not _sys_hook:
+                            prev(exc_type, exc_value, exc_tb)
+                    except Exception:
+                        pass
+
+                sys.excepthook = _sys_hook
+            except Exception:
+                pass
+
+            # threading.excepthook (Python 3.8+)
+            try:
+                if hasattr(threading, "excepthook"):
+                    _ORIGINAL_THREAD_EXCEPTHOOK = threading.excepthook
+
+                    def _thread_hook(args):
+                        try:
+                            _emit_uncaught(
+                                label,
+                                getattr(args, "exc_type", None),
+                                getattr(args, "exc_value", None),
+                                getattr(args, "exc_traceback", None),
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            prev = _ORIGINAL_THREAD_EXCEPTHOOK
+                            if prev is not None and prev is not _thread_hook:
+                                prev(args)
+                        except Exception:
+                            pass
+
+                    threading.excepthook = _thread_hook
+            except Exception:
+                pass
+
+            # asyncio event loop (only when a loop is already running).
+            try:
+                import asyncio
+
+                loop = asyncio.get_running_loop()
+                previous_handler = loop.get_exception_handler()
+
+                def _loop_handler(active_loop, context):
+                    try:
+                        exc = (context or {}).get("exception")
+                        if exc is not None:
+                            _emit_uncaught(
+                                label, type(exc), exc, getattr(exc, "__traceback__", None)
+                            )
+                        else:
+                            obs_error(
+                                "uncaught_exception",
+                                title=f"Excepción no capturada ({label})",
+                                message=_redact_text(
+                                    (context or {}).get("message", ""), 500
+                                ),
+                                metadata={"process": label},
+                                alert_type="uncaught_exception_" + label,
+                            )
+                    except Exception:
+                        pass
+                    try:
+                        if previous_handler is not None:
+                            previous_handler(active_loop, context)
+                        else:
+                            active_loop.default_exception_handler(context)
+                    except Exception:
+                        pass
+
+                loop.set_exception_handler(_loop_handler)
+            except Exception:
+                pass
+
+            _exc_hooks_installed = True
+    except Exception:
+        pass
+
+
+def _reset_error_alert_state() -> None:
+    """Test helper: clear aggregation state and remove our root handlers."""
+    try:
+        with _lock:
+            _error_state.update({
+                "configured": False, "enabled": False, "handler": None,
+            })
+            _error_sink.reset()
+        root = logging.getLogger()
+        for handler in list(root.handlers):
+            if getattr(handler, "_autotube_error_alert_handler", False):
+                try:
+                    root.removeHandler(handler)
+                    handler.close()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def _reset_exception_hooks_for_tests() -> None:
+    """Test helper: restore original exception hooks and allow reinstall."""
+    global _exc_hooks_installed
+    try:
+        with _exc_hooks_lock:
+            if _ORIGINAL_SYS_EXCEPTHOOK is not None:
+                try:
+                    sys.excepthook = _ORIGINAL_SYS_EXCEPTHOOK
+                except Exception:
+                    pass
+            try:
+                if (
+                    hasattr(threading, "excepthook")
+                    and _ORIGINAL_THREAD_EXCEPTHOOK is not None
+                ):
+                    threading.excepthook = _ORIGINAL_THREAD_EXCEPTHOOK
+            except Exception:
+                pass
+            _exc_hooks_installed = False
+            _exc_hooks_labels.clear()
+    except Exception:
+        pass
+
+
 __all__ = [
     "OBS_LOGGER_NAME",
     "ContextFilter",
@@ -636,4 +1472,9 @@ __all__ = [
     "digest_text",
     "llm_text",
     "build_api_log_handler",
+    "obs_alert",
+    "obs_error",
+    "CriticalErrorAlertHandler",
+    "setup_error_alerts",
+    "install_exception_hooks",
 ]

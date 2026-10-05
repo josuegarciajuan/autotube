@@ -331,8 +331,13 @@ def _setup_worker_logging(job_id: int, channel_id: int | None = None,
         logging.getLogger(lib).setLevel(logging.WARNING)
     # Structured correlated observability (JSONL). Fail-open.
     try:
-        from pipeline.observability import setup_obs_logging, set_context
+        from pipeline.observability import (
+            setup_obs_logging, set_context,
+            setup_error_alerts, install_exception_hooks,
+        )
         setup_obs_logging()
+        setup_error_alerts()
+        install_exception_hooks("full_pipeline_worker")
         ctx = {"job_id": job_id}
         if channel_id is not None:
             ctx["channel"] = channel_id

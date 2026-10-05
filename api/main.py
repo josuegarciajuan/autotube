@@ -78,6 +78,18 @@ async def lifespan(app: FastAPI):
         logging.getLogger("autotube").debug(
             "obs logging setup skipped: %s", _obs_exc
         )
+
+    # ── Alertas de error agregadas + hooks de excepciones (fail-open) ──
+    # Independientes de OBS_LOG_*: los ERROR del sistema y las excepciones no
+    # capturadas deben alertar aunque el detalle fino esté apagado.
+    try:
+        from pipeline.observability import setup_error_alerts, install_exception_hooks
+        setup_error_alerts()
+        install_exception_hooks("api")
+    except Exception as _alert_exc:  # never block startup on alerting
+        logging.getLogger("autotube").debug(
+            "error-alert setup skipped: %s", _alert_exc
+        )
     
     # ── Systemd watchdog ping ─────────────────────────────────
     # If running under systemd with WatchdogSec set, send periodic
