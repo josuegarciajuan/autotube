@@ -91,6 +91,10 @@ INFO_ALERT_RETENTION_TYPES = (
     "recovery_checkpoint_",
     "editorial_review_success",
     "ia_mark_health_ok",
+    # "✅ Backfill IA completado": éxito de campaña, no fallo. Se limpia solo.
+    "ia_backfill_complete",
+    # "Mejora desplegada": aviso de estado puntual del plan de mejoras.
+    "improvement_deployed",
 )
 
 # ── Retención de alertas warning huérfanas ─────────────────────
