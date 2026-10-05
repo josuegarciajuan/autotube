@@ -6,6 +6,8 @@ completo. Ahora el latido es la salida real (accepted/generated).
 """
 from __future__ import annotations
 
+import types
+
 import pytest
 
 from pipeline_dist import orchestrator_dist as orch
@@ -68,3 +70,87 @@ def test_real_progress_keeps_alive_and_returns(monkeypatch):
     out = _call(stall_sec=300.0)
     assert out["status"] == "done"
     assert cancelled == []
+
+
+# ── Wrappers que ahora usan la guardia (render v2 y concat) ──────────────────
+
+def test_render_v2_stall_cancels(monkeypatch, tmp_path):
+    """Render v2: si no hay progreso real, cancela y cae a local."""
+    cancelled: list[str] = []
+    monkeypatch.setattr(orch, "time", _FakeTime())
+    monkeypatch.setattr(
+        orch.dsl_client, "status",
+        lambda eid: {"status": "running",
+                     "progress": {"inflight": 4, "accepted": 0,
+                                  "generated": 0, "pending": 0}},
+    )
+    monkeypatch.setattr(orch.dsl_client, "cancel", lambda eid: cancelled.append(eid))
+    monkeypatch.setattr(orch.dsl_client, "submit", lambda *a, **k: "eid-r2")
+    monkeypatch.setattr(orch.settings_mod, "VIDEOS_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        orch, "build_scene_plans",
+        lambda ve, sr, ma: [{"reproducible": True} for _ in sr],
+    )
+
+    asset = tmp_path / "asset.jpg"
+    asset.write_bytes(b"jpg")
+    scene_ranges = [{"start_ms": 0, "end_ms": 1000}]
+    media_assets = [{"path": str(asset)}]
+
+    class FakeSelf(orch.DistributedOrchestrator):
+        def __init__(self):
+            self.canal = "canalX"
+            self.db_video_id = 7
+            self.config = types.SimpleNamespace()
+            self._last_scene_ranges = scene_ranges
+            self._video_editor = types.SimpleNamespace(_video_seed=0)
+
+        def _emit_progress(self, *a, **k):
+            pass
+
+    with pytest.raises(ScenePlanError):
+        FakeSelf()._pre_render_scenes_v2(
+            {"id": 1}, {"timestamps": []}, media_assets, 7,
+        )
+    assert cancelled == ["eid-r2"]
+
+
+def test_concat_stall_cancels(monkeypatch, tmp_path):
+    """Concat distribuido: si no hay progreso real, cancela y cae a local."""
+    cancelled: list[str] = []
+    monkeypatch.setattr(orch, "time", _FakeTime())
+    monkeypatch.setattr(
+        orch.dsl_client, "status",
+        lambda eid: {"status": "running",
+                     "progress": {"inflight": 2, "accepted": 0,
+                                  "generated": 0, "pending": 0}},
+    )
+    monkeypatch.setattr(orch.dsl_client, "cancel", lambda eid: cancelled.append(eid))
+    monkeypatch.setattr(orch.dsl_client, "submit", lambda *a, **k: "eid-cc")
+
+    segs = []
+    for i in range(2):
+        p = tmp_path / f"seg_{i}.mp4"
+        p.write_bytes(b"mp4")
+        segs.append(str(p))
+
+    class FakeVE:
+        canal: dict = {}
+
+        def _build_duration_preserving_concat_filter(self, n, **kw):
+            return ("", "v")
+
+    class FakeSelf(orch.DistributedOrchestrator):
+        def __init__(self):
+            self.canal = "canalX"
+            self.db_video_id = 7
+            self._video_editor = FakeVE()
+
+        def _emit_progress(self, *a, **k):
+            pass
+
+    with pytest.raises(ScenePlanError):
+        FakeSelf()._dist_concat_body_batched(
+            segs, [(0, 1), (1, 2)], str(tmp_path / "out.mp4"), batch_size=1,
+        )
+    assert cancelled == ["eid-cc"]
