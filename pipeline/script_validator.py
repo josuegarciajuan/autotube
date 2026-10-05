@@ -49,6 +49,68 @@ MAX_EMPTY_BLOCK_RATIO_GRAVE = 0.65  # was 0.50 — too aggressive for narrative/
 SOURCE_SIMILARITY_GRAVE = 0.70  # was 0.50 — 50% similitud es normal en contenido factual
 SOURCE_SIMILARITY_WARNING = 0.50  # was 0.35
 
+# ── Fase 2: editorial quality thresholds (WARNINGS ONLY) ──────────
+# These checks never produce severe issues / failover. They only lower the
+# weighted score and append to result.warnings.
+HOOK_PROMISE_GENERIC_SCORE = 0.5   # generic hook (no concrete promise)
+HOOK_PROMISE_VAGUE_SCORE = 0.7     # short hook with no fact/promise
+NOVELTY_MIN_RATIO = 0.35           # min average new-token ratio between consecutive blocks
+NOVELTY_BLOCK_MIN_CHARS = 80       # ignore short blocks in the novelty ratio
+MAX_RHETORICAL_QUESTIONS = 3       # absolute cap on consecutive/global rhetorical questions
+MAX_RHETORICAL_QUESTION_RATIO = 0.15  # max fraction of sentences that are questions
+CLAIM_ABSOLUTE_MIN_RATIO = 0.25    # min fraction of absolute sentences without a hedge marker
+# Concrete promise markers (Spanish, lowercase matching).
+PROMISE_PATTERNS = [
+    r"vas a (?:descubrir|conocer|entender|saber|ver)",
+    r"vamos a (?:descubrir|conocer|entender|saber|revelar|desentranar|desentrañar)",
+    r"(?:descubrir|conocer|entender|saber|revelar|desentranar|desentrañar)\w*\s+"
+    r"(?:la verdad|el secreto|lo que|por que|por qué|quien|quién|como|cómo)",
+    r"la verdad (?:sobre|de|detras|detrás)",
+    r"el secreto (?:de|detras|detrás|mejor guardado)",
+    r"lo que (?:nadie|nunca|muy pocos|pocos)",
+    r"(?:nadie|nunca) (?:imagin|esper|sab|sospech)",
+    r"esto (?:cambio|cambió|cambiara|cambiará|lo cambio)",
+    r"aqui (?:esta|está|empieza) (?:la historia|el caso|lo que)",
+    r"aquí (?:está|empieza) (?:la historia|el caso|lo que)",
+]
+# Openly generic / weak hooks (already partly covered by BANNED_OPENING_PATTERNS).
+GENERIC_HOOK_PATTERNS = [
+    r"en\s+este\s+video",
+    r"hoy\s+(?:vamos|hablaremos|exploraremos|conoceremos|veremos)",
+    r"bienvenidos?\s+a",
+    r"en\s+el\s+video\s+de\s+hoy",
+    r"te\s+(?:voy|vamos)\s+a\s+(?:contar|hablar|explicar)",
+    r"vamos\s+a\s+(?:hablar|explorar|ver)\s+(?:de|sobre)",
+]
+# Concreteness hint: number, year-like, month name or proper-name "de X".
+CONCRETENESS_PATTERN = (
+    r"\d|"
+    r"\b(?:siglo|año|ano|mes|dia|día|decada|década|milenio)\b|"
+    r"\b(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\b|"
+    r"(?-i:\b[A-ZÁÉÍÓÚÑ][a-záéíóúñ]{2,}\b)"
+)
+# Hedge markers — signal documented fact / uncertainty / hypothesis.
+HEDGE_MARKERS = [
+    r"\b(?:segun|según)\b", r"\b(?:podria|podría|podrian|podrían)\b",
+    r"\b(?:posiblemente|probablemente|quiza|quizá|tal vez)\b",
+    r"\b(?:se cree|se especula|se sospecha|se piensa)\b",
+    r"\b(?:hipotesis|hipótesis|teoria|teoría|conjetura)\b",
+    r"\b(?:al parecer|aparentemente|presuntamente)\b",
+    r"\b(?:indica|indican|sugiere|sugieren|parece|parecen)\b",
+    r"\b(?:documentado|registrado|confirmado|verificado)\b",
+    r"\b(?:los? registros?|las? fuentes?)\b",
+]
+# Absolute-claim markers — heuristically dubious without a hedge.
+ABSOLUTE_CLAIM_PATTERNS = [
+    r"\bsiempre\b", r"\bnunca\b", r"\bjamas\b", r"\bjamás\b",
+    r"\btodos\b", r"\bninguno\b", r"\bnadie\b",
+    r"\bsin duda\b", r"\bdefinitivamente\b", r"\bes un hecho\b",
+    r"\besta (?:demostrado|probado)\b", r"\besta demostrado\b",
+    r"\bestá (?:demostrado|probado)\b",
+    r"\b100 ?%|cien por ciento\b",
+]
+
+
 
 @dataclass
 class ValidatorResult:
@@ -167,10 +229,44 @@ class ScriptValidator:
                 result.issues.extend(ss["issues"])
                 severe_issues.update(ss.get("severe", []))
 
-        # Overall score (weighted average)
+        # 8. Editorial checks (Fase 2) — WARNINGS ONLY.
+        # These never touch severe_issues: they cannot trigger failover or a
+        # model change. They only lower the weighted score and add warnings.
+        hook_promise = self._check_hook_promise(script)
+        hook_promise_score = hook_promise["score"]
+        result.details["hook_promise_score"] = round(hook_promise_score, 3)
+        if hook_promise["issues"]:
+            result.warnings.extend(hook_promise["issues"])
+
+        novelty_score = 1.0
+        if bloques and len(bloques) >= 3:
+            novelty = self._check_novelty(bloques)
+            novelty_score = novelty["score"]
+            result.details["novelty_score"] = round(novelty_score, 3)
+            if novelty["issues"]:
+                result.warnings.extend(novelty["issues"])
+
+        rhetorical_score = 1.0
+        if bloques:
+            rq = self._check_rhetorical_questions(script, bloques)
+            rhetorical_score = rq["score"]
+            result.details["rhetorical_score"] = round(rhetorical_score, 3)
+            if rq["issues"]:
+                result.warnings.extend(rq["issues"])
+
+        claim_score = 1.0
+        if bloques:
+            claim = self._check_claim_honesty(bloques)
+            claim_score = claim["score"]
+            result.details["claim_honesty_score"] = round(claim_score, 3)
+            if claim["issues"]:
+                result.warnings.extend(claim["issues"])
+
+        # Overall score (weighted average; renormalised so total weight == 1)
         weights = {"structural": 0.25, "word_count": 0.25, "repetition": 0.20,
                     "hook": 0.10, "coherence": 0.10, "factual": 0.05,
-                    "source_sim": 0.05}
+                    "source_sim": 0.05, "hook_promise": 0.02,
+                    "novelty": 0.02, "rhetorical": 0.02, "claim_honesty": 0.02}
         result.score = (
             result.structural_score * weights["structural"]
             + result.word_count_score * weights["word_count"]
@@ -179,7 +275,11 @@ class ScriptValidator:
             + result.coherence_score * weights["coherence"]
             + fg_score * weights["factual"]
             + ss_score * weights["source_sim"]
-        )
+            + hook_promise_score * weights["hook_promise"]
+            + novelty_score * weights["novelty"]
+            + rhetorical_score * weights["rhetorical"]
+            + claim_score * weights["claim_honesty"]
+        ) / sum(weights.values())
 
         result.details["severe_issues"] = severe_issues
         result.passes = len(severe_issues) == 0
@@ -332,6 +432,165 @@ class ScriptValidator:
                 issues.append(f"Weak hook: opening matches '{pattern}'")
                 score = 0.5
                 break
+
+        return {"score": score, "issues": issues}
+
+    # ── Fase 2 editorial checks (warnings only, never severe) ─────
+
+    def _check_hook_promise(self, script: dict) -> dict:
+        """Warn when the opening hook announces no concrete promise.
+
+        A strong hook states an explicit payoff (a case, a discovery, a
+        question whose answer the script resolves). A generic "en este
+        video..." opening is flagged as a warning, never as a failure.
+        """
+        issues: list[str] = []
+        score = 1.0
+
+        bloques = script.get("bloques", [])
+        if bloques and isinstance(bloques[0], dict) and bloques[0].get("texto"):
+            first_block_text = bloques[0]["texto"]
+        else:
+            guion = script.get("guion", "") or ""
+            sentences = re.split(r"(?<=[.!?])\s+", guion.strip())
+            first_block_text = sentences[0] if sentences else ""
+        first_block_text = first_block_text.strip()
+        if not first_block_text:
+            return {"score": score, "issues": issues}
+
+        lowered = first_block_text.lower()
+        has_promise = any(re.search(p, lowered) for p in PROMISE_PATTERNS)
+        has_fact = bool(re.search(CONCRETENESS_PATTERN, first_block_text))
+        is_generic = any(re.search(p, lowered) for p in GENERIC_HOOK_PATTERNS)
+
+        if is_generic and not has_promise and not has_fact:
+            issues.append(
+                "Hook promise: opening is generic and announces no concrete promise"
+            )
+            score = HOOK_PROMISE_GENERIC_SCORE
+        elif not has_promise and not has_fact:
+            issues.append(
+                "Hook promise: no concrete promise or verifiable fact in the opening"
+            )
+            score = HOOK_PROMISE_VAGUE_SCORE
+
+        return {"score": score, "issues": issues}
+
+    def _check_novelty(self, bloques: list[dict]) -> dict:
+        """Measure how much NEW content consecutive blocks contribute.
+
+        Complements ``_check_repetition`` (which compares surface similarity)
+        by using token overlap (Jaccard). Low average novelty across the script
+        signals filler / rephrasing, emitted as a warning only.
+        """
+        issues: list[str] = []
+        score = 1.0
+
+        texts = [b.get("texto", "") or "" for b in bloques]
+        novelties: list[float] = []
+        for a, b in zip(texts, texts[1:]):
+            if len(a) < NOVELTY_BLOCK_MIN_CHARS or len(b) < NOVELTY_BLOCK_MIN_CHARS:
+                continue
+            toks_a = {w for w in re.findall(r"\w+", a.lower()) if len(w) >= 4}
+            toks_b = {w for w in re.findall(r"\w+", b.lower()) if len(w) >= 4}
+            if not toks_a or not toks_b:
+                continue
+            union = toks_a | toks_b
+            overlap = toks_a & toks_b
+            novelties.append(1.0 - (len(overlap) / len(union)))
+
+        if not novelties:
+            return {"score": score, "issues": issues}
+
+        avg_novelty = sum(novelties) / len(novelties)
+        if avg_novelty < NOVELTY_MIN_RATIO:
+            issues.append(
+                f"Novelty: low new-content ratio between consecutive blocks "
+                f"({avg_novelty:.0%} < {NOVELTY_MIN_RATIO:.0%}) — possible filler"
+            )
+            score = max(0.3, avg_novelty / NOVELTY_MIN_RATIO)
+        elif avg_novelty < NOVELTY_MIN_RATIO + 0.15:
+            score = 0.85
+
+        return {"score": score, "issues": issues}
+
+    def _check_rhetorical_questions(self, script: dict,
+                                    bloques: list[dict]) -> dict:
+        """Warn when rhetorical questions are overused or chained.
+
+        A few questions are fine; a run of 3+ consecutive questions (or a
+        script-wide ratio above ``MAX_RHETORICAL_QUESTION_RATIO``) is padding.
+        """
+        issues: list[str] = []
+        score = 1.0
+
+        guion = script.get("guion", "") or " ".join(
+            b.get("texto", "") for b in bloques if isinstance(b, dict)
+        )
+        sentences = [
+            s.strip() for s in re.split(r"(?<=[.!?])\s+", guion) if s.strip()
+        ]
+        if not sentences:
+            return {"score": score, "issues": issues}
+
+        n_questions = sum(1 for s in sentences if s.endswith("?"))
+        ratio = n_questions / max(1, len(sentences))
+
+        max_run = run = 0
+        for s in sentences:
+            if s.endswith("?"):
+                run += 1
+                max_run = max(max_run, run)
+            else:
+                run = 0
+
+        if max_run >= 3 or ratio > MAX_RHETORICAL_QUESTION_RATIO:
+            issues.append(
+                f"Rhetorical questions: {n_questions}/{len(sentences)} sentences "
+                f"({ratio:.0%}), max consecutive run {max_run}"
+            )
+            score = max(0.4, 1.0 - ratio)
+
+        return {"score": score, "issues": issues}
+
+    def _check_claim_honesty(self, bloques: list[dict]) -> dict:
+        """Warn about absolute claims stated without any hedge marker.
+
+        Heuristic complement to factual grounding: sentences that assert
+        absolutes ("siempre", "nunca", "demostrado") with no hedge
+        ("según", "podría", "hipótesis") may present hypotheses as facts.
+        """
+        issues: list[str] = []
+        score = 1.0
+
+        sentences: list[str] = []
+        for b in bloques:
+            text = b.get("texto", "") or ""
+            sentences.extend(
+                s.strip()
+                for s in re.split(r"(?<=[.!?])\s+", text)
+                if s.strip()
+            )
+        if not sentences:
+            return {"score": score, "issues": issues}
+
+        absolute = 0
+        hedged = 0
+        for s in sentences:
+            low = s.lower()
+            if any(re.search(p, low) for p in ABSOLUTE_CLAIM_PATTERNS):
+                absolute += 1
+                if any(re.search(h, low) for h in HEDGE_MARKERS):
+                    hedged += 1
+
+        unhedged = absolute - hedged
+        ratio = unhedged / max(1, len(sentences))
+        if unhedged >= 2 and ratio > CLAIM_ABSOLUTE_MIN_RATIO:
+            issues.append(
+                f"Claim honesty: {unhedged} absolute claim(s) without hedge "
+                f"markers ({ratio:.0%} of sentences)"
+            )
+            score = max(0.4, 1.0 - ratio)
 
         return {"score": score, "issues": issues}
 

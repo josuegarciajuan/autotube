@@ -378,6 +378,16 @@ PIXABAY_API_TIMEOUT = 30
 # override it via their config / DB config_json.
 ASSET_DECISION_LOG_ENABLED = True
 
+# Fase 2 (calidad-coherencia): editorial review of generated scripts.
+# OFF by default — when enabled, generate_v2 attempts at most
+# SCRIPT_EDITORIAL_REVIEW_MAX_CALLS repair passes and keeps the ORIGINAL
+# script unless the repaired version passes validation AND improves the
+# validator score. Purely additive: it never triggers model failover and
+# never blocks generation (fail-open). Channels may override both keys via
+# their config / DB config_json.
+SCRIPT_EDITORIAL_REVIEW_ENABLED = False
+SCRIPT_EDITORIAL_REVIEW_MAX_CALLS = 1
+
 MEDIA_STRATEGY = {
     # ── Existing ────────────────────────────────────────────────
     "media_per_block": 1,

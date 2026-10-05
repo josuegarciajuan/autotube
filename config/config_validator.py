@@ -303,6 +303,40 @@ def validate_channel_config(slug: str, config: Dict[str, Any]) -> List[str]:
             )
             config["ASSET_DECISION_LOG_ENABLED"] = True
 
+    # ── Fase 2: editorial review flags (tolerant, never break configs) ──
+    # `SCRIPT_EDITORIAL_REVIEW_ENABLED` gates the bounded editorial repair of
+    # generated scripts. Non-boolean values are forced to the safe default OFF.
+    if "SCRIPT_EDITORIAL_REVIEW_ENABLED" in config:
+        val = config.get("SCRIPT_EDITORIAL_REVIEW_ENABLED")
+        if not isinstance(val, bool):
+            warnings.append(
+                f"[{slug}] SCRIPT_EDITORIAL_REVIEW_ENABLED={val!r} "
+                f"is not boolean — forcing False"
+            )
+            config["SCRIPT_EDITORIAL_REVIEW_ENABLED"] = False
+
+    # `SCRIPT_EDITORIAL_REVIEW_MAX_CALLS` bounds the number of repair passes
+    # (0-3, default 1). Non-numeric values fall back to 1; out-of-range values
+    # are clamped, never rejected.
+    if "SCRIPT_EDITORIAL_REVIEW_MAX_CALLS" in config:
+        default_calls = 1
+        val = config.get("SCRIPT_EDITORIAL_REVIEW_MAX_CALLS")
+        if isinstance(val, bool) or not isinstance(val, (int, float)):
+            warnings.append(
+                f"[{slug}] SCRIPT_EDITORIAL_REVIEW_MAX_CALLS={val!r} "
+                f"is not an integer — forcing {default_calls}"
+            )
+            config["SCRIPT_EDITORIAL_REVIEW_MAX_CALLS"] = default_calls
+        else:
+            ival = int(val)
+            if ival < 0 or ival > 3:
+                clamped = max(0, min(3, ival))
+                warnings.append(
+                    f"[{slug}] SCRIPT_EDITORIAL_REVIEW_MAX_CALLS={val!r} "
+                    f"out of range [0, 3] — clamping to {clamped}"
+                )
+                config["SCRIPT_EDITORIAL_REVIEW_MAX_CALLS"] = clamped
+
     # ── Log results ────────────────────────────────────────────
     if warnings:
         for w in warnings:

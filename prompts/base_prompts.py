@@ -491,7 +491,11 @@ REGLAS ESTRICTAS:
 4. Incluye detalles sensoriales, descripciones vividas y contexto.
 5. NO uses relleno ni repeticiones. PROHIBIDO repetir los mismos ejemplos.
 6. CRITICO: Cada bloque debe CONTENER al menos un hecho concreto (numero, fecha, nombre, lugar, cita).
-7. ENGANCHE INICIAL: Los primeros bloques deben ser ALTAMENTE intrigantes. NUNCA empieces con frases como "En este video vamos a..." o "Hoy hablaremos de...".{source_context}{context_text}{outline_context}
+7. ENGANCHE INICIAL: Los primeros bloques deben ser ALTAMENTE intrigantes. NUNCA empieces con frases como "En este video vamos a..." o "Hoy hablaremos de...".
+8. GANCHO CON PROMESA CONCRETA: los primeros bloques deben anunciar una promesa ESPECIFICA (un caso, un dato, un enigma verificable o una pregunta cuya respuesta se resuelve en el guion). PROHIBIDO el gancho generico tipo "En este video...", "Hoy hablaremos de...", "Vamos a descubrir..." sin concretar QUE se resuelve. El guion DEBE resolver esa promesa antes del cierre.
+9. PROGRESION REAL: cada bloque APORTA informacion NUEVA. PROHIBIDO reformular el bloque anterior con sinonimos, repetir el mismo ejemplo y encadenar preguntas retoricas seguidas ("Pero que paso? Y por que? Quien lo hizo?"). Si no hay contenido nuevo, termina antes.
+10. HONESTIDAD EPISTEMICA: separa explicitamente HECHO DOCUMENTADO, HIPOTESIS y RECREACION. Usa marcadores ("se sabe que...", "los registros indican...", "se especula que...", "podria haber...", "segun..."). PROHIBIDO presentar una hipotesis como hecho ni afirmar en absoluto sin respaldo ("siempre", "nunca", "sin duda", "esta demostrado") cuando la fuente no lo confirma.
+11. ACCION VISUALIZABLE: cuando el fragmento describe una accion, conservala de forma visualizable (quien hace que, donde y como), sin convertirla en abstraccion ni en metafora vacia.{source_context}{context_text}{outline_context}
 
 {playbook}{directive_block}
 Genera entre 2 y 4 bloques narrativos (~{word_guidance} palabras total).
