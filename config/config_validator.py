@@ -337,6 +337,20 @@ def validate_channel_config(slug: str, config: Dict[str, Any]) -> List[str]:
                 )
                 config["SCRIPT_EDITORIAL_REVIEW_MAX_CALLS"] = clamped
 
+    # ── Fase 3: temporal overrides flag (tolerant, default True) ──
+    # `THEME_TEMPORAL_OVERRIDES_ENABLED` lets deliberate temporal segments
+    # override the global era and exempt those scenes from anachronism vetoes.
+    # Non-boolean values are coerced to the safe default True (never breaks
+    # existing configs).
+    if "THEME_TEMPORAL_OVERRIDES_ENABLED" in config:
+        val = config.get("THEME_TEMPORAL_OVERRIDES_ENABLED")
+        if not isinstance(val, bool):
+            warnings.append(
+                f"[{slug}] THEME_TEMPORAL_OVERRIDES_ENABLED={val!r} "
+                f"is not boolean — forcing True"
+            )
+            config["THEME_TEMPORAL_OVERRIDES_ENABLED"] = True
+
     # ── Log results ────────────────────────────────────────────
     if warnings:
         for w in warnings:

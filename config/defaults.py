@@ -388,6 +388,14 @@ ASSET_DECISION_LOG_ENABLED = True
 SCRIPT_EDITORIAL_REVIEW_ENABLED = False
 SCRIPT_EDITORIAL_REVIEW_MAX_CALLS = 1
 
+# Fase 3 (calidad-coherencia): deliberate temporal segments.
+# When True, per-scene ``temporal_segments`` from the theme context override
+# the global era for the scenes they cover and exempt those scenes from
+# anachronism vetoes (e.g. a present-day excavation inside a historical
+# documentary). Purely additive and fail-open: no segment → global era.
+# Channels may override it via their config / DB config_json.
+THEME_TEMPORAL_OVERRIDES_ENABLED = True
+
 MEDIA_STRATEGY = {
     # ── Existing ────────────────────────────────────────────────
     "media_per_block": 1,
