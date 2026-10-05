@@ -744,22 +744,40 @@ así que quedan fuera. La casa no se etiqueta (no debe auto-cargarse).
 **Activación en producción:** `deploy/autotube-panel.service` exporta
 `AUTOTUBE_DIST_IMAGES=1` (vía drop-in en `/etc/systemd/system/autotube-panel.service.d/`).
 Ajustes por entorno (sin tocar código):
-`AUTOTUBE_DIST_SD_THREADS` (def. 3), `AUTOTUBE_DIST_SD_MAX_INFLIGHT` (def. 6),
+`AUTOTUBE_DIST_SD_THREADS` (def. código 3; **drop-in de producción = 2**),
+`AUTOTUBE_DIST_SD_MAX_INFLIGHT` (def. 6),
+`AUTOTUBE_DIST_SD_MAX_SCENES` (def. 0 = todas las AI-tier; >0 acota el nº de
+imágenes pre-generadas por vídeo — cap de seguridad),
 `AUTOTUBE_DIST_SD_TIMEOUT_SEC` / `AUTOTUBE_DIST_SD_PER_IMAGE_SEC` (timeout escalado),
-`AUTOTUBE_DIST_SD_STALL_SEC` (def. 900 s → cancela y cae a local si no hay nodo elegible).
+`AUTOTUBE_DIST_SD_STALL_SEC` (def. 900 s → cancela y cae a local si no hay progreso).
+
+> **Fuente de verdad del tuning:** el drop-in real
+> `/etc/systemd/system/autotube-panel.service.d/10-superserver-dist.conf` fija
+> `AUTOTUBE_DIST_SD_THREADS=2` y `AUTOTUBE_DIST_SD_MAX_INFLIGHT=6` (medido mejor
+> que 3 por sobre-suscripción). `deploy/autotube-panel.service` no versiona estos
+> valores; si se cambian, actualizar drop-in + esta nota.
+
+**Alcance de la pre-generación (ago-oct 2026).** `_prefetch_ai_images` **acota**
+la flota a las escenas cuyo primer tier es IA (`_classify_scenes` →
+`scene_types[i] == "ai_image"`). Las `video_priority`/`stock_image_priority`
+resuelven con stock primero y solo caen a `local_sd` tarde: pre-generarlas era
+coste puro (antes 1 imagen por CADA escena → ~2 h de flota por vídeo, aunque
+`ai_image_providers` prefiera `pollinations` y solo use la caché si este falla).
+Se preserva el índice GLOBAL de escena para que el hash de prompt coincida 1:1
+con `_try_ai_image_chain`. Si la clasificación falla, no se acota (fail-open).
 
 **Elegibilidad de nodos (medido oct 2026).** La unidad de imagen pide
-`cores = AUTOTUBE_DIST_SD_THREADS` (def. 3). Consecuencia: un nodo con menos cores
-(p. ej. `vps649560`, 2 cores) queda **excluido** por capacidad aunque tenga la
-imagen `autotube-sd:1`, y un nodo ya cargado (`oficina`, load ~4.6/4) tampoco se usa.
-Resultado: toda la pre-generación IA cae en `mail` (10 cores) y se sobre-suscribe
-(`maxInflight=6` × `threads=3` = 18 hilos en 10 cores ≈ 3 min/imagen, sin mejora
-frente a local). Para repartir de verdad hay que **bajar `AUTOTUBE_DIST_SD_THREADS`
-a 2** (o el `req.cores` de la unidad) y/o subir `AUTOTUBE_DIST_SD_MAX_INFLIGHT`, y
-descargar `oficina`; validar con un job real antes de fijarlo. La guardia de
-estancamiento (`_wait_dist_stall_aware`) ya **no** considera `inflight>0` como
-progreso: si no crece `accepted`/`generated` en `AUTOTUBE_DIST_SD_STALL_SEC`, cancela
-y cae a local (antes un worker colgado podía colgar el vídeo hasta el timeout).
+`cores = AUTOTUBE_DIST_SD_THREADS` (**2 en producción**). Con 2 cores, `vps649560`
+entra; con 3 quedaba excluido. Con el drop-in a 2, la pre-generación de 2530
+repartió entre `mail` (47), `oficina` (26) y `vps649560` (16). Subir a 3 vuelve a
+excluir el nodo de 2 cores y sobre-suscribe `mail`; validar con un job real antes
+de cambiarlo.
+
+La guardia de estancamiento (`_wait_dist_stall_aware`) **no** considera `inflight>0`
+como progreso: si no crece `accepted`/`generated` en `AUTOTUBE_DIST_SD_STALL_SEC`,
+cancela y cae a local. Además, el chequeo corre también cuando el motor **nunca
+publica** `results/<eid>.json` (`status() is None`): antes ese caso solo esperaba el
+ceiling completo (hasta 25 h con 150 escenas).
 
 **Equivalencia funcional (local ↔ flota).** El objetivo es que la ejecución en
 la flota produzca el mismo resultado que en la casa. Garantizado por construcción:
