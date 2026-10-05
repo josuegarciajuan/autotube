@@ -114,8 +114,36 @@ class DistributedOrchestrator(PipelineOrchestrator):
         if getattr(self.media_fetcher, "_local_sd", None) is None:
             logger.info("[%s] ai-image: sin proveedor local_sd; ruta local.", self.canal)
             return None
+        # Acotar la pre-generación a las escenas cuyo PRIMER tier es IA. Las
+        # `video_priority`/`stock_image_priority` intentan stock primero y solo
+        # llegan a local_sd como fallback tardío: pre-generarlas es coste puro
+        # (antes se generaba 1 imagen por CADA escena → ~2 h de flota por vídeo).
+        # Reutilizamos la clasificación real del media_fetcher para no divergir.
+        only_indices = None
+        cap = int(os.environ.get("AUTOTUBE_DIST_SD_MAX_SCENES", "0") or 0)
         try:
-            return self._prefetch_ai_images_dist(scene_ranges, script)
+            _, _, scene_types = self.media_fetcher._classify_scenes(scene_ranges)
+            only_indices = {i for i, t in scene_types.items() if t == "ai_image"}
+        except Exception as exc:  # noqa: BLE001 — si no se puede clasificar, no acotamos
+            logger.warning(
+                "[%s] ai-image: clasificación de tiers no disponible (%s); sin acotar.",
+                self.canal, exc,
+            )
+        if only_indices is not None:
+            if cap > 0 and len(only_indices) > cap:
+                # Cap de seguridad (AUTOTUBE_DIST_SD_MAX_SCENES): prioriza las
+                # primeras escenas AI-tier por orden de narración.
+                only_indices = set(sorted(only_indices)[:cap])
+            if not only_indices:
+                logger.info(
+                    "[%s] ai-image: ninguna escena AI-tier; la flota no pre-genera.",
+                    self.canal,
+                )
+                return None
+        try:
+            return self._prefetch_ai_images_dist(
+                scene_ranges, script, only_indices=only_indices,
+            )
         except Exception as exc:  # noqa: BLE001 — cualquier fallo => local
             logger.warning(
                 "[%s] Pre-generación IA distribuida no aplicable (%s: %s); local.",
@@ -123,10 +151,19 @@ class DistributedOrchestrator(PipelineOrchestrator):
             )
             return None
 
-    def _prefetch_ai_images_dist(self, scene_ranges: list, script: Optional[dict]):
+    def _prefetch_ai_images_dist(self, scene_ranges: list, script: Optional[dict],
+                                 only_indices: Optional[set[int]] = None):
         mf = self.media_fetcher
         provider = mf._local_sd
-        n_scenes = len(scene_ranges)
+        n_scenes = len(scene_ranges)  # total real (para prompts/semillas 1:1)
+        # Escenas a pre-generar: por defecto todas; con `only_indices`, solo las
+        # AI-tier. Se preserva el índice GLOBAL para que `_build_ai_request` y el
+        # hash de prompt coincidan exactamente con `_try_ai_image_chain`.
+        selected = [(i, s) for i, s in enumerate(scene_ranges)
+                    if only_indices is None or i in only_indices]
+        n_expected = len(selected)
+        if n_expected == 0:
+            return None
         video_id = int(self.db_video_id or 0)
         script_id = str((script or {}).get("id") or "")
         seed_salt = f"{self.canal}:{video_id}:{script_id}"
@@ -153,7 +190,7 @@ class DistributedOrchestrator(PipelineOrchestrator):
 
         images_params = []
         prompt_by_key: dict[str, str] = {}
-        for i, scene in enumerate(scene_ranges):
+        for i, scene in selected:
             prompt, negative, _seed = mf._build_ai_request(scene, i, n_scenes)
             digest8 = hashlib.sha1(
                 f"{seed_salt}:{i}:{prompt}".encode("utf-8")
@@ -203,7 +240,7 @@ class DistributedOrchestrator(PipelineOrchestrator):
             "memMb": int(os.environ.get("AUTOTUBE_DIST_SD_MEM_MB", "4600") or 4600),
             "requiresTags": tags,
         }
-        self._emit_progress(43, "images", f"Imágenes IA en la flota: 0/{n_scenes}")
+        self._emit_progress(43, "images", f"Imágenes IA en la flota: 0/{n_expected}")
         eid = dsl_client.submit(
             "autotube-ai-image", params, exec_id=exec_id,
             label=f"autotube ai-image {self.canal}",
@@ -211,22 +248,23 @@ class DistributedOrchestrator(PipelineOrchestrator):
             max_attempts=3, max_units=len(images_params) + 16,
             req={"cores": params["threads"], "memMb": params["memMb"]},
         )
-        logger.info("[%s] ai-image exec=%s (%d escenas)", self.canal, eid, n_scenes)
+        logger.info("[%s] ai-image exec=%s (%d escenas AI-tier de %d)",
+                    self.canal, eid, n_expected, n_scenes)
         # La espera debe cubrir TODAS las imágenes (se reparten de forma
         # concurrente). Ceiling generoso; `wait` retorna al acabar. Se puede
         # fijar explícitamente con AUTOTUBE_DIST_SD_TIMEOUT_SEC.
         _ceiling = float(os.environ.get("AUTOTUBE_DIST_SD_TIMEOUT_SEC", "0") or 0)
         if _ceiling <= 0:
             _per_img = float(os.environ.get("AUTOTUBE_DIST_SD_PER_IMAGE_SEC", "600") or 600)
-            _ceiling = max(1800.0, n_scenes * _per_img)
+            _ceiling = max(1800.0, n_expected * _per_img)
         timeout = _ceiling
 
         def _progress(summary: dict) -> None:
             p = (summary or {}).get("progress") or {}
             acc = int(p.get("accepted") or 0)
             self._emit_progress(
-                43 + int(8 * acc / max(1, n_scenes)), "images",
-                f"Imágenes IA en la flota: {acc}/{n_scenes}",
+                43 + int(8 * acc / max(1, n_expected)), "images",
+                f"Imágenes IA en la flota: {acc}/{n_expected}",
             )
 
         summary = self._wait_dist_stall_aware(
@@ -238,9 +276,9 @@ class DistributedOrchestrator(PipelineOrchestrator):
                 f"ai-image {summary.get('status')}: {summary.get('error')}"
             )
         entries = (summary.get("result") or {}).get("images") or []
-        if len(entries) != n_scenes:
+        if len(entries) != n_expected:
             raise ScenePlanError(
-                f"ai-image devolvió {len(entries)} imágenes, esperaba {n_scenes}"
+                f"ai-image devolvió {len(entries)} imágenes, esperaba {n_expected}"
             )
 
         cache_by_hash: dict[str, str] = {}
@@ -283,6 +321,10 @@ class DistributedOrchestrator(PipelineOrchestrator):
         last = None
         while time.time() < deadline:
             st = dsl_client.status(eid)
+            accepted = last_accepted
+            generated = last_generated
+            inflight = 0
+            pending = 0
             if st is not None:
                 if progress_cb is not None:
                     try:
@@ -301,13 +343,17 @@ class DistributedOrchestrator(PipelineOrchestrator):
                     last_progress = time.time()
                     last_accepted = accepted
                     last_generated = generated
-                elif (time.time() - last_progress) > stall_sec:
-                    dsl_client.cancel(eid)
-                    raise ScenePlanError(
-                        f"sin progreso {stall_sec:.0f}s "
-                        f"(accepted={accepted}, generated={generated}, "
-                        f"inflight={inflight}, pending={pending}); cancelado"
-                    )
+            # Guardia de estancamiento FUERA de `if st is not None`: si el motor
+            # nunca publica `results/<eid>.json` (nodo no elegible, engine caído),
+            # `status()` devuelve None y antes solo aplicaba el ceiling completo
+            # (hasta 25 h con 150 escenas). Ahora se cancela y cae a local.
+            if (time.time() - last_progress) > stall_sec:
+                dsl_client.cancel(eid)
+                raise ScenePlanError(
+                    f"sin progreso {stall_sec:.0f}s "
+                    f"(accepted={accepted}, generated={generated}, "
+                    f"inflight={inflight}, pending={pending}); cancelado"
+                )
             time.sleep(2.0)
         dsl_client.cancel(eid)
         raise ScenePlanError(f"ai-image timeout {timeout:.0f}s; cancelado")
