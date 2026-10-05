@@ -143,6 +143,11 @@ class MediaFetcher:
         self._visual_gates: dict[int, object] = {}
         self._visual_observations: list[dict] = []
         self._visual_observed_paths: set[str] = set()
+        # Fase 4b alerting: per-video accumulator for enforce over-rejection.
+        # Kept separate from the observation log so alerting never mutates the
+        # verifier's accept/reject semantics (reset at fetch_for_script).
+        self._vv_stats: dict = self._new_visual_verify_stats()
+        self._vv_rejected_scenes: set[int] = set()
 
         # ── Video provider chain ───────────────────────────────
         self.video_providers: list = []
@@ -445,6 +450,11 @@ class MediaFetcher:
                 bucket = []
                 self._visual_observations = bucket
             bucket.append(data)
+            # Fase 4b alerting: aggregate per-video counters (fail-open).
+            try:
+                self._accumulate_visual_observation(data)
+            except Exception:
+                pass
             logger.info(
                 "visual_observation scene=%s type=%s path=%s frames=%s "
                 "logo=%s corners=%s sharpness=%s text_edges=%s width=%s "
@@ -469,6 +479,280 @@ class MediaFetcher:
     def get_visual_observations(self) -> list[dict]:
         """Structured observations gathered during the last fetch (observability)."""
         return list(self._visual_observations)
+
+    # ── Fase 4b alerting: per-video enforce-over-rejection aggregation ────
+
+    @staticmethod
+    def _new_visual_verify_stats() -> dict:
+        """Fresh per-video accumulator. Purely observational (never gates)."""
+        return {
+            "verified": 0,
+            "rejected": 0,
+            "reasons": {},
+            "accepted": 0,
+            "scenes_with_no_asset": [],
+            "scenes_fallback_image_after_reject": [],
+        }
+
+    @staticmethod
+    def _coerce_scene_idx(value) -> int | None:
+        try:
+            if value is None:
+                return None
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _safe_int(value, default: int) -> int:
+        if isinstance(value, bool):
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _safe_float(value, default: float) -> float:
+        if isinstance(value, bool):
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _visual_reject_category(data: dict) -> str:
+        """Normalise a rejected observation into ``logo``/``low_res``/``error``."""
+        try:
+            value = str(data.get("reject_reason") or "").strip().lower()
+            if value:
+                return value
+            reason = str(data.get("reason") or "").strip().lower()
+            if reason.startswith("logo"):
+                return "logo"
+            if reason.startswith("low_res"):
+                return "low_res"
+            if data.get("error"):
+                return "error"
+            return reason or "unknown"
+        except Exception:  # pragma: no cover - defensive
+            return "unknown"
+
+    def _accumulate_visual_observation(self, data: dict) -> None:
+        """Update the per-video visual-verify counters from one observation.
+
+        Every ``verify_asset`` call records an observation through
+        ``_record_visual_observation`` (the single choke point), so this keeps
+        ``verified == accepted + rejected`` without touching accept/reject
+        semantics.  Fail-open by design.
+        """
+        stats = getattr(self, "_vv_stats", None)
+        if not isinstance(stats, dict):
+            stats = self._new_visual_verify_stats()
+            self._vv_stats = stats
+        stats["verified"] = self._safe_int(stats.get("verified"), 0) + 1
+        if data.get("rejected"):
+            stats["rejected"] = self._safe_int(stats.get("rejected"), 0) + 1
+            reasons = stats.get("reasons")
+            if not isinstance(reasons, dict):
+                reasons = {}
+                stats["reasons"] = reasons
+            category = self._visual_reject_category(data)
+            reasons[category] = self._safe_int(reasons.get(category), 0) + 1
+            scene_idx = self._coerce_scene_idx(data.get("scene_idx"))
+            if scene_idx is None:
+                scene_idx = self._coerce_scene_idx(
+                    getattr(self, "_current_scene_idx", None)
+                )
+            if scene_idx is not None:
+                bad = getattr(self, "_vv_rejected_scenes", None)
+                if not isinstance(bad, set):
+                    bad = set()
+                    self._vv_rejected_scenes = bad
+                bad.add(scene_idx)
+        else:
+            stats["accepted"] = self._safe_int(stats.get("accepted"), 0) + 1
+
+    def _track_visual_scene_outcome(self, scene_idx, asset) -> None:
+        """Record scenes left asset-less / image-fallback after an enforce reject.
+
+        Only scenes with at least one enforce discard are considered (that is
+        the failure mode this alerting targets); a plain media miss with no
+        visual rejection is out of scope.
+        """
+        try:
+            stats = getattr(self, "_vv_stats", None)
+            bad = getattr(self, "_vv_rejected_scenes", None)
+            if not isinstance(stats, dict) or not isinstance(bad, set):
+                return
+            idx = self._coerce_scene_idx(scene_idx)
+            if idx is None or idx not in bad:
+                return
+            atype = str(asset.get("type") or "") if isinstance(asset, dict) else ""
+            has_path = bool(isinstance(asset, dict) and asset.get("path"))
+            if not has_path or atype in ("placeholder", "duplicate"):
+                key = "scenes_with_no_asset"
+            elif atype == "image":
+                key = "scenes_fallback_image_after_reject"
+            else:
+                return
+            bucket = stats.get(key)
+            if not isinstance(bucket, list):
+                bucket = []
+                stats[key] = bucket
+            if idx not in bucket:
+                bucket.append(idx)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _alert_slug(value) -> str:
+        try:
+            slug = re.sub(r"[^a-z0-9]+", "_", str(value or "").lower()).strip("_")
+            return slug or "unknown"
+        except Exception:  # pragma: no cover - defensive
+            return "unknown"
+
+    def _emit_visual_verify_alerts(self) -> None:
+        """Emit aggregated critical alerts for enforce over-rejection.
+
+        Absolute fail-open: any failure (including a failing ``obs_alert``)
+        is swallowed so alerting can never break generation.  Dedup is handled
+        by ``emit_alert`` on ``(entity_type, entity_id, alert_type)``.
+        """
+        try:
+            stats = getattr(self, "_vv_stats", None)
+            if not isinstance(stats, dict):
+                return
+            if not bool(getattr(self._config, "VISUAL_VERIFY_ALERT_ENABLED", True)):
+                return
+            verified = self._safe_int(stats.get("verified"), 0)
+            if verified <= 0:
+                return
+            rejected = self._safe_int(stats.get("rejected"), 0)
+            accepted = self._safe_int(stats.get("accepted"), 0)
+            reasons: dict[str, int] = {}
+            for key, value in (stats.get("reasons") or {}).items():
+                reasons[str(key)] = self._safe_int(value, 0)
+            no_asset: list[int] = []
+            for value in stats.get("scenes_with_no_asset") or []:
+                idx = self._safe_int(value, -1)
+                if idx >= 0 and idx not in no_asset:
+                    no_asset.append(idx)
+            fallback: list[int] = []
+            for value in stats.get("scenes_fallback_image_after_reject") or []:
+                idx = self._safe_int(value, -1)
+                if idx >= 0 and idx not in fallback:
+                    fallback.append(idx)
+
+            ratio = rejected / verified
+            min_candidates = max(
+                0,
+                self._safe_int(
+                    getattr(self._config, "VISUAL_VERIFY_ALERT_MIN_CANDIDATES", 5), 5
+                ),
+            )
+            threshold = self._safe_float(
+                getattr(self._config, "VISUAL_VERIFY_ALERT_REJECT_RATIO", 0.5), 0.5
+            )
+            threshold = min(1.0, max(0.0, threshold))
+            scene_all_failed = bool(
+                getattr(self._config, "VISUAL_VERIFY_ALERT_SCENE_ALL_FAILED", True)
+            )
+
+            from pipeline.observability import get_context, obs_alert, obs_event
+
+            ctx = get_context() or {}
+            video_id = self._safe_int(ctx.get("video_id"), -1)
+            channel_id = self._safe_int(ctx.get("channel"), -1)
+            if video_id < 0:
+                # Defensive fallback for callers that set the id on the fetcher
+                # instead of the observability context.
+                video_id = self._safe_int(getattr(self, "_video_id", None), -1)
+            if channel_id < 0:
+                channel_id = self._safe_int(getattr(self, "_channel_id", None), -1)
+            if video_id < 0:
+                video_id = None
+            if channel_id < 0:
+                channel_id = None
+            channel_slug = str(getattr(self._config, "CANAL_NAME", "") or "").strip()
+            scenes = len(getattr(self, "_current_scenes", []) or [])
+
+            base_meta = {
+                "video_id": video_id,
+                "channel": channel_id if channel_id is not None else channel_slug,
+                "scenes": scenes,
+                "verified": verified,
+                "rejected": rejected,
+                "accepted": accepted,
+                "ratio": round(ratio, 4),
+                "reasons": reasons,
+                "scenes_with_no_asset": no_asset,
+                "scenes_fallback_image_after_reject": fallback,
+            }
+
+            # Detail event for study, independent of whether an alert fires.
+            try:
+                obs_event("visual_verify_summary", **base_meta)
+            except Exception:
+                pass
+
+            def _resolve_entity(base_alert_type: str):
+                if video_id is not None:
+                    return base_alert_type, "video", video_id
+                if channel_id is not None:
+                    return base_alert_type, "system", channel_id
+                if channel_slug:
+                    return (
+                        f"{base_alert_type}_{self._alert_slug(channel_slug)}",
+                        "system",
+                        None,
+                    )
+                return base_alert_type, "system", None
+
+            if rejected > 0 and verified >= min_candidates and ratio >= threshold:
+                atype, etype, eid = _resolve_entity("visual_verify_over_rejection")
+                obs_alert(
+                    atype,
+                    severity="critical",
+                    title=(
+                        f"Rechazos visuales excesivos "
+                        f"({rejected}/{verified} = {ratio:.0%})"
+                    ),
+                    message=(
+                        f"El verificador visual descartó {rejected} de {verified} "
+                        f"candidatos ({ratio:.0%}); aceptados={accepted}, "
+                        f"motivos={reasons}, escenas_sin_asset={no_asset}, "
+                        f"escenas_imagen_tras_rechazo={fallback}."
+                    ),
+                    metadata=base_meta,
+                    entity_type=etype,
+                    entity_id=eid,
+                    channel_id=channel_id,
+                )
+
+            if scene_all_failed and no_asset:
+                atype, etype, eid = _resolve_entity("visual_verify_scene_no_asset")
+                obs_alert(
+                    atype,
+                    severity="critical",
+                    title=(
+                        f"Escena(s) sin asset tras descartes visuales "
+                        f"({len(no_asset)})"
+                    ),
+                    message=(
+                        f"{len(no_asset)} escena(s) {no_asset} se quedaron sin "
+                        f"asset tras descartar candidatos por enforce "
+                        f"(verified={verified}, rejected={rejected})."
+                    ),
+                    metadata=base_meta,
+                    entity_type=etype,
+                    entity_id=eid,
+                    channel_id=channel_id,
+                )
+        except Exception as exc:  # never let alerting break generation
+            logger.debug("visual verify alert emission failed (fail-open): %s", exc)
 
     def _get_visual_gate(self, scene_idx: int, target_dur: float):
         gate = self._visual_gates.get(scene_idx)
@@ -907,6 +1191,9 @@ class MediaFetcher:
         self._visual_gates = {}
         self._visual_observations = []
         self._visual_observed_paths = set()
+        # Alerting accumulator for this video (enforce over-rejection).
+        self._vv_stats = self._new_visual_verify_stats()
+        self._vv_rejected_scenes = set()
 
         # ── Hard abort counter: consecutive placeholder scenes ──
         _consecutive_black = 0
@@ -1020,6 +1307,9 @@ class MediaFetcher:
             # not go through _try_download_best_candidate. The stock candidate
             # gate already recorded its path, so it is skipped (no duplicate).
             asset = self._visual_observe_chosen(asset, scene, i)
+            # Fase 4b alerting: flag a scene left asset-less / on an image
+            # fallback after enforce discarded candidates (observability only).
+            self._track_visual_scene_outcome(i, asset)
 
             # ── Fase 0: structured decision log (observability only) ──
             self._asset_decision_record(
@@ -1198,6 +1488,9 @@ class MediaFetcher:
         # Fase 4b: measure video coverage by SCREEN TIME (not just scene count)
         # and warn — never abort — when it stays below the configured target.
         self._report_video_time_target(scenes, results)
+        # Fase 4b alerting: aggregated critical alerts when enforce rejected too
+        # many candidates or left scenes without an asset. Fail-open.
+        self._emit_visual_verify_alerts()
         return results
 
     def _report_video_time_target(
