@@ -50,7 +50,14 @@ _MEDIA_STRATEGY_RULES: List[Tuple[str, float, float, float, str]] = [
     # Fase 4a (calidad-coherencia): cap on scenes ending on a generic fallback
     # tier. Out-of-range values are forced back to 20 (warning only).
     ("max_generic_fallback_pct", 0.0, 100.0, 20.0, "media_strategy max_generic_fallback_pct"),
+    # Fase 4b: video coverage percentages. Percentages are bounded 0-100 and
+    # tolerated (never reject a config; clamp to the safe default instead).
+    ("video_scene_pct_max", 0.0, 100.0, 80.0, "media_strategy video_scene_pct_max"),
+    ("target_video_time_pct", 0.0, 100.0, 80.0, "media_strategy target_video_time_pct"),
 ]
+
+# Fase 4b: enum-valued flags fall back to their safe default when malformed.
+_VISUAL_VERIFY_MODES = ("off", "observe", "enforce")
 
 # Minimum sum of RGB channels for COLOR_PALETTE.secondary
 # to prevent fully-opaque black vignette overlay.
@@ -309,6 +316,57 @@ def validate_channel_config(slug: str, config: Dict[str, Any]) -> List[str]:
                         f"is not boolean — forcing {bool_default}"
                     )
                     media[bool_param] = bool_default
+
+        # Fase 4b: `video_scene_hard_cap` is unbounded above (0 = no fixed cap),
+        # so it cannot use a fixed max in `_MEDIA_STRATEGY_RULES`. Negative or
+        # non-numeric values are clamped to 0 (delegate to the RAM governor).
+        if "video_scene_hard_cap" in media:
+            val = media.get("video_scene_hard_cap")
+            try:
+                ival = int(val)
+            except (TypeError, ValueError):
+                warnings.append(
+                    f"[{slug}] MEDIA_STRATEGY.video_scene_hard_cap={val!r} "
+                    f"is not numeric — forcing 0 (no fixed cap)"
+                )
+                media["video_scene_hard_cap"] = 0
+            else:
+                if ival < 0:
+                    warnings.append(
+                        f"[{slug}] MEDIA_STRATEGY.video_scene_hard_cap={ival} "
+                        f"is negative — forcing 0 (no fixed cap)"
+                    )
+                    media["video_scene_hard_cap"] = 0
+
+    # ── Fase 4b: visual verifier flags (tolerant, default off) ──
+    # `VISUAL_VERIFY_MODE` is an enum string; anything else falls back to "off".
+    if "VISUAL_VERIFY_MODE" in config:
+        val = config.get("VISUAL_VERIFY_MODE")
+        mode = val.strip().lower() if isinstance(val, str) else ""
+        if mode not in _VISUAL_VERIFY_MODES:
+            warnings.append(
+                f"[{slug}] VISUAL_VERIFY_MODE={val!r} is not one of "
+                f"{_VISUAL_VERIFY_MODES} — forcing 'off'"
+            )
+            config["VISUAL_VERIFY_MODE"] = "off"
+        else:
+            config["VISUAL_VERIFY_MODE"] = mode
+
+    # `VISUAL_VERIFY_MAX_CANDIDATES` must be a positive integer; clamp >= 1.
+    if "VISUAL_VERIFY_MAX_CANDIDATES" in config:
+        default_candidates = 3
+        val = config.get("VISUAL_VERIFY_MAX_CANDIDATES")
+        if isinstance(val, bool) or not isinstance(val, (int, float)):
+            warnings.append(
+                f"[{slug}] VISUAL_VERIFY_MAX_CANDIDATES={val!r} "
+                f"is not an integer — forcing {default_candidates}"
+            )
+            config["VISUAL_VERIFY_MAX_CANDIDATES"] = default_candidates
+        elif int(val) < 1:
+            warnings.append(
+                f"[{slug}] VISUAL_VERIFY_MAX_CANDIDATES={val!r} < 1 — forcing 1"
+            )
+            config["VISUAL_VERIFY_MAX_CANDIDATES"] = 1
 
     # ── Top-level feature flags: tolerant, default True ────────
     # `ASSET_DECISION_LOG_ENABLED` controls the structured per-scene log.

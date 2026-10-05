@@ -396,6 +396,19 @@ SCRIPT_EDITORIAL_REVIEW_MAX_CALLS = 1
 # Channels may override it via their config / DB config_json.
 THEME_TEMPORAL_OVERRIDES_ENABLED = True
 
+# ── Fase 4b: verificador visual de assets (calidad-coherencia) ──────
+# "off"     → no-op absoluto (default; comportamiento actual intacto).
+# "observe" → analiza el candidato elegido y registra hallazgos; NUNCA
+#             descarta ni bloquea nada.
+# "enforce" → además descarta candidatos con logo confirmado o resolución
+#             claramente insuficiente y prueba el siguiente dentro del
+#             presupuesto. NO activar por defecto: fail-open ante cualquier
+#             error (si la verificación falla, se acepta el asset).
+VISUAL_VERIFY_MODE = "off"
+# Máximo de candidatos verificados por escena en modo "enforce". Al agotar
+# el presupuesto se acepta el siguiente candidato sin verificar (fail-open).
+VISUAL_VERIFY_MAX_CANDIDATES = 3
+
 MEDIA_STRATEGY = {
     # ── Existing ────────────────────────────────────────────────
     "media_per_block": 1,
@@ -445,24 +458,35 @@ MEDIA_STRATEGY = {
     "ai_local_sd_steps": 8,
     "AI_IMAGE_PROMPT_EXCEPTIONS": {"positive": [], "negative": []},
 
-    # ── Video Scene Control (Phase 2) ──────────────────────────
+    # ── Video Scene Control (Phase 2 / Fase 4b) ────────────────
     # Minimum % of scenes that should try stock video.
     "video_scene_pct_min": 20,
-    # Maximum % of scenes that may try stock video (if quality is high).
-    "video_scene_pct_max": 30,
+    # Maximum % of scenes that may try stock video. Fase 4b raises it to 80:
+    # clips are now eligible across the FULL runtime (position only decays
+    # their priority), with image fallback whenever no suitable clip exists.
+    "video_scene_pct_max": 80,
     # Absolute hard cap on number of video assets regardless of scene count.
-    "video_scene_hard_cap": 12,
+    # Fase 4b: 0 means "no fixed cap" — the RAM governor (MAX_ABSOLUTE_VIDEOS
+    # in media_fetcher) remains the safety ceiling. On long videos the
+    # governor may sit below `target_video_time_pct` (RAM safety first).
+    "video_scene_hard_cap": 0,
     # Only assign video to scenes within the first X% of total runtime.
+    # Fase 4b: kept as a *preference* window (priority decays faster outside
+    # it) but it no longer excludes late scenes.
     "video_first_half_pct": 40,
     # Minimum scene duration (seconds) to be eligible for video.
     # Matches the new VIDEO_SCENE_DURATION_MAX=7s pacing: scenes ≥6s in the
     # first half still qualify for stock video.
     "video_min_scene_duration": 6,
-    # Avg quality threshold (0-1). Above this → keep searching up to 30%.
+    # Avg quality threshold (0-1). Above this → keep searching up to max %.
     "video_quality_threshold": 0.5,
     # % of non-video scenes that prioritize real stock images (Pixabay/Unsplash)
     # over AI-generated images. 0 = AI-first everywhere (previous behavior).
     "stock_image_pct": 15,
+    # Fase 4b: share of the TOTAL screen time that should be covered by video
+    # rather than images. Measured by scene duration (not scene count);
+    # falling short only logs an informative warning — never aborts.
+    "target_video_time_pct": 80,
 
     # ── Pollo AI (credits, kept as absolute last resort) ───────
     "pollo_ai_enabled": True,

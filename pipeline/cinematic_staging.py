@@ -156,6 +156,57 @@ def _context_action_words(scene_context: Any) -> set[str]:
     return _words(getattr(scene_context, "action", "") or "", min_len=3)
 
 
+def scene_action_words(scene: Any) -> set[str]:
+    """Action words present in a raw scene dict or a ``SceneVisualContext``.
+
+    Fase 4b: ``_classify_scenes`` only sees raw scene dicts, so this helper
+    exposes the Fase 4a action vocabulary without forcing callers to build a
+    full context object.  Accepts either a dict (``action`` / ``fragment_text``
+    / ``texto`` / ``search_query_en``) or an object with ``action``/``fragment``.
+    Never raises.
+    """
+    try:
+        if scene is None:
+            return set()
+        if isinstance(scene, dict):
+            text = _text(
+                scene.get("action"),
+                scene.get("fragment_text"),
+                scene.get("texto"),
+                scene.get("search_query_en"),
+            )
+        else:
+            text = _text(
+                getattr(scene, "action", ""),
+                getattr(scene, "fragment", ""),
+            )
+        return _words(text, min_len=3) & ACTION_VERBS_EN
+    except Exception:
+        return set()
+
+
+def scene_has_action(scene: Any) -> bool:
+    """True when the scene narrates a concrete, camera-observable action.
+
+    Combines the shared ``ACTION_VERBS_EN`` vocabulary with the conservative
+    staging phrases from ``_ACTION_STAGING``.  Fail-open (False on error).
+    """
+    try:
+        if scene_action_words(scene):
+            return True
+        if isinstance(scene, dict):
+            source = _text(
+                scene.get("fragment_text"),
+                scene.get("texto"),
+                scene.get("search_query_en"),
+            )
+        else:
+            source = _text(getattr(scene, "fragment", ""), getattr(scene, "action", ""))
+        return bool(_staged_action_phrase(source))
+    except Exception:
+        return False
+
+
 def _scene_is_historical(theme_ctx: Any, scene_context: Any = None) -> bool:
     """Historical check that prefers the per-scene era (Fase 3 exemptions)."""
     if scene_context is not None:

@@ -121,6 +121,29 @@ class MediaFetcher:
             getattr(self._config, "ASSET_DECISION_LOG_ENABLED", True)
         )
 
+        # Fase 4b (calidad-coherencia): visual verifier. "off" (default) is an
+        # absolute no-op; "observe" records without discarding; "enforce" also
+        # discards confirmed-logo / clearly-low-res candidates within budget.
+        _verify_mode = getattr(self._config, "VISUAL_VERIFY_MODE", "off")
+        try:
+            _verify_mode = str(_verify_mode).strip().lower()
+        except Exception:
+            _verify_mode = "off"
+        self._visual_verify_mode = (
+            _verify_mode if _verify_mode in ("off", "observe", "enforce") else "off"
+        )
+        try:
+            self._visual_verify_max_candidates = max(
+                1, int(getattr(self._config, "VISUAL_VERIFY_MAX_CANDIDATES", 3))
+            )
+        except (TypeError, ValueError):
+            self._visual_verify_max_candidates = 3
+        # Per-scene CandidateGate (budget shared across pages/providers) and
+        # observation sinks. Reset at each fetch_for_script() boundary.
+        self._visual_gates: dict[int, object] = {}
+        self._visual_observations: list[dict] = []
+        self._visual_observed_paths: set[str] = set()
+
         # ── Video provider chain ───────────────────────────────
         self.video_providers: list = []
         self._build_video_provider_chain()
@@ -385,6 +408,124 @@ class MediaFetcher:
             )
         except Exception as exc:  # never let logging break the pipeline
             logger.debug("asset_decision log failed: %s", exc)
+
+    # ── Fase 4b: visual verifier helpers (fail-open, observe by default) ───
+
+    def _record_visual_observation(self, obs) -> None:
+        """Store + log ONE structured visual observation (never raises)."""
+        try:
+            data = obs.to_dict() if hasattr(obs, "to_dict") else dict(obs)
+            bucket = getattr(self, "_visual_observations", None)
+            if not isinstance(bucket, list):
+                bucket = []
+                self._visual_observations = bucket
+            bucket.append(data)
+            logger.info(
+                "visual_observation scene=%s type=%s path=%s frames=%s "
+                "logo=%s corners=%s sharpness=%s text_edges=%s width=%s "
+                "res_ok=%s rejected=%s reason=%s error=%s",
+                data.get("scene_idx"),
+                data.get("asset_type"),
+                Path(str(data.get("path") or "")).name,
+                data.get("frames_checked"),
+                data.get("logo_suspected"),
+                ",".join(data.get("logo_corners") or []),
+                data.get("sharpness"),
+                data.get("has_text_edges"),
+                data.get("width"),
+                data.get("resolution_ok"),
+                data.get("rejected"),
+                data.get("reason") or "",
+                data.get("error") or "",
+            )
+        except Exception as exc:
+            logger.debug("visual observation log failed: %s", exc)
+
+    def get_visual_observations(self) -> list[dict]:
+        """Structured observations gathered during the last fetch (observability)."""
+        return list(self._visual_observations)
+
+    def _get_visual_gate(self, scene_idx: int, target_dur: float):
+        gate = self._visual_gates.get(scene_idx)
+        if gate is None:
+            from pipeline.visual_verifier import CandidateGate
+
+            gate = CandidateGate(
+                scene_idx=scene_idx,
+                mode=getattr(self, "_visual_verify_mode", "off"),
+                budget=getattr(self, "_visual_verify_max_candidates", 3),
+                target_dur=target_dur,
+                on_observation=self._record_visual_observation,
+            )
+            self._visual_gates[scene_idx] = gate
+        return gate
+
+    def _visual_candidate_ok(self, asset: dict, scene: dict, target_dur: float) -> bool:
+        """Return True to accept *asset*, False to discard (enforce only).
+
+        Fase 4b: the per-scene budget is shared across provider pages via
+        ``self._visual_gates``.  In ``off`` mode it is an absolute no-op and in
+        ``observe`` it only records the chosen candidate.  Fail-open: any error
+        (including a missing ``pipeline.visual_verifier``) accepts the asset.
+        Uses ``getattr`` defaults so unit tests constructing the fetcher via
+        ``object.__new__`` (without ``__init__``) keep working.
+        """
+        if getattr(self, "_visual_verify_mode", "off") == "off":
+            return True
+        if not isinstance(asset, dict) or not asset.get("path"):
+            return True
+        try:
+            if not isinstance(getattr(self, "_visual_gates", None), dict):
+                self._visual_gates = {}
+            scene_idx = int(scene.get("scene_idx", 0) or 0)
+            gate = self._get_visual_gate(scene_idx, target_dur)
+            accepted = bool(gate.consider(asset))
+            if accepted and gate.accepted_path:
+                observed = getattr(self, "_visual_observed_paths", None)
+                if isinstance(observed, set):
+                    observed.add(str(gate.accepted_path))
+            return accepted
+        except Exception as exc:  # never block the pipeline
+            logger.debug("visual candidate gate failed (fail-open): %s", exc)
+            return True
+
+    def _visual_observe_chosen(self, asset: dict, scene: dict, scene_idx: int):
+        """Observe the final chosen asset for paths the candidate gate missed.
+
+        Deliberately observe-only: it never rejects.  Enforce rejection happens
+        in ``_visual_candidate_ok`` where alternative candidates exist.
+        """
+        if getattr(self, "_visual_verify_mode", "off") == "off":
+            return asset
+        try:
+            if not isinstance(asset, dict) or not asset.get("path"):
+                return asset
+            if asset.get("type") == "placeholder":
+                return asset
+            observed = getattr(self, "_visual_observed_paths", None)
+            if not isinstance(observed, set):
+                observed = set()
+                self._visual_observed_paths = observed
+            path = str(asset["path"])
+            if path in observed:
+                return asset
+            from pipeline.visual_verifier import verify_asset
+
+            target_dur = float(scene.get("duration", 5) or 5)
+            obs = verify_asset(
+                asset, scene_idx=int(scene_idx or 0), mode="observe",
+                target_dur=target_dur,
+                # Frames are always 1-3 regardless of the candidate budget.
+                max_frames=max(
+                    1, min(3, int(getattr(self, "_visual_verify_max_candidates", 3))),
+                ),
+            )
+            if obs is not None:
+                observed.add(path)
+                self._record_visual_observation(obs)
+        except Exception as exc:  # fail-open
+            logger.debug("visual observe chosen failed (fail-open): %s", exc)
+        return asset
 
     def flush_asset_history(self, db, video_id: int) -> int:
         """Record all pending assets for this video in the history table.
@@ -660,16 +801,26 @@ class MediaFetcher:
         except Exception:
             pass
 
-        hard_cap = self._media_strategy.get("video_scene_hard_cap", 12)
-        MAX_ABSOLUTE_VIDEOS = min(MAX_ABSOLUTE_VIDEOS, hard_cap)
+        # ── Fase 4b: fixed hard cap is opt-in (0 = delegate to RAM governor) ──
+        # `video_scene_hard_cap` default is 0: the RAM governor above is the
+        # ONLY hard ceiling. `MAX_ABSOLUTE_VIDEOS` is never removed — on long
+        # videos it may stay below `target_video_time_pct` for RAM safety.
+        try:
+            hard_cap = int(self._media_strategy.get("video_scene_hard_cap", 0) or 0)
+        except (TypeError, ValueError):
+            hard_cap = 0
+        if hard_cap > 0:
+            MAX_ABSOLUTE_VIDEOS = min(MAX_ABSOLUTE_VIDEOS, hard_cap)
         logger.info(
-            "Fase 2 classification: %d video-priority / %d stock-image-priority / "
-            "%d ai-image (%d scenes), hard cap %d videos, dynamic range %.0f-%.0f%%",
+            "Fase 2/4b classification: %d video-priority / %d stock-image-priority / "
+            "%d ai-image (%d scenes), MAX_ABSOLUTE_VIDEOS=%d (hard_cap=%s), "
+            "dynamic range %.0f-%.0f%%, target video time %.0f%%",
             len(video_scenes), len(stock_image_scenes),
             n_scenes - len(video_scenes) - len(stock_image_scenes), n_scenes,
-            MAX_ABSOLUTE_VIDEOS,
+            MAX_ABSOLUTE_VIDEOS, (hard_cap if hard_cap > 0 else "none"),
             self._media_strategy.get("video_scene_pct_min", 20),
-            self._media_strategy.get("video_scene_pct_max", 30),
+            self._media_strategy.get("video_scene_pct_max", 80),
+            self._media_strategy.get("target_video_time_pct", 80),
         )
 
         # ── Phase 2: fetch per scene (tier-based) ──────────────
@@ -709,6 +860,11 @@ class MediaFetcher:
         self._used_filenames.clear()
         self._used_img_ids.clear()
         self._used_content_hashes.clear()
+
+        # ── Reset Fase 4b visual verification state (per video) ──
+        self._visual_gates = {}
+        self._visual_observations = []
+        self._visual_observed_paths = set()
 
         # ── Hard abort counter: consecutive placeholder scenes ──
         _consecutive_black = 0
@@ -816,6 +972,12 @@ class MediaFetcher:
             else:
                 _consecutive_black = 0
                 self._record_asset_for_history(asset)
+
+            # ── Fase 4b: observe the chosen asset (never discards here) ──
+            # Covers non-stock paths (AI image, Pollo, direct providers) that do
+            # not go through _try_download_best_candidate. The stock candidate
+            # gate already recorded its path, so it is skipped (no duplicate).
+            asset = self._visual_observe_chosen(asset, scene, i)
 
             # ── Fase 0: structured decision log (observability only) ──
             self._asset_decision_record(
@@ -991,7 +1153,52 @@ class MediaFetcher:
         # Fase 4a: advisory warning (never aborts) when the generic fallback
         # tier was used more than the configured cap allows.
         self._warn_generic_fallback()
+        # Fase 4b: measure video coverage by SCREEN TIME (not just scene count)
+        # and warn — never abort — when it stays below the configured target.
+        self._report_video_time_target(scenes, results)
         return results
+
+    def _report_video_time_target(
+        self, scenes: list[dict], results: list[dict]
+    ) -> float | None:
+        """Log (and return) the % of total screen time covered by video assets.
+
+        Fase 4b: `target_video_time_pct` is an *objective*, not a gate. The RAM
+        governor (`MAX_ABSOLUTE_VIDEOS`) can legitimately cap long videos below
+        the target; in that case this emits an informative warning only.
+        """
+        try:
+            target = float(self._media_strategy.get("target_video_time_pct", 80))
+        except (TypeError, ValueError):
+            target = 80.0
+        if target <= 0:
+            self._last_video_time_pct = None
+            return None
+        total_dur = 0.0
+        video_dur = 0.0
+        for scene, asset in zip(scenes, results):
+            try:
+                dur = float(scene.get("duration", 0) or 0)
+            except (TypeError, ValueError):
+                dur = 0.0
+            total_dur += dur
+            if isinstance(asset, dict) and asset.get("type") == "video":
+                video_dur += dur
+        pct = (video_dur / total_dur * 100.0) if total_dur > 0 else 0.0
+        self._last_video_time_pct = pct
+        if pct + 1e-6 < target:
+            logger.warning(
+                "Video time target not met: %.0f%% < %.0f%% (target_video_time_pct) — "
+                "images used as fallback; in long videos the RAM governor may cap "
+                "video assets below the target for safety",
+                pct, target,
+            )
+        else:
+            logger.info(
+                "Video time target met: %.0f%% (target %.0f%%)",
+                pct, target,
+            )
+        return pct
 
     def _reconcile_actual_image_fallbacks(
         self,
@@ -1563,12 +1770,15 @@ class MediaFetcher:
 
         **Video-priority criteria** (any one is sufficient):
           1. Scene type is ``hook`` or ``climax`` (always forced).
-          2. Scene duration ≥ ``video_min_scene_duration`` AND position
-             is within the first ``video_first_half_pct``% of runtime.
+          2. Scene duration ≥ ``video_min_scene_duration``.  Fase 4b: scenes
+             from the WHOLE runtime are eligible — position only decays their
+             priority (with a floor), it never excludes them.
 
-        Capped at ``video_scene_pct_max``% of total scenes.  Scenes
-        beyond the cap are reclassified as ``ai_image`` even if they
-        meet the criteria.
+        Capped at ``video_scene_pct_max``% of total scenes (default 80) and, if
+        ``video_scene_hard_cap`` > 0, by that absolute number.  Fase 4b sets
+        ``video_scene_hard_cap=0`` (no fixed cap) so the RAM governor in
+        ``fetch_for_script`` remains the only hard ceiling.  Scenes beyond the
+        cap are reclassified as ``ai_image`` even if they meet the criteria.
 
         **Stock-image priority** (only if ``stock_image_pct`` > 0):
           Up to ``stock_image_pct``% of the remaining (non-video,
@@ -1592,10 +1802,26 @@ class MediaFetcher:
 
         total_duration = sum(s.get("duration", 5) for s in scenes) or 1.0
         min_dur = self._media_strategy.get("video_min_scene_duration", 10)
-        first_half_pct = self._media_strategy.get("video_first_half_pct", 40) / 100.0
-        max_pct = self._media_strategy.get("video_scene_pct_max", 30) / 100.0
-        hard_cap = self._media_strategy.get("video_scene_hard_cap", 12)
-        max_video = min(round(max_pct * n_scenes), hard_cap)
+        # Fase 4b: `video_first_half_pct` is a *preference* window, not a hard
+        # filter — position decays the priority across the whole runtime.
+        preferred_pct = self._media_strategy.get("video_first_half_pct", 40) / 100.0
+        try:
+            preferred_pct = min(max(float(preferred_pct), 0.0), 1.0)
+        except (TypeError, ValueError):
+            preferred_pct = 0.4
+        max_pct = self._media_strategy.get("video_scene_pct_max", 80) / 100.0
+        try:
+            max_pct = min(max(float(max_pct), 0.0), 1.0)
+        except (TypeError, ValueError):
+            max_pct = 0.8
+        try:
+            hard_cap = int(self._media_strategy.get("video_scene_hard_cap", 0) or 0)
+        except (TypeError, ValueError):
+            hard_cap = 0
+        max_video = round(max_pct * n_scenes)
+        if hard_cap > 0:
+            max_video = min(max_video, hard_cap)
+        max_video = max(0, min(max_video, n_scenes))
 
         # C7 (Fase 8): hook/climax are the retention-critical beats. They only
         # receive STOCK VIDEO when the visual bible is available, so the clip
@@ -1604,6 +1830,27 @@ class MediaFetcher:
         bible_gate = self._media_strategy.get("hook_climax_video_requires_bible", True)
         has_bible = bool(getattr(self, "_visual_bible", None))
         hook_video_blocked = bible_gate and not has_bible
+
+        # Fase 4b: action/verb boost (reuses the Fase 4a vocabulary). Imported
+        # lazily and fail-open so classification never breaks if it is missing.
+        action_boost_enabled = bool(
+            self._media_strategy.get("action_scene_boost", True)
+        )
+        _scene_has_action = None
+        _derive_depiction_mode = None
+        if action_boost_enabled:
+            try:
+                from pipeline.cinematic_staging import scene_has_action
+
+                _scene_has_action = scene_has_action
+            except Exception:
+                _scene_has_action = None
+            try:
+                from pipeline.scene_context import derive_depiction_mode
+
+                _derive_depiction_mode = derive_depiction_mode
+            except Exception:
+                _derive_depiction_mode = None
 
         # Build candidate list sorted by priority
         candidates: list[tuple[int, int]] = []  # (priority, idx) — higher = better
@@ -1624,14 +1871,36 @@ class MediaFetcher:
             # bible gate blocks stock video for them (C7).
             if tipo in ("hook", "climax"):
                 priority = 0 if hook_video_blocked else 100
-            # Long scene in first half of runtime
-            elif dur >= min_dur and pos_in_runtime <= first_half_pct:
-                # Priority decays as we get further into the video
-                pos_factor = 1.0 - (pos_in_runtime / first_half_pct)
+            # Fase 4b: ANY sufficiently long scene across the FULL runtime is a
+            # candidate. Position only decays its priority (never excludes it).
+            elif dur >= min_dur:
+                if preferred_pct > 0 and pos_in_runtime <= preferred_pct:
+                    # Gentle decay inside the preferred (first) window.
+                    pos_factor = 1.0 - 0.5 * (pos_in_runtime / preferred_pct)
+                else:
+                    # Late scenes stay eligible: decay faster but with a floor
+                    # so a strong action scene can still outrank weak early ones.
+                    tail = (pos_in_runtime - preferred_pct) / max(
+                        1e-6, 1.0 - preferred_pct
+                    )
+                    pos_factor = max(0.35, 0.5 * (1.0 - tail))
                 dur_factor = min(1.0, dur / max(min_dur * 2, 20))
                 priority = int(50 * (pos_factor * 0.6 + dur_factor * 0.4))
                 if tipo == "desarrollo":
                     priority += 5  # slight boost for desarrollo over otros
+                # Action/verb scenes are much more likely to have a good clip.
+                if _scene_has_action is not None:
+                    try:
+                        if _scene_has_action(s):
+                            priority += 25
+                    except Exception:
+                        pass
+                if _derive_depiction_mode is not None:
+                    try:
+                        if _derive_depiction_mode(s) == "literal":
+                            priority += 10
+                    except Exception:
+                        pass
 
             if priority > 0:
                 candidates.append((priority, idx))
@@ -1887,25 +2156,35 @@ class MediaFetcher:
         """Decide whether to keep searching for stock videos.
 
         Rules:
-          - videos_found < 20% minimum → always continue.
-          - videos_found ≥ 30% maximum → always stop.
-          - Between 20% and 30% → continue only if average quality ≥ threshold.
+          - videos_found < min% minimum → always continue.
+          - videos_found ≥ max% maximum (or the optional hard cap) → stop.
+          - Between min% and max% → continue only if average quality ≥ threshold.
+
+        Fase 4b: ``video_scene_pct_max`` defaults to 80 and
+        ``video_scene_hard_cap=0`` means "no fixed cap", so the search keeps
+        going up to the target share (image fallback handles unsuitable clips).
         """
         min_pct = self._media_strategy.get("video_scene_pct_min", 20) / 100.0
-        max_pct = self._media_strategy.get("video_scene_pct_max", 30) / 100.0
-        hard_cap = self._media_strategy.get("video_scene_hard_cap", 12)
+        max_pct = self._media_strategy.get("video_scene_pct_max", 80) / 100.0
+        try:
+            hard_cap = int(self._media_strategy.get("video_scene_hard_cap", 0) or 0)
+        except (TypeError, ValueError):
+            hard_cap = 0
         threshold = self._media_strategy.get("video_quality_threshold", 0.5)
 
         min_videos = max(1, round(min_pct * n_scenes))
-        max_videos = min(round(max_pct * n_scenes), hard_cap)
+        max_videos = round(max_pct * n_scenes)
+        if hard_cap > 0:
+            max_videos = min(max_videos, hard_cap)
+        max_videos = max(min_videos, min(max_videos, n_scenes))
 
         if videos_found < min_videos:
-            return True   # haven't reached 20% minimum yet
+            return True   # haven't reached the minimum yet
 
         if videos_found >= max_videos:
-            return False  # already at 30% / hard cap
+            return False  # already at the max / hard cap
 
-        # Between 20% and 30% — check average quality
+        # Between min and max — check average quality
         if self._video_quality_scores:
             avg = sum(self._video_quality_scores) / len(self._video_quality_scores)
             return avg >= threshold
@@ -3232,9 +3511,19 @@ class MediaFetcher:
             preferred = list(ordered)
             deferred = []
 
+        _target_dur = float(scene.get("duration", 5) or 5)
+
         for candidate in preferred:
             downloaded = self._download_candidate(provider, candidate)
             if downloaded and downloaded.get("path"):
+                # Fase 4b: enforce may discard a confirmed-logo/low-res candidate
+                # and continue with the next one on this page (budget applies).
+                if not self._visual_candidate_ok(downloaded, scene, _target_dur):
+                    logger.info(
+                        "visual_verify(enforce): discarded candidate for scene %s (%s)",
+                        scene.get("scene_idx"), downloaded.get("path"),
+                    )
+                    continue
                 self._record_asset_used(candidate)
                 self._record_asset_for_history(downloaded)
                 return downloaded
@@ -3242,6 +3531,12 @@ class MediaFetcher:
         for candidate in deferred:
             downloaded = self._download_candidate(provider, candidate)
             if downloaded and downloaded.get("path"):
+                if not self._visual_candidate_ok(downloaded, scene, _target_dur):
+                    logger.info(
+                        "visual_verify(enforce): discarded low-res candidate for scene %s (%s)",
+                        scene.get("scene_idx"), downloaded.get("path"),
+                    )
+                    continue
                 downloaded.setdefault("quality_flag", "low_res")
                 logger.info(
                     "Accepted low-res image (quality_flag=%s, declared width=%s < %d): %s",
