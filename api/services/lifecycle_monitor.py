@@ -120,6 +120,12 @@ WARNING_ALERT_RETENTION_TYPES = (
     "packaging_invalid",
 )
 
+# ── Retención de alertas de observabilidad (error_*) ──────────
+# Los diagnósticos agregados `error_<módulo>` se emiten por cada ERROR de log y
+# no tienen condición reevaluable. Red de seguridad: se cierran pasados N días
+# aunque sigan ocurriendo; si el problema persiste, se re-crean (cooldown 24h).
+ERROR_ALERT_RETENTION_DAYS = 7
+
 # ── UTC timestamp helper ──────────────────────────────────────
 def _utcnow():
     """Return current UTC datetime as naive (consistent with SQLite CURRENT_TIMESTAMP)."""
@@ -406,6 +412,8 @@ def check_all_health(db) -> dict:
     resolved += _auto_resolve_recovery_checkpoints(db)
     resolved += _auto_resolve_stale_info(db)
     resolved += _auto_resolve_stale_warnings(db)
+    resolved += _auto_resolve_orphan_alerts(db)
+    resolved += _auto_resolve_stale_error_alerts(db)
 
     # ── Check 7: Platform auth/token failures (Facebook, Rumble) ──
     created += _check_platform_auth_errors(db)
@@ -418,6 +426,7 @@ def check_all_health(db) -> dict:
 
     # ── Check 10: Channel consecutive generation failures (v26) ──
     created += _check_channel_failure_streak(db)
+    resolved += _auto_resolve_channel_failure_streak(db)
 
     # ── Check 11: Background loops alive (task-liveness watchdog) ──
     created += _check_tasks_alive(db)
@@ -562,6 +571,62 @@ def _auto_resolve_stale_warnings(db) -> int:
                 conn.commit()
     except Exception as exc:
         logger.warning("Stale warning auto-resolve failed: %s", exc)
+    return resolved
+
+
+def _auto_resolve_stale_error_alerts(db) -> int:
+    """Cierra diagnósticos de observabilidad ``error_*`` antiguos (red de seguridad)."""
+    resolved = 0
+    try:
+        with db._connect() as conn:
+            cur = conn.execute(
+                """UPDATE pipeline_alerts
+                   SET resolved = 1, resolved_at = datetime('now'), acknowledged = 1,
+                       message = COALESCE(message, '') ||
+                         ' [Auto-resuelto: retención de diagnósticos error_*]'
+                   WHERE resolved = 0
+                     AND alert_type LIKE 'error_%'
+                     AND created_at < datetime('now', ?)""",
+                (f"-{ERROR_ALERT_RETENTION_DAYS} days",),
+            )
+            resolved = cur.rowcount
+            if resolved:
+                conn.commit()
+    except Exception as exc:
+        logger.warning("Stale error_* auto-resolve failed: %s", exc)
+    return resolved
+
+
+def _auto_resolve_orphan_alerts(db) -> int:
+    """Resuelve alertas activas cuya entidad (video/short) ya no existe.
+
+    Un vídeo/short interrumpido por un reinicio puede borrarse de la BD y dejar
+    sus alertas huérfanas para siempre. Sin este barrido, el panel acumula ruido
+    de entidades inexistentes.
+    """
+    resolved = 0
+    try:
+        with db._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE pipeline_alerts
+                   SET resolved = 1, resolved_at = datetime('now'), acknowledged = 1,
+                       message = COALESCE(message, '') ||
+                         ' [Auto-resuelto: entidad inexistente]'
+                 WHERE resolved = 0
+                   AND entity_id IS NOT NULL
+                   AND (
+                     (entity_type = 'video' AND entity_id NOT IN (SELECT id FROM videos))
+                     OR
+                     (entity_type = 'short' AND entity_id NOT IN (SELECT id FROM shorts))
+                   )
+                """
+            )
+            resolved = cur.rowcount
+            if resolved:
+                conn.commit()
+    except Exception as exc:
+        logger.warning("Orphan alert auto-resolve failed: %s", exc)
     return resolved
 
 
@@ -1289,6 +1354,47 @@ def _auto_resolve_completed(db) -> int:
                 # en shorts: no debe abortar el resto de auto-resolves.
                 logger.debug("Channel altered-mark auto-resolve skipped: %s", exc)
 
+            # Resuelve diagnósticos agregados de observabilidad (error_*) cuyo
+            # run ya terminó. La causa terminal real, si existe, la conserva su
+            # propia alerta 'failed'.
+            alerts = conn.execute(
+                """SELECT pa.id
+                   FROM pipeline_alerts pa
+                   JOIN videos v ON v.id = pa.entity_id AND pa.entity_type = 'video'
+                   WHERE pa.resolved = 0
+                     AND pa.alert_type LIKE 'error_%'
+                     AND v.status NOT IN ('error', 'generating', 'draft', 'validation_failed')"""
+            ).fetchall()
+            for alert in alerts:
+                conn.execute(
+                    """UPDATE pipeline_alerts
+                       SET resolved = 1, resolved_at = datetime('now'), acknowledged = 1,
+                           message = COALESCE(message, '') ||
+                             ' [Auto-resuelto: run del vídeo terminado]'
+                       WHERE id = ?""",
+                    (alert["id"],),
+                )
+                resolved += 1
+
+            alerts = conn.execute(
+                """SELECT pa.id
+                   FROM pipeline_alerts pa
+                   JOIN shorts s ON s.id = pa.entity_id AND pa.entity_type = 'short'
+                   WHERE pa.resolved = 0
+                     AND pa.alert_type LIKE 'error_%'
+                     AND s.status IN ('published', 'discarded', 'deleted_on_yt', 'cancelled')"""
+            ).fetchall()
+            for alert in alerts:
+                conn.execute(
+                    """UPDATE pipeline_alerts
+                       SET resolved = 1, resolved_at = datetime('now'), acknowledged = 1,
+                           message = COALESCE(message, '') ||
+                             ' [Auto-resuelto: run del short terminado]'
+                       WHERE id = ?""",
+                    (alert["id"],),
+                )
+                resolved += 1
+
             conn.commit()
     except Exception as exc:
         logger.warning("Auto-resolve failed: %s", exc)
@@ -1889,6 +1995,48 @@ def _check_channel_failure_streak(db) -> int:
             logger.warning("Failure-streak alert for %s failed: %s", slug, exc)
 
     return created
+
+
+def _auto_resolve_channel_failure_streak(db) -> int:
+    """Cierra la alerta ``consecutive_failures`` cuando la racha baja del umbral."""
+    resolved = 0
+    try:
+        from api.services.planning_service import (
+            count_channel_consecutive_failures,
+            CHANNEL_CONSECUTIVE_FAILURES,
+        )
+    except Exception:
+        return 0
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """SELECT DISTINCT entity_id FROM pipeline_alerts
+                   WHERE resolved = 0 AND alert_type = 'consecutive_failures'
+                     AND entity_type = 'channel' AND entity_id IS NOT NULL"""
+            ).fetchall()
+            for row in rows:
+                ch_id = row["entity_id"]
+                try:
+                    failures = count_channel_consecutive_failures(db, ch_id)
+                except Exception:
+                    continue
+                if failures >= CHANNEL_CONSECUTIVE_FAILURES:
+                    continue
+                cur = conn.execute(
+                    """UPDATE pipeline_alerts
+                       SET resolved = 1, resolved_at = datetime('now'), acknowledged = 1,
+                           message = COALESCE(message, '') ||
+                             ' [Auto-resuelto: racha de fallos recuperada]'
+                       WHERE resolved = 0 AND alert_type = 'consecutive_failures'
+                         AND entity_type = 'channel' AND entity_id = ?""",
+                    (ch_id,),
+                )
+                resolved += cur.rowcount
+            if resolved:
+                conn.commit()
+    except Exception as exc:
+        logger.warning("Channel failure-streak auto-resolve failed: %s", exc)
+    return resolved
 
 
 # ═══════════════════════════════════════════════════════════════
