@@ -4445,6 +4445,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     from pipeline.shorts_tts import (
         validate_short_script, MAX_WORD_COUNT as _MAX_WORDS,
         MIN_WORD_COUNT as _MIN_WORDS, voice_aware_word_budget,
+        prosody_budget_params,
     )
     client = create_llm_client(enable_thinking=False)
 
@@ -4703,6 +4704,12 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     bloques = script.get("bloques", [])
     topic = (script.get("tema") or "")[:200]  # store topic for dedup
 
+    # Expressive prosody (slow per-tono rates + pauses) makes the real audio
+    # slower than `rate_base`. Factor the slowest tono and average pause into
+    # every pre-TTS budget so shorts are trimmed BEFORE synthesis instead of
+    # failing the post-synthesis 58s check ("Short audio too long").
+    _prosody_floor_pct, _avg_pause_ms = prosody_budget_params(ch_config)
+
     # 1c. Subscribe CTA (~40% of native shorts) — programmatic append
     has_subscribe_cta = False
     cta_variants = getattr(ch_config, "SHORTS_SUBSCRIBE_CTA_VARIANTS", [])
@@ -4715,6 +4722,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
         _cta_budget = voice_aware_word_budget(
             getattr(ch_config, "SHORTS_MAX_DURATION_SEC", 58.0),
             rate=_base_rate, block_count=len(bloques) + 1,
+            prosody_floor_pct=_prosody_floor_pct, avg_pause_ms=_avg_pause_ms,
         )
         if current_words + cta_words > _cta_budget:
             logger.info(
@@ -4738,6 +4746,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     _tts_budget = voice_aware_word_budget(
         getattr(ch_config, "SHORTS_MAX_DURATION_SEC", 58.0),
         rate=_base_rate, block_count=len(bloques),
+        prosody_floor_pct=_prosody_floor_pct, avg_pause_ms=_avg_pause_ms,
     )
     pre_tts_est = pre_tts_words / max(
         voice_aware_word_budget(58.0, rate=_base_rate, block_count=1) / 53.0, 0.1
@@ -4764,7 +4773,10 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
                         words_to_remove -= remove
 
         new_total = sum(len(b.get("texto", "").split()) for b in bloques)
-        new_est = new_total * 0.50
+        # Seconds/word implied by the (now prosody-aware) budget, instead of the
+        # optimistic 0.50 that let 59s shorts slip through the pre-TTS guard.
+        _sec_per_word = 53.0 / max(_tts_budget, 1)
+        new_est = new_total * _sec_per_word
         logger.info(
             "[%s] Re-trimmed: %d → %d words (est %.1fs → %.1fs)",
             channel_slug, pre_tts_words, new_total, pre_tts_est, new_est,
@@ -4784,25 +4796,47 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     audio_path = output_dir / f"sched_audio_{channel_slug}_{ts}.mp3"
     srt_path = output_dir / f"sched_audio_{channel_slug}_{ts}.srt"
 
-    from pipeline.shorts_tts import synthesize_shorts_blocks
-    try:
+    from pipeline.shorts_tts import synthesize_shorts_blocks, trim_blocks_to_word_budget
+
+    def _run_shorts_tts():
         tts_total = len(bloques)
         def _shorts_tts_progress(i_block: int, total: int):
             if total > 0:
                 pct = 15 + int((i_block / total) * 8)
                 _update_short_job_progress(job_id, pct, "tts")
-        tts_result = synthesize_shorts_blocks(
+        return synthesize_shorts_blocks(
             bloques=bloques,
             ch_config=ch_config,
             output_audio_path=audio_path,
             output_srt_path=srt_path,
             progress_cb=_shorts_tts_progress,
         )
-        audio_duration = tts_result["duration_sec"] + 1.5
+
+    try:
+        tts_result = _run_shorts_tts()
     except RuntimeError as e:
-        logger.error("Short TTS failed for %s: %s", channel_slug, e)
-        _native_fail(slot_id, job_id, f"TTS falló: {str(e)[:200]}")
-        return None
+        # Post-synthesis length guard fired (the pre-TTS estimate was still
+        # optimistic for this voice): trim ~20% harder and retry once before
+        # failing the slot.  Mirrors the standalone-shorts retry behaviour.
+        if "too long" in str(e).lower():
+            _pre_retry_words = sum(len(b.get("texto", "").split()) for b in bloques)
+            _retry_budget = max(_MIN_WORDS, int(_pre_retry_words * 0.80))
+            logger.warning(
+                "[%s] Short audio too long — re-trimming %d→%d words and retrying once: %s",
+                channel_slug, _pre_retry_words, _retry_budget, e,
+            )
+            trim_blocks_to_word_budget(bloques, max_words=_retry_budget)
+            try:
+                tts_result = _run_shorts_tts()
+            except RuntimeError as e2:
+                logger.error("Short TTS failed after re-trim for %s: %s", channel_slug, e2)
+                _native_fail(slot_id, job_id, f"TTS falló: {str(e2)[:200]}")
+                return None
+        else:
+            logger.error("Short TTS failed for %s: %s", channel_slug, e)
+            _native_fail(slot_id, job_id, f"TTS falló: {str(e)[:200]}")
+            return None
+    audio_duration = tts_result["duration_sec"] + 1.5
 
     _update_short_job_progress(job_id, 25, "tts")
 

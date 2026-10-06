@@ -428,13 +428,30 @@ class VideoEditor:
         if tts_duration <= 0:
             tts_duration = timestamps[-1].get("end", 0) if timestamps else 0
 
-        # Collect fallback image pool (images only, videos would crash PIL)
-        _real_image_paths: list[Path] = []
+        # Collect fallback image pool (images only, videos would crash PIL).
+        # IMPORTANT: an image that is the PRIMARY asset of a scene is *reserved*
+        # for it.  A missing video clip used to steal such an image as its own
+        # fallback, so the reserved scene later found its asset already "used"
+        # and degraded to a placeholder (cascade).  Exclude reserved primaries
+        # from the pool: missing clips now trigger the on-demand re-fetch, which
+        # leaves every scene's own asset intact.
+        _reserved_primary_images: set[str] = set()
+        _all_image_paths: list[Path] = []
         if media_assets:
             for a in media_assets:
                 ap = a.get("path")
                 if ap and a.get("type") == "image" and Path(ap).exists():
-                    _real_image_paths.append(Path(ap))
+                    _all_image_paths.append(Path(ap))
+                    _reserved_primary_images.add(str(ap))
+        # Only drop reserved primaries when the on-demand fetcher can replace
+        # them; otherwise keep the old pool so robustness is not reduced.
+        if getattr(self, "_on_demand_fetcher", None) is not None:
+            _real_image_paths = [
+                p for p in _all_image_paths
+                if str(p) not in _reserved_primary_images
+            ]
+        else:
+            _real_image_paths = list(_all_image_paths)
 
         # Temp dir for scene segments (resolved absolute to prevent ffmpeg concat path doubling)
         # Use video_id instead of job_id so segments survive API restarts and

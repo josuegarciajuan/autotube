@@ -117,7 +117,6 @@ def _maybe_alert_dry(db, slug: str, channel_id: int | None = None) -> bool:
         key = f"{_ALERT_DRY_PREFIX}{slug}"
         if db.get_system_state(key) == today:
             return False
-        db.set_system_state(key, today)
         from api.services.lifecycle_monitor import create_alert
         create_alert(
             db,
@@ -132,6 +131,10 @@ def _maybe_alert_dry(db, slug: str, channel_id: int | None = None) -> bool:
             ),
             metadata={"slug": slug},
         )
+        # Mark the day only AFTER the alert was created: if create_alert raises,
+        # the daily dedup key must not be burned (otherwise the alert is lost
+        # for the rest of the day with no retry).
+        db.set_system_state(key, today)
         return True
     except Exception as exc:
         logger.debug("[%s] dry alert skip: %s", slug, exc)

@@ -120,7 +120,9 @@ def test_verify_asset_populates_reject_reason_logo(tmp_path):
 
     img = _make_image(tmp_path)
     asset = {"path": str(img), "type": "image", "width": 1280}
-    obs = verify_asset(asset, mode="enforce", image_analyzer=_logo_analyzer)
+    obs = verify_asset(
+        asset, mode="enforce", image_analyzer=_logo_analyzer, reject_on_logo=True,
+    )
     assert obs.rejected is True
     assert obs.reject_reason == "logo"
     assert "logo_overlay" in obs.reason

@@ -56,6 +56,11 @@ REQUEST_TIMEOUT = 60  # seconds
 # para no martillear la API escena tras escena.
 DEFAULT_402_COOLDOWN_SEC = 1800
 
+# Deadline (monotonic) compartido por TODAS las instancias del provider: un 402
+# en cualquier instancia activa el disyuntor global para no martillear el muro
+# x402 desde fetchers on-demand recién creados.
+_SHARED_WALL_UNTIL = 0.0
+
 
 class PollinationsProvider:
     """Generate images via the free Pollinations.ai API.
@@ -187,6 +192,15 @@ class PollinationsProvider:
 
         # Disyuntor: si la API devolvió 402 (muro x402) hace poco, no insistir
         # en cada escena. El fallback (local_sd/flota) se encarga mientras tanto.
+        # COMPARTIDO entre instancias: un fetcher on-demand crea un provider
+        # nuevo, y antes eso reseteaba el disyuntor y volvía a golpear el muro.
+        global _SHARED_WALL_UNTIL
+        if _SHARED_WALL_UNTIL and time.monotonic() < _SHARED_WALL_UNTIL:
+            logger.info(
+                "Pollinations: muro x402 activo (%.0fs restantes, compartido); se omite la API.",
+                _SHARED_WALL_UNTIL - time.monotonic(),
+            )
+            return None
         if self._wall_until and time.monotonic() < self._wall_until:
             logger.info(
                 "Pollinations: muro x402 activo (%.0fs restantes); se omite la API.",
@@ -225,6 +239,7 @@ class PollinationsProvider:
             status = exc.response.status_code if exc.response else 0
             if status == 402:
                 self._wall_until = time.monotonic() + self._wall_cooldown
+                _SHARED_WALL_UNTIL = self._wall_until
                 logger.warning(
                     "Pollinations 402 (muro x402 de pago): %s. Se omite la API "
                     "durante %.0fs y se usa el fallback. Para restaurarla, "

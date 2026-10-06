@@ -25,6 +25,26 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 
+def _try_repair_json(text: str) -> dict | None:
+    """Best-effort recovery of a truncated JSON object.
+
+    Reuses the tested ``pipeline_dist.llm_repair.repair_truncated_json`` helper
+    (previously only wired into the distributed pipeline).  Returns a dict or
+    None when unrecoverable.  Never raises.
+    """
+    if not text:
+        return None
+    try:
+        from pipeline_dist.llm_repair import repair_truncated_json
+    except Exception:
+        return None
+    try:
+        result = repair_truncated_json(text)
+    except Exception:
+        return None
+    return result if isinstance(result, dict) else None
+
+
 # ── Reasoning-content extraction (DeepSeek thinking-mode compatibility) ─
 
 def _extract_reasoning_content(response) -> str | None:
@@ -98,15 +118,29 @@ def llm_json_call(
     Raises the last exception if all retries are exhausted.
     """
     last_exc: Exception | None = None
+    # Work on a copy: mutating the caller's kwargs leaked temperature changes
+    # across attempts/calls.
+    _kwargs = dict(call_kwargs)
 
     for attempt in range(max_retries):
         try:
-            response = client.chat.completions.create(**call_kwargs)
+            response = client.chat.completions.create(**_kwargs)
             content = _extract_reasoning_content(response)
             if content is None or not content.strip():
                 raise ValueError(
                     "LLM returned empty content "
                     f"(attempt {attempt + 1}/{max_retries})"
+                )
+            # Truncation by max_tokens is the root cause of the malformed-JSON
+            # alerts: surface it explicitly so the caller can raise max_tokens.
+            try:
+                _finish = response.choices[0].finish_reason
+            except Exception:
+                _finish = None
+            if _finish == "length":
+                logger.warning(
+                    "LLM response truncated (finish_reason=length) — JSON may be "
+                    "incomplete; consider raising max_tokens",
                 )
 
             # Robust JSON extraction from LLM responses.
@@ -137,6 +171,16 @@ def llm_json_call(
 
         except json.JSONDecodeError as exc:
             last_exc = exc
+            # A truncated response is usually recoverable: close the partial
+            # JSON and keep the complete fields already emitted.  This turns a
+            # hard failure + fallback into a usable result.
+            repaired = _try_repair_json(text)
+            if repaired is not None:
+                logger.warning(
+                    "LLM JSON parse failed (%s) — recovered via repair_truncated_json",
+                    exc,
+                )
+                return repaired
             if attempt < max_retries - 1:
                 delay = retry_delay * (2 ** attempt)
                 logger.warning(
@@ -146,9 +190,9 @@ def llm_json_call(
                 )
                 time.sleep(delay)
                 # Bump temperature slightly for diversity
-                if "temperature" in call_kwargs:
-                    call_kwargs["temperature"] = min(
-                        1.0, call_kwargs["temperature"] + 0.05
+                if "temperature" in _kwargs:
+                    _kwargs["temperature"] = min(
+                        1.0, _kwargs["temperature"] + 0.05
                     )
 
         except ValueError as exc:
@@ -159,9 +203,9 @@ def llm_json_call(
                     "%s — retrying in %.1fs", exc, delay,
                 )
                 time.sleep(delay)
-                if "temperature" in call_kwargs:
-                    call_kwargs["temperature"] = min(
-                        1.0, call_kwargs["temperature"] + 0.05
+                if "temperature" in _kwargs:
+                    _kwargs["temperature"] = min(
+                        1.0, _kwargs["temperature"] + 0.05
                     )
 
         except Exception as exc:

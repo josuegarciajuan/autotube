@@ -252,7 +252,10 @@ def reanchor_from_script(
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.4,
-            max_tokens=220,
+            # 220 tokens truncated the multi-field JSON mid-string, producing
+            # "Unterminated string"/"Expecting ',' delimiter" alerts. 512 leaves
+            # headroom for the full object.
+            max_tokens=512,
             response_format={"type": "json_object"},
         )
     except Exception as exc:
@@ -377,7 +380,10 @@ class ThemeExtractor:
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.6,
-                max_tokens=350,
+                # 350 tokens was too tight for the full theme JSON (era, motifs,
+                # forbidden_elements, temporal_segments); the response was cut
+                # mid-string, causing the malformed-JSON critical alerts.
+                max_tokens=800,
                 response_format={"type": "json_object"},
             )
 

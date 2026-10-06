@@ -195,6 +195,26 @@ class AgentApp:
             self._require_egress()
             return scraper.fetch(self.cfg, body.url, body.timeout)
 
+        @app.get("/download")
+        def download(path: str, x_agent_token: Optional[str] = Header(None)):
+            """Sirve un fichero descargado por el agente (p.ej. audio yt-dlp).
+
+            Restringido al directorio temporal del sistema para no exponer
+            ficheros arbitrarios del VPS.
+            """
+            self._check_token(x_agent_token)
+            import tempfile
+            from fastapi.responses import FileResponse
+
+            base = Path(tempfile.gettempdir()).resolve()
+            target = Path(path).resolve()
+            if base != target and base not in target.parents:
+                raise HTTPException(400, "ruta fuera del directorio temporal")
+            if not target.is_file():
+                raise HTTPException(404, "fichero no encontrado")
+            return FileResponse(str(target), filename=target.name,
+                                media_type="application/octet-stream")
+
         @app.post("/auth/oauth-url")
         def oauth_url(body: AgentApp.OAuthUrlModel,
                       x_agent_token: Optional[str] = Header(None)):

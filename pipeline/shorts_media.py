@@ -1437,15 +1437,15 @@ def render_short_hybrid(
 def render_timeout_seconds(audio_duration: float | None, asset_count: int) -> int:
     """Return a bounded timeout scaled to the actual short render workload.
 
-    Cap raised 900→1500s (2026-08-31) and 1500→1800s (2026-10-05): under
-    concurrent system load (other projects sharing the machine), ffmpeg renders
-    can legitimately take longer; the previous estimate caused "timeout after
-    ~500s" failures and slot cancellations. The render loop also DOUBLES the
-    timeout on the retry attempt.
+    Cap raised 900→1500 (2026-08-31), 1500→1800 (2026-10-05) and 1800→2700
+    (2026-10-06): a native short (≈45s, ~13 assets) still hit "timeout after
+    1718s" on the second attempt under long-form CPU contention, cancelling the
+    slot. The estimate and the cap are raised so a legitimately slow render is
+    not killed; the render loop also DOUBLES the timeout on the retry attempt.
     """
     duration = max(float(audio_duration or 20.0), 1.0)
     assets = max(int(asset_count or 1), 1)
-    return min(1800, max(240, int(240 + duration * 9 + assets * 15)))
+    return min(2700, max(360, int(480 + duration * 12 + assets * 20)))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
