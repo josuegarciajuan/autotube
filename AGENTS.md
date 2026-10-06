@@ -738,12 +738,33 @@ Las fases pesadas se reparten por la flota vía el motor distribuido de SuperSer
 | `AUTOTUBE_DIST_RENDER_V2=1` | render de escena | `autotube-render-scene` |
 | `AUTOTUBE_DIST_CONCAT=1` | concat por batches | `autotube-concat-batch` |
 | `AUTOTUBE_DIST_IMAGES=1` | imágenes IA (SD 1.5) | `autotube-ai-image` |
+| `AUTOTUBE_DIST_YTDLP=1` | descarga de audio YouTube (modo viral) | `autotube-ytdlp-audio` |
 
 - Puente al motor: `pipeline_dist/dsl_client.py` (escribe en el spool; sin cookies).
 - Enganche de imágenes: `pipeline_dist/orchestrator_dist.py::_prefetch_ai_images`.
 - Provisioning SD: `deploy/docker/build_sd.sh` + `distribute_sd_runtime.sh` (tag `local-sd`).
 - Invocación manual: `ss-execute submit --definition autotube-ai-image --params '<json>' --wait`.
 - Detalle de la fase de imágenes: `specs/ai-image-providers.md` y el doc de SuperServer `projects/autotube.md`.
+
+### 🎙️ Descarga de audio YouTube en IP residencial (`autotube-ytdlp-audio`)
+
+La casa (datacenter) recibe **HTTP 403 / "Sign in"** de YouTube al descargar media
+con yt-dlp. Verificado (oct 2026, yt-dlp 2026.08.19): fallan `liveyourdre2` (casa),
+`dedi3133109`, `vps649560`; **funcionan `josue` (81.202.137.109), `oficina`
+(93.176.170.12) y `mail` (194.233.67.64, egress residencial vía túnel)**.
+
+- Nodos etiquetados `ytdlp` en SuperServer (solo los verificados). La definición
+  `autotube-ytdlp-audio` (`requiresTags: ['ytdlp']`, red habilitada) descarga y
+  extrae el mp3 en el nodo y devuelve artefacto verificable (sha256/bytes).
+- Enganche: `scrapers/youtube_viral.py::_download_audio` →
+  `pipeline_dist/ytdlp_audio_dist.py::download_audio_dist` (flag
+  `AUTOTUBE_DIST_YTDLP=1`; **fail-open** a la ruta local/egress).
+- **Trampa:** el sandbox del executor vive en `/run` (**tmpfs `noexec`**); el
+  binario PyInstaller de yt-dlp no puede auto-extraerse ahí. La definición fuerza
+  `TMPDIR=/tmp` y `HOME=/tmp`.
+- Provisioning: binario standalone `yt-dlp_linux` en `/usr/local/bin/yt-dlp`
+  (los nodos tienen Python 3.4–3.8, demasiado antiguo para `pip install`).
+- Invocación manual: `ss-execute submit --definition autotube-ytdlp-audio --params '<json>' --wait`.
 
 **Estado (oct 2026):** nodos con `local-sd` = `mail`, `oficina`, `vps649560`.
 `dedi3133109` y `josue` no pueden crear hilos en su contenedor (`can't start new thread`),
