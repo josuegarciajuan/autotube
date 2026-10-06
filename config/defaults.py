@@ -497,6 +497,11 @@ MEDIA_STRATEGY = {
     # local_sd goes BEFORE stable_horde so the pre-generated fleet cache wins;
     # stable_horde is the fallback when the fleet is unavailable/uncached.
     "ai_image_providers": ["pollinations", "local_sd", "stable_horde"],
+    # Circuit breaker for Pollinations 402 (Payment Required). After the first
+    # 402 in a process, skip Pollinations for this cooldown (seconds) so it
+    # doesn't flood logs/alerts and waste the attempt budget; retried once the
+    # cooldown elapses so the fast path returns when the service recovers.
+    "ai_pollinations_break_cooldown_sec": 1800,
     # Optional global style prefix injected into every AI prompt.
     # None → auto-derived from channel COLOR_PALETTE + IMAGE_STYLE_MODIFIERS
     #   by the VisualCoherenceEngine.
