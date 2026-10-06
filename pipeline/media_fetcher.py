@@ -35,6 +35,28 @@ from pipeline.visual_coherence import VisualCoherenceEngine
 
 logger = logging.getLogger(__name__)
 
+# ── Pollinations circuit breaker (oct 2026) ───────────────────────────────
+# The free Pollinations endpoint is frequently walled with HTTP 402 (Payment
+# Required). Retrying it for every AI scene floods logs/alerts and wastes the
+# attempt budget. After the first 402 in a process, skip Pollinations for a
+# cooldown, then probe once more so the fast path returns automatically when the
+# service recovers.
+_POLLINATIONS_BREAK_UNTIL = 0.0
+
+
+def _pollinations_circuit_open() -> bool:
+    return time.monotonic() < _POLLINATIONS_BREAK_UNTIL
+
+
+def _trip_pollinations_breaker(cooldown_sec: float) -> None:
+    global _POLLINATIONS_BREAK_UNTIL
+    _POLLINATIONS_BREAK_UNTIL = time.monotonic() + max(float(cooldown_sec or 0), 1.0)
+
+
+def _is_payment_required(exc: BaseException) -> bool:
+    msg = str(exc)
+    return "402" in msg or "Payment Required" in msg
+
 # New output dir for video clips
 VIDEO_CLIPS_DIR = settings.OUTPUT_DIR / "video_clips"
 VIDEO_CLIPS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1872,6 +1894,12 @@ class MediaFetcher:
             provider_label = ""
 
             if provider_key == "pollinations" and self._pollinations is not None:
+                if _pollinations_circuit_open():
+                    logger.debug(
+                        "Scene %d/%d: skipping pollinations (circuit open after 402)",
+                        scene_idx + 1, total_scenes,
+                    )
+                    continue
                 provider = self._pollinations
                 provider_label = "pollinations"
 
@@ -1942,6 +1970,17 @@ class MediaFetcher:
                     "AI provider %s failed for scene %d: %s",
                     provider_label, scene_idx + 1, exc,
                 )
+                if provider_label == "pollinations" and _is_payment_required(exc):
+                    cooldown = float(
+                        self._media_strategy.get(
+                            "ai_pollinations_break_cooldown_sec", 1800
+                        ) or 1800
+                    )
+                    _trip_pollinations_breaker(cooldown)
+                    logger.warning(
+                        "Pollinations returned 402 (payment required) — circuit open "
+                        "for %.0fs; using local_sd/stable_horde meanwhile", cooldown,
+                    )
                 continue  # next provider
 
         logger.warning(
