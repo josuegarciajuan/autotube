@@ -1609,6 +1609,20 @@ class YouTubeViralScraper(BaseScraper):
             )
             return None
 
+        # ── Descarga distribuida en nodos residenciales (tag `ytdlp`) ──
+        # La IP del datacenter recibe 403 de YouTube; los nodos residenciales
+        # no. Fail-open: si no hay nodo elegible o falla, seguimos con local.
+        try:
+            from pipeline_dist.ytdlp_audio_dist import download_audio_dist
+            _dist_path = download_audio_dist(video_url, video_id, audio_path)
+            if _dist_path and Path(_dist_path).exists():
+                size_mb = Path(_dist_path).stat().st_size / (1024 * 1024)
+                logger.info("[%s] Audio downloaded via fleet (residential IP): %.1f MB",
+                            self.canal, size_mb)
+                return str(_dist_path)
+        except Exception as exc:  # noqa: BLE001 — nunca rompe el pipeline
+            logger.debug("[%s] ytdlp-dist no disponible (%s) — ruta local", self.canal, exc)
+
         logger.info("[%s] Downloading audio from: %s", self.canal, video_url)
         cmd = [
             _YTDLP_BIN,
