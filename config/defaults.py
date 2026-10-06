@@ -489,9 +489,11 @@ MEDIA_STRATEGY = {
     # When True, scenes classified as 'ai_image' use AI generation
     # as their primary tier (before falling back to stock images).
     "ai_image_primary": True,
-    # Ordered list of free AI providers to try: pollinations first
-    # (fast, ~8s), then local_sd (slow, ~180s) as fallback.
-    "ai_image_providers": ["pollinations", "local_sd"],
+    # Ordered list of free AI providers to try:
+    #   1. pollinations  (fast ~8s, mostly walled at 402 oct 2026)
+    #   2. stable_horde  (free crowdsourced cloud, ~3 min/img at 0 kudos)
+    #   3. local_sd      (CPU, ~2-3 min/img, no network dependency)
+    "ai_image_providers": ["pollinations", "stable_horde", "local_sd"],
     # Optional global style prefix injected into every AI prompt.
     # None → auto-derived from channel COLOR_PALETTE + IMAGE_STYLE_MODIFIERS
     #   by the VisualCoherenceEngine.
@@ -505,6 +507,23 @@ MEDIA_STRATEGY = {
     # steps, provocando timeouts de la fase media y OOM por RAM sostenida.
     # 8 steps ≈ 4-6 min, calidad aceptable para b-roll documental.
     "ai_local_sd_steps": 8,
+
+    # ── Stable Horde (free, crowdsourced cloud; oct 2026) ──────────
+    # API key for https://stablehorde.net. None → anonymous shared key
+    # ("0000000000", lowest priority). A free registered account gives better
+    # queue priority; set STABLE_HORDE_API_KEY in .env or override here.
+    "ai_stable_horde_api_key": None,
+    # Model published on the Horde (e.g. "stable_diffusion", "Realistic Vision").
+    "ai_stable_horde_model": "stable_diffusion",
+    # width/height must be multiples of 64. A 0-kudos account is capped at
+    # <=692px; larger requests require upfront kudos. 640x384 is upscaled later.
+    "ai_stable_horde_width": 640,
+    "ai_stable_horde_height": 384,
+    "ai_stable_horde_steps": 14,
+    "ai_stable_horde_cfg_scale": 7.0,
+    # Overall wall-clock budget per image (queue + generation) and poll interval.
+    "ai_stable_horde_timeout_sec": 300,
+    "ai_stable_horde_poll_sec": 6,
     "AI_IMAGE_PROMPT_EXCEPTIONS": {"positive": [], "negative": []},
 
     # ── Video Scene Control (Phase 2 / Fase 4b) ────────────────

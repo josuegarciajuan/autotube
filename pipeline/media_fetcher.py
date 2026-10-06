@@ -30,6 +30,7 @@ from pipeline.providers.youtube_cc import YouTubeCCProvider
 from pipeline.providers.base import VideoAsset
 from pipeline.providers.pollinations_provider import PollinationsProvider
 from pipeline.providers.local_sd_provider import LocalSDProvider
+from pipeline.providers.stable_horde_provider import StableHordeProvider
 from pipeline.visual_coherence import VisualCoherenceEngine
 
 logger = logging.getLogger(__name__)
@@ -232,6 +233,7 @@ class MediaFetcher:
         self._ai_image_primary = self._media_strategy.get("ai_image_primary", False)
         self._pollinations: PollinationsProvider | None = None
         self._local_sd: LocalSDProvider | None = None
+        self._stable_horde: StableHordeProvider | None = None
         self._coherence_engine: VisualCoherenceEngine | None = None
         self._visual_bible: dict | None = None
         # Per-scene AI prompt log (scene_idx → full prompt) for the
@@ -290,6 +292,30 @@ class MediaFetcher:
             logger.info("AI image provider registered: local_sd (free, CPU, ~3 min)")
         except Exception as exc:
             logger.warning("Local SD provider init failed: %s", exc)
+
+        try:
+            # Stable Horde: free crowdsourced cloud cluster. Async API; the
+            # account key comes from STABLE_HORDE_API_KEY (anonymous shared key
+            # 0000000000 if unset). 0-kudos accounts are capped at <=692px, so
+            # the default request is 640x384 and is upscaled locally.
+            self._stable_horde = StableHordeProvider(
+                access_key=self._media_strategy.get("ai_stable_horde_api_key"),
+                model=self._media_strategy.get("ai_stable_horde_model") or "stable_diffusion",
+                width=int(self._media_strategy.get("ai_stable_horde_width", 640) or 640),
+                height=int(self._media_strategy.get("ai_stable_horde_height", 384) or 384),
+                num_inference_steps=int(self._media_strategy.get("ai_stable_horde_steps", 14) or 14),
+                cfg_scale=float(self._media_strategy.get("ai_stable_horde_cfg_scale", 7.0) or 7.0),
+                timeout_sec=float(self._media_strategy.get("ai_stable_horde_timeout_sec", 300) or 300),
+                poll_sec=float(self._media_strategy.get("ai_stable_horde_poll_sec", 6) or 6),
+                upscale_min=upscale_min if upscale_min else None,
+                upscale_model=upscale_model if upscale_min else None,
+                upscale_sharpen=upscale_sharpen if upscale_min else False,
+                upscale_sharpen_amount=upscale_sharpen_amount,
+                upscale_sharpen_sigma=upscale_sharpen_sigma,
+            )
+            logger.info("AI image provider registered: stable_horde (free, crowdsourced)")
+        except Exception as exc:
+            logger.warning("Stable Horde provider init failed: %s", exc)
 
     def set_visual_context(
         self,
@@ -1852,6 +1878,10 @@ class MediaFetcher:
             elif provider_key == "local_sd" and self._local_sd is not None:
                 provider = self._local_sd
                 provider_label = "local_sd"
+
+            elif provider_key == "stable_horde" and self._stable_horde is not None:
+                provider = self._stable_horde
+                provider_label = "stable_horde"
 
             if provider is None:
                 continue
