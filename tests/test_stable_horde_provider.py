@@ -203,6 +203,26 @@ def test_retries_smaller_after_kudos_rejection(tmp_path, monkeypatch):
     assert posts[1]["params"]["height"] == shp.FALLBACK_HEIGHT
 
 
+def test_non_kudos_failure_does_not_retry_smaller(tmp_path, monkeypatch):
+    posts: list = []
+
+    def post(url, headers=None, json=None, timeout=None):
+        posts.append(json)
+        return _Resp(202, {"id": "r"})
+
+    monkeypatch.setattr(shp.requests, "post", post)
+    def _get(url, **k):
+        if "/check/" in url:
+            return _Resp(200, {"faulted": True})
+        return _Resp(200, {})
+    monkeypatch.setattr(shp.requests, "get", _get)
+    monkeypatch.setattr(shp.requests, "delete", lambda *a, **k: _Resp(200, {}))
+
+    p = _provider(tmp_path, width=704, height=448)
+    assert p.generate("x", tmp_path / "a.jpg") is None
+    assert len(posts) == 1, "un fallo no-kudos no debe reintentar a menor tamaño"
+
+
 def test_default_config_wires_stable_horde():
     import config.defaults as defaults
 

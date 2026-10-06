@@ -444,7 +444,10 @@ DEFAULT_VIDEO_PROVIDERS = [
     {"name": "pixabay", "api_key_env": "PIXABAY_API_KEY"},
     {"name": "mixkit"},
     {"name": "coverr"},
-    {"name": "youtube_cc"},
+    # youtube_cc retirado (oct 2026): descargaba de YouTube con yt-dlp desde la
+    # IP del datacenter (403/Sign-in) y no produjo ni un asset. El B-roll se
+    # cubre con Pexels/Pixabay/Mixkit/Coverr. Para reactivarlo, reañadirlo y
+    # delegar la descarga a los nodos residenciales (definición autotube-ytdlp-*).
 ]
 
 # Global fallback queries for generic scenes — shared across channels
