@@ -156,7 +156,8 @@ def _autotube_render_process_count() -> int:
 
 
 def should_defer_shorts_for_longform_load(
-    longform_active: bool, autotube_render_load: int, cpu_count: int | None = None
+    longform_active: bool, autotube_render_load: int, cpu_count: int | None = None,
+    longform_media_jobs: int = 0,
 ) -> bool:
     """Gate shorts only when AUTOTUBE's own render load is high.
 
@@ -164,12 +165,18 @@ def should_defer_shorts_for_longform_load(
     the global loadavg, so an unrelated project (e.g. CCTV) saturating the
     machine does not starve shorts dispatch. The memory gate and the global
     concurrency guard still protect against OOM/CPU contention.
+
+    ``longform_media_jobs`` covers the local-SD/image phase: it pins every core
+    from pure Python (no ffmpeg to count), so each such long-form is charged as
+    half the machine. Otherwise a short render dispatched during local SD times
+    out from CPU contention (oct 2026).
     """
     if not longform_active:
         return False
     cpus = max(int(cpu_count or 1), 1)
     threshold = max(1, int(cpus * 0.85))
-    return autotube_render_load >= threshold
+    effective_load = autotube_render_load + max(0, int(longform_media_jobs)) * max(1, cpus // 2)
+    return effective_load >= threshold
 
 
 def short_job_status_for_outcome(outcome: str) -> str:
@@ -2640,6 +2647,7 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
             db.count_active_longform_jobs(),
             _autotube_render_process_count(),
             os.cpu_count(),
+            longform_media_jobs=db.count_media_phase_longform_jobs(),
         ):
             logger.info("Shorts dispatch deferred: long-form worker plus high autotube render load")
             return None
@@ -3561,12 +3569,20 @@ def _finalize_short_dispatch(slot_id, job_id, channel_id, short_id=None,
             pass
 
         if retries < 2:
+            # Preserve the REAL reason registered by _native_fail() instead of
+            # overwriting it with a generic message (fix oct 2026). The reason is
+            # what the operator/alert needs to diagnose the failure (render
+            # timeout, TTS, render gate...); previously the first retry wiped it,
+            # so every failure surfaced as "No short_id returned". The retry
+            # marker is APPENDED, never substituted.
             conn.execute(
                 "UPDATE shorts_planned_slots SET status = 'pending', retry_count = ?, "
-                "error_message = 'Auto-retry after failure (attempt ' || ? || '/2)', "
+                "error_message = CASE WHEN COALESCE(error_message,'') = '' "
+                "  THEN 'Auto-retry after failure (attempt ' || ? || '/2)' "
+                "  ELSE error_message || ' [auto-retry ' || ? || '/2]' END, "
                 "job_id = NULL, scheduled_at = datetime('now', '+10 minutes'), "
                 "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (retries + 1, retries + 1, slot_id),
+                (retries + 1, retries + 1, retries + 1, slot_id),
             )
             # Mark the attempt as failed (closed) instead of leaving it in
             # 'retrying' forever: the retry re-dispatches a NEW job, so this row
@@ -3574,9 +3590,11 @@ def _finalize_short_dispatch(slot_id, job_id, channel_id, short_id=None,
             conn.execute(
                 "UPDATE generation_jobs SET status = 'failed', "
                 "finished_at = CURRENT_TIMESTAMP, "
-                "error_msg = 'No short_id returned (attempt failed; retry ' || ? || '/2 scheduled)' "
+                "error_msg = CASE WHEN COALESCE(error_msg,'') = '' "
+                "  THEN 'No short_id returned (attempt failed; retry ' || ? || '/2 scheduled)' "
+                "  ELSE error_msg || ' [retry ' || ? || '/2 scheduled]' END "
                 "WHERE id = ?",
-                (retries + 1, job_id),
+                (retries + 1, retries + 1, job_id),
             )
             conn.commit()
             logger.warning("Shorts slot #%s failed (retry %d/2) — rescheduled as pending",
@@ -3770,20 +3788,26 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
                 pass
 
             if retries < 2:
+                # Preserve the REAL reason (see _finalize_short_dispatch): append
+                # the retry marker instead of wiping the reason with a generic.
                 conn.execute(
                     "UPDATE shorts_planned_slots SET status = 'pending', retry_count = ?, "
-                    "error_message = 'Auto-retry after failure (attempt ' || ? || '/2)', "
+                    "error_message = CASE WHEN COALESCE(error_message,'') = '' "
+                    "  THEN 'Auto-retry after failure (attempt ' || ? || '/2)' "
+                    "  ELSE error_message || ' [auto-retry ' || ? || '/2]' END, "
                     "job_id = NULL, "
                     "scheduled_at = datetime('now', '+10 minutes'), "
                     "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (retries + 1, retries + 1, slot_id),
+                    (retries + 1, retries + 1, retries + 1, slot_id),
                 )
                 conn.execute(
                     "UPDATE generation_jobs SET status = 'failed', "
                     "finished_at = CURRENT_TIMESTAMP, "
-                    "error_msg = 'No short_id returned (attempt failed; retry ' || ? || '/2 scheduled)' "
+                    "error_msg = CASE WHEN COALESCE(error_msg,'') = '' "
+                    "  THEN 'No short_id returned (attempt failed; retry ' || ? || '/2 scheduled)' "
+                    "  ELSE error_msg || ' [retry ' || ? || '/2 scheduled]' END "
                     "WHERE id = ?",
-                    (retries + 1, job_id),
+                    (retries + 1, retries + 1, job_id),
                 )
                 conn.commit()
                 conn.close()

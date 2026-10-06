@@ -97,6 +97,28 @@ def _init_db():
     return ExtendedDatabase()
 
 
+def _slot_error_message(slot_id: int | None) -> str:
+    """Best-effort read of the REAL reason recorded by ``_native_fail()``.
+
+    The scheduler logger is not wired to this worker's per-job log, so without
+    this the operator only saw "returned None" and lost the cause (render
+    timeout, TTS, render gate...). oct 2026.
+    """
+    if not slot_id:
+        return ""
+    try:
+        import sqlite3
+        from config.settings import DATABASE_PATH
+        with sqlite3.connect(str(DATABASE_PATH), timeout=10) as conn:
+            row = conn.execute(
+                "SELECT error_message FROM shorts_planned_slots WHERE id = ?",
+                (int(slot_id),),
+            ).fetchone()
+        return (row[0] or "") if row else ""
+    except Exception:
+        return ""
+
+
 def _start_heartbeat(db, job_id: int) -> threading.Event:
     """Pulse ``last_heartbeat_at`` so the orphan detector doesn't kill the worker.
 
@@ -205,10 +227,14 @@ def main():
         if short_id:
             log.info("Short generated: short_id=%s", short_id)
         else:
-            log.error("Short generation FAILED (returned None)")
+            _reason = _slot_error_message(args.slot_id)
+            log.error("Short generation FAILED (returned None)%s",
+                      f" — reason: {_reason}" if _reason else "")
     except Exception as e:  # noqa: BLE001 - we finalize with the exception
         exc = e
-        log.error("Shorts worker failed: %s", e)
+        _reason = _slot_error_message(args.slot_id)
+        log.error("Shorts worker failed: %s%s", e,
+                  f" — reason: {_reason}" if _reason else "")
         log.debug("Traceback:\n%s", traceback.format_exc())
     finally:
         # Finalize in-process too (worker owns the lifecycle). Safe even if the

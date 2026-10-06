@@ -9248,6 +9248,25 @@ class ExtendedDatabase(Database):
             ).fetchone()
         return row["cnt"] if row else 0
     
+    def count_media_phase_longform_jobs(self) -> int:
+        """Count running long-form jobs in a CPU-heavy media phase.
+
+        The ``images``/``media`` phase runs local Stable Diffusion on CPU
+        (~5-8 min/image when Pollinations is walled) and peaks every core; a
+        short render dispatched concurrently times out under that contention
+        (oct 2026). This signal complements ``count_render_phase_jobs`` (RAM)
+        and the ffmpeg-process counter (which misses pure-Python local SD).
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM generation_jobs "
+                "WHERE status = 'running' "
+                "AND phase IN ('images', 'media') "
+                "AND action NOT IN ('generate_native_short', 'generate_clip_short', "
+                "'generate_standalone_short', 'upload_only')"
+            ).fetchone()
+        return row["cnt"] if row else 0
+
     def count_active_upload_jobs(self) -> int:
         """Count upload_only jobs currently running or queued."""
         with self._connect() as conn:
