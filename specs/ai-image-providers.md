@@ -45,6 +45,36 @@ Incluye tanto los proveedores de stock (video/imagen) como los de generación IA
 > `spec/20 §4`. Verificación: `scripts/verify_dist_image_equivalence.py` y
 > `tests/test_ai_image_request.py`.
 
+## Stable Horde (gratis, crowdsourced) — implementado oct 2026
+
+| Nombre | Modelo | Auth | Rate limit | Coste | Detalles |
+|--------|--------|------|------------|-------|----------|
+| **Stable Horde** | `stable_diffusion` (configurable) | API key anónima `0000000000` o cuenta gratis | Concurrencia (30), sin rate limit duro | $0 | `pipeline/providers/stable_horde_provider.py` |
+
+`https://stablehorde.net` es un clúster GPU comunitario y gratuito. Flujo
+**asíncrono** v2: `POST /generate/async` (responde **202** con `id`) →
+`GET /generate/check/{id}` → `GET /generate/status/{id}` (imagen en base64
+**WEBP**) → `DELETE /generate/status/{id}`. El provider convierte WEBP→JPEG y
+upscalea con `AIImageUpscaler`.
+
+**Cuenta:** no es obligatoria (key anónima `0000000000`, prioridad mínima). El
+registro es **gratis** en <https://aihorde.net/register> (pseudónimo sin OAuth,
+o con Google/GitHub/Discord) y da mejor prioridad. Key en `.env`:
+`STABLE_HORDE_API_KEY=<key>` (si vacío → anónima).
+
+**Límites medidos (cuenta 0 kudos, oct 2026):**
+- `width`/`height` deben ser **múltiplos de 64**.
+- Peticiones > **692×692** (o presupuesto de sampler) exigen **kudos por
+  adelantado** → una cuenta 0-kudos usa 640×384 por defecto y reintenta a
+  576×320 si el API lo rechaza.
+- Latencia real medida: **~130 s/imagen** (cola + render). La imagen se upscalea
+  a la resolución mínima del canal.
+
+**Config (`config/defaults.py`):** `ai_stable_horde_model`,
+`ai_stable_horde_width/height`, `ai_stable_horde_steps`, `ai_stable_horde_cfg_scale`,
+`ai_stable_horde_timeout_sec`, `ai_stable_horde_poll_sec`.
+Cadena por defecto: `["pollinations", "stable_horde", "local_sd"]`.
+
 ## Nuevos proveedores — IA (Fase 2: requieren cuenta gratuita)
 
 | # | Nombre | Modelo | Auth | Rate limit | Estado | Detalles |
@@ -71,13 +101,14 @@ Incluye tanto los proveedores de stock (video/imagen) como los de generación IA
 ## Cadena de fallback (orden de prioridad planificado)
 
 ```
-1. Pollinations.ai     (sin auth, rápido, calidad media-alta)
-2. Cloudflare Workers  (SDXL, alta calidad, limitado)
-3. HuggingFace         (FLUX, máxima calidad, rate-limited)
-4. SD 1.5 Local CPU    (ilimitado, lento, fallback último)
-5. Pollo AI            (ya integrado, créditos limitados)
-6. Stock images        (Pixabay/Unsplash, fallback final)
-7. Stock videos        (Pexels/Pixabay/Mixkit/Coverr/YT)
+1. Pollinations.ai     (sin auth, rápido; oct 2026 casi siempre 402)
+2. Stable Horde        (gratis crowdsourced, ~130 s/img, sin coste)   ← oct 2026
+3. SD 1.5 Local CPU    (ilimitado, ~2-3 min/img, sin red)
+4. Cloudflare Workers  (SDXL, alta calidad, limitado)   [pendiente]
+5. HuggingFace         (FLUX, máxima calidad, rate-limited) [pendiente]
+6. Pollo AI            (créditos agotados — descartado)
+7. Stock images        (Pixabay/Unsplash, fallback final)
+8. Stock videos        (Pexels/Pixabay/Mixkit/Coverr/YT)
 ```
 
 ---
