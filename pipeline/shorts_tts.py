@@ -55,9 +55,36 @@ def _run_async_in_thread(coro):
 TICK_TO_MS = 10000                # 100-nanosecond ticks → milliseconds
 SHORTS_MAX_DURATION_SEC = 58.0    # YouTube Shorts max = 60 s; leave 2 s buffer
 MIN_WORD_COUNT = 45               # minimum words for a coherent Short (raised from 35 for more visual variety)
-MAX_WORD_COUNT = 105              # hard cap for audio safety: 105 words × 0.50 s/word worst-case = 52.5 s < 58 s
+# Hard cap for audio safety.  Measured expressive edge-tts runs ~0.57 s/word
+# (slow prosody −18..−22% + inter-block pauses), so the old 105-word cap went
+# OVER 58 s (59-61 s seen in production) and the short failed AFTER synthesis.
+MAX_WORD_COUNT = 92
 BLOCK_PAUSE_MS = 350              # silence between narrative blocks (human rhythm)
 TTS_SAFETY_MARGIN_SEC = 5.0
+BASE_WORDS_PER_SECOND = 2.15      # edge-tts base speaking rate at +0%
+
+
+def parse_rate_pct(rate) -> float:
+    """Parse a rate in either edge-tts (``"-18%"``) or multiplier (``0.80``) form.
+
+    Channel configs use both: ``VOICE_RATE="-10%"`` (edge-tts) and
+    ``rate_base=0.80`` (Kokoro / float multiplier).  The old code only matched
+    the ``%`` form, so a float like ``0.80`` was silently treated as ``0%`` and
+    the word budget was overestimated (→ "Short audio too long").
+    """
+    import re
+
+    text = str(rate if rate is not None else "0%").strip()
+    match = re.search(r"([+-]?\d+(?:\.\d+)?)\s*%", text)
+    if match:
+        return float(match.group(1))
+    try:
+        value = float(text)
+    except (TypeError, ValueError):
+        return 0.0
+    if 0.0 < value <= 3.0:
+        return (value - 1.0) * 100.0
+    return value
 
 
 def voice_aware_word_budget(
@@ -65,21 +92,62 @@ def voice_aware_word_budget(
     rate: str | None = None,
     block_count: int = 1,
     safety_margin_sec: float = TTS_SAFETY_MARGIN_SEC,
+    prosody_floor_pct: float | None = None,
+    avg_pause_ms: float | None = None,
 ) -> int:
     """Estimate a conservative word budget for the selected speaking rate.
 
-    The budget reserves both end padding and inter-block pauses; it is only a
-    pre-TTS gate. The hard duration check after synthesis remains authoritative.
+    The budget reserves both end padding and inter-block pauses.  When the
+    channel uses expressive prosody, pass ``prosody_floor_pct`` (the slowest
+    per-tono rate, e.g. −22%) and ``avg_pause_ms`` so the estimate reflects the
+    audio that will actually be produced instead of the optimistic base rate.
+    This is only a pre-TTS gate; the hard duration check after synthesis remains
+    authoritative.
     """
-    import re
-
     usable = max(float(max_duration_sec) - float(safety_margin_sec), 1.0)
-    match = re.search(r"([+-]?\d+(?:\.\d+)?)%", str(rate or "0%"))
-    rate_pct = float(match.group(1)) if match else 0.0
-    words_per_second = 2.15 * (1.0 + rate_pct / 100.0)
-    pauses = max(int(block_count) - 1, 0) * (BLOCK_PAUSE_MS / 1000.0)
+    rate_pct = parse_rate_pct(rate)
+    if prosody_floor_pct is not None:
+        try:
+            rate_pct = min(rate_pct, float(prosody_floor_pct))
+        except (TypeError, ValueError):
+            pass
+    words_per_second = max(
+        0.5, BASE_WORDS_PER_SECOND * (1.0 + rate_pct / 100.0),
+    )
+    pause_ms = BLOCK_PAUSE_MS if avg_pause_ms is None else float(avg_pause_ms)
+    pauses = max(int(block_count) - 1, 0) * (pause_ms / 1000.0)
     budget = int(max(1, (usable - pauses) * words_per_second))
     return min(MAX_WORD_COUNT, budget)
+
+
+def prosody_budget_params(ch_config) -> tuple[float | None, float | None]:
+    """Return ``(slowest_rate_pct, avg_pause_ms)`` for the pre-TTS budget.
+
+    Reads the channel's ``PROSODY_PROFILES`` (per-tono) and any ``rate_*``
+    entries in ``TTS_STRATEGY``.  Returns ``(None, None)`` when no prosody is
+    configured, so callers fall back to the plain rate-based estimate.
+    """
+    rates: list[float] = []
+    pauses: list[float] = []
+    profiles = getattr(ch_config, "PROSODY_PROFILES", {}) or {}
+    if isinstance(profiles, dict):
+        for prof in profiles.values():
+            if not isinstance(prof, dict):
+                continue
+            if prof.get("rate") is not None:
+                rates.append(parse_rate_pct(prof.get("rate")))
+            try:
+                pauses.append(float(prof.get("pause_after_ms") or 0.0))
+            except (TypeError, ValueError):
+                pass
+    strategy = getattr(ch_config, "TTS_STRATEGY", {}) or {}
+    if isinstance(strategy, dict):
+        for key, value in strategy.items():
+            if str(key).startswith("rate_") and value is not None:
+                rates.append(parse_rate_pct(value))
+    floor = min(rates) if rates else None
+    avg_pause = (sum(pauses) / len(pauses)) if pauses else None
+    return floor, avg_pause
 
 
 def trim_blocks_to_word_budget(

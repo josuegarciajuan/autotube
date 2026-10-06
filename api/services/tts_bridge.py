@@ -91,16 +91,37 @@ def _copy(src_dir: str, out_dir: str, name: str) -> str:
     return dst
 
 
+def _default_timeout() -> float:
+    try:
+        return max(300.0, float(os.getenv("TTS_POOL_TIMEOUT_SEC", "3000")))
+    except (TypeError, ValueError):
+        return 3000.0
+
+
+def _default_retries() -> int:
+    try:
+        return max(0, int(os.getenv("TTS_POOL_RETRIES", "1")))
+    except (TypeError, ValueError):
+        return 1
+
+
 def delegar(bloques: list, voice_config: dict, video_id=None, out_dir: str = ".",
-            cta_text: str | None = None, timeout: float = 1200.0,
-            poll: float = 5.0, retries: int = 1) -> dict:
+            cta_text: str | None = None, timeout: float | None = None,
+            poll: float = 5.0, retries: int | None = None) -> dict:
     """Delega la síntesis al pool y aplica el resultado. Devuelve el mismo
     diccionario que la ruta local de `phase_tts`.
 
-    (fix oct 2026) El timeout baja de 3600s a 1200s y se reintenta `retries`
-    veces antes de abortar: el pool a veces no devuelve resultado (job muerto)
-    y esperar 1h dejaba el vídeo colgado. Reintentar re-encola la petición.
+    (fix oct 2026) El timeout se elevó de 1200s a `TTS_POOL_TIMEOUT_SEC`
+    (default 3000s).  Los jobs reales del pool tardan 1600-2350s: con 1200s
+    SIEMPRE expiraban dos veces (2×1200s) antes de caer al fallback local,
+    gastando ~40 min por long-form Kokoro.  Sigue habiendo reintento
+    (`TTS_POOL_RETRIES`, default 1) para jobs realmente muertos, y el fallback
+    local de `orchestrator._tts_delegado` cubre el resto.
     """
+    if timeout is None:
+        timeout = _default_timeout()
+    if retries is None:
+        retries = _default_retries()
     job_id = result_dir = est = None
     for attempt in range(retries + 1):
         rid = f"tts-{int(time.time())}-{os.getpid()}-{video_id or 'v'}"
