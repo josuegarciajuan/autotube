@@ -236,20 +236,34 @@ class PexelsVideoProvider(BaseVideoProvider):
     # ── Internal helpers ─────────────────────────────────────
 
     def _request_with_retry(self, params: dict) -> Optional[requests.Response]:
-        """Make a GET request to the Pexels API with one automatic 429 retry."""
+        """GET the Pexels API with retries for 429 and transient network errors.
+
+        A single read timeout used to escalate to a critical
+        ``error_pipeline_providers_pexels`` alert.  Timeouts/connection resets
+        now get one retry before the error is logged.
+        """
         headers = {"Authorization": self._api_key}
-        try:
-            resp = requests.get(self.BASE_URL, params=params, headers=headers, timeout=15)
-            if resp.status_code == 429:
-                retry_after = resp.headers.get("Retry-After", "60")
-                logger.warning("Pexels rate limit (429). Retry-After=%s", retry_after)
-                time.sleep(min(int(retry_after), 60))
-                resp = requests.get(self.BASE_URL, params=params, headers=headers, timeout=15)
-            resp.raise_for_status()
-            return resp
-        except requests.RequestException as exc:
-            logger.error("Pexels API request failed: %s", exc)
-            return None
+        timeout = int(os.getenv("PEXELS_HTTP_TIMEOUT_SEC", "30"))
+        last_exc: Optional[Exception] = None
+        for attempt in range(2):
+            try:
+                resp = requests.get(
+                    self.BASE_URL, params=params, headers=headers, timeout=timeout,
+                )
+                if resp.status_code == 429:
+                    retry_after = resp.headers.get("Retry-After", "60")
+                    logger.warning("Pexels rate limit (429). Retry-After=%s", retry_after)
+                    time.sleep(min(int(retry_after), 60))
+                    continue
+                resp.raise_for_status()
+                return resp
+            except requests.RequestException as exc:
+                last_exc = exc
+                if attempt == 0:
+                    logger.warning("Pexels request failed (retrying once): %s", exc)
+                    time.sleep(2.0)
+        logger.error("Pexels API request failed: %s", last_exc)
+        return None
 
     @staticmethod
     def _slug_tags(page_url: str) -> list[str]:
