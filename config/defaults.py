@@ -490,10 +490,13 @@ MEDIA_STRATEGY = {
     # as their primary tier (before falling back to stock images).
     "ai_image_primary": True,
     # Ordered list of free AI providers to try:
-    #   1. pollinations  (fast ~8s, mostly walled at 402 oct 2026)
-    #   2. stable_horde  (free crowdsourced cloud, ~3 min/img at 0 kudos)
-    #   3. local_sd      (CPU, ~2-3 min/img, no network dependency)
-    "ai_image_providers": ["pollinations", "stable_horde", "local_sd"],
+    #   1. pollinations  (fast ~8s; mostly walled at 402 oct 2026)
+    #   2. local_sd      (CPU ~2-3 min/img; **cached** by the fleet prefetch
+    #                     `autotube-ai-image` for AI-tier scenes → instant)
+    #   3. stable_horde  (free crowdsourced cloud, ~2 min/img incl. queue)
+    # local_sd goes BEFORE stable_horde so the pre-generated fleet cache wins;
+    # stable_horde is the fallback when the fleet is unavailable/uncached.
+    "ai_image_providers": ["pollinations", "local_sd", "stable_horde"],
     # Optional global style prefix injected into every AI prompt.
     # None → auto-derived from channel COLOR_PALETTE + IMAGE_STYLE_MODIFIERS
     #   by the VisualCoherenceEngine.
