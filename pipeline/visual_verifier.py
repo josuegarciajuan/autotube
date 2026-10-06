@@ -41,6 +41,7 @@ duplicar la lógica.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 import tempfile
@@ -60,9 +61,22 @@ DEFAULT_MODE = "off"
 
 # Defaults for the corner-overlay heuristic (same as check_asset_logos).
 CORNER_FRAC = 0.20
-LOGO_RATIO_THRESHOLD = 1.8
-LOGO_EDGE_FLOOR = 15.0
-LOGO_STD_FLOOR = 8.0
+# oct 2026: thresholds raised.  The old corner edge-density heuristic flagged
+# ~40-55% of legitimate stock assets as "logo" (textured bottom-left/right
+# corners), exhausting the candidate budget and firing
+# `visual_verify_over_rejection` alerts with no real gain.
+LOGO_RATIO_THRESHOLD = 2.6
+LOGO_EDGE_FLOOR = 25.0
+LOGO_STD_FLOOR = 12.0
+
+# Logo-overlay rejection is DISABLED by default (oct 2026).  The heuristic was
+# producing mostly false positives on real stock media, so `enforce` no longer
+# discards on a corner suspicion unless explicitly re-enabled once calibrated:
+#   VISUAL_VERIFY_REJECT_LOGO=true
+# Resolution (`low_res`) rejection stays active — that signal is reliable.
+REJECT_ON_LOGO = os.getenv(
+    "VISUAL_VERIFY_REJECT_LOGO", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
 
 # Absolute floor below which an image is "clearly insufficient".  Deliberately
 # lower than `min_stock_image_width` (1280) so blurry-but-usable assets are not
@@ -438,6 +452,7 @@ def verify_asset(
     image_analyzer: Callable[..., dict] | None = None,
     frame_extractor: Callable[..., Path | None] | None = None,
     scene_context: Any = None,
+    reject_on_logo: bool | None = None,
 ) -> VisualObservation | None:
     """Verify one chosen asset.  Returns ``None`` when mode is ``off``.
 
@@ -511,8 +526,9 @@ def verify_asset(
 
         obs.model_result = _classify_frames_with_model(frames, scene_context)
 
+        _reject_logo = REJECT_ON_LOGO if reject_on_logo is None else bool(reject_on_logo)
         if mode == "enforce":
-            if obs.logo_suspected:
+            if obs.logo_suspected and _reject_logo:
                 obs.rejected = True
                 obs.reject_reason = "logo"
                 obs.reason = "logo_overlay:" + ",".join(obs.logo_corners)
@@ -520,6 +536,9 @@ def verify_asset(
                 obs.rejected = True
                 obs.reject_reason = "low_res"
                 obs.reason = f"low_resolution:{obs.width}px"
+            elif obs.logo_suspected:
+                # Advisory now (see REJECT_ON_LOGO): recorded, never discarded.
+                obs.reason = "logo_suspected_advisory:" + ",".join(obs.logo_corners)
             elif obs.sharpness is not None and not obs.sharpness_ok:
                 # Advisory only — the proxy is too noisy to reject on.
                 obs.reason = "low_sharpness_advisory"

@@ -547,6 +547,11 @@ class MediaFetcher:
         ``verified == accepted + rejected`` without touching accept/reject
         semantics.  Fail-open by design.
         """
+        # Only ENFORCE observations can reject, so only they belong in the
+        # over-rejection counters.  Mixing in `observe` observations (which are
+        # always accepted) diluted/shifted the ratio and distorted the alert.
+        if str(data.get("mode") or "").strip().lower() != "enforce":
+            return
         stats = getattr(self, "_vv_stats", None)
         if not isinstance(stats, dict):
             stats = self._new_visual_verify_stats()
@@ -1435,6 +1440,13 @@ class MediaFetcher:
         scenes, results = self._reconcile_actual_image_fallbacks(
             scenes, results, self._fetch_distinct_image_for_expanded_scene,
         )
+        # The reconcile can expand image scenes into N subscenes, replacing
+        # ``scenes`` in place.  Recompute the denominator so the uniqueness /
+        # placeholder gate below measures the REAL timeline length instead of
+        # the pre-expansion count (a stale ``n_scenes`` under-counted missing
+        # media and let a >30% placeholder cascade slip through to the render).
+        n_scenes = len(scenes)
+        results = results[:n_scenes]
 
         # ── Uniqueness gate: enough DISTINCT media for the timeline? ──
         # Mirrors the render-time "placeholder ratio" gate in video_editor:
@@ -1552,6 +1564,12 @@ class MediaFetcher:
 
         expanded_scenes: list[dict] = []
         expanded_assets: list[dict] = []
+        # Identity set shared by ALL parents in this video.  The render-time
+        # dedup (video_editor._used_asset_paths) is global, so a per-parent
+        # check was too weak: two different parents could each fetch the same
+        # image and the render would reject the second one, degrading it to a
+        # placeholder.  Track identities video-wide to fail fast at fetch time.
+        video_identity_tokens: set[str] = set()
         for scene, asset in zip(scenes, assets):
             actual_type = asset.get("type") if asset else None
             duration = float(scene.get("duration", 0))
@@ -1578,10 +1596,13 @@ class MediaFetcher:
                     )
                 expanded_scenes.append(scene)
                 expanded_assets.append(asset)
+                video_identity_tokens.update(self._asset_identity_tokens(asset))
                 continue
 
             parent_request = str(scene.get("media_request_id", "scene"))
-            seen_identity_tokens = self._asset_identity_tokens(asset)
+            seen_identity_tokens = set(video_identity_tokens)
+            seen_identity_tokens.update(self._asset_identity_tokens(asset))
+            video_identity_tokens.update(seen_identity_tokens)
             sub_start = float(scene["start"])
             for index, part in enumerate(parts):
                 subscene = dict(scene)
@@ -1609,6 +1630,7 @@ class MediaFetcher:
                         }
                     else:
                         seen_identity_tokens.update(identity_tokens)
+                        video_identity_tokens.update(identity_tokens)
                 expanded_scenes.append(subscene)
                 expanded_assets.append(subasset)
 

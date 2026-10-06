@@ -666,7 +666,18 @@ def _preflight_cleanup(logger):
     locked = _db.get_locked_file_paths()
     error_paths = _db.get_error_video_media_paths(max_age_hours=48)
     preserved = locked | error_paths
-    
+
+    # A concurrent job can be mid-fetch for hours and only registers its media
+    # locks at the END of the media phase (orchestrator.phase_media).  Until
+    # then, its already-downloaded clips look "stale" and this preflight used
+    # to delete them, causing the >30% placeholder-ratio abort at render.
+    # Preserve anything written recently (default 6h) in addition to locks.
+    try:
+        _recent_sec = float(os.getenv("PREFLIGHT_PRESERVE_RECENT_SEC", "21600"))
+    except (TypeError, ValueError):
+        _recent_sec = 21600.0
+    _recent_cutoff = time.time() - max(_recent_sec, 0.0)
+
     cleanup_dirs = [
         _PROJECT_ROOT / "output" / "video_clips",
         _PROJECT_ROOT / "output" / "temp",
@@ -675,18 +686,27 @@ def _preflight_cleanup(logger):
         if not d.exists():
             continue
         deleted = 0
+        preserved_recent = 0
         for f in d.iterdir():
             if not f.is_file():
                 continue
             if str(f) in preserved:
                 continue
             try:
+                if f.stat().st_mtime >= _recent_cutoff:
+                    preserved_recent += 1
+                    continue
+            except OSError:
+                pass
+            try:
                 f.unlink()
                 deleted += 1
             except OSError:
                 pass
-        logger.info("Cleaned %d stale files from %s (%d locked+error files preserved)",
-                     deleted, d, len(preserved))
+        logger.info(
+            "Cleaned %d stale files from %s (%d locked+error, %d recent files preserved)",
+            deleted, d, len(preserved), preserved_recent,
+        )
 
 
 # ── Phase order (for checkpoint resume) ──────────────────────────

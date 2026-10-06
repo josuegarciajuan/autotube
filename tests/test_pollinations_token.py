@@ -3,9 +3,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import requests
 
 from pipeline.providers import pollinations_provider as pp
+
+
+@pytest.fixture(autouse=True)
+def _reset_shared_wall():
+    """The x402 breaker is process-wide by design; reset it between tests."""
+    pp._SHARED_WALL_UNTIL = 0.0
+    yield
+    pp._SHARED_WALL_UNTIL = 0.0
 
 
 def _fake_402_get(calls):

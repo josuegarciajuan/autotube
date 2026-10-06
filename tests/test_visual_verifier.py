@@ -135,14 +135,29 @@ def test_analyzer_exception_is_fail_open(tmp_path):
 
 # ── enforce ──────────────────────────────────────────────────────────
 
-def test_enforce_rejects_confirmed_logo(tmp_path):
+def test_enforce_rejects_confirmed_logo_when_enabled(tmp_path):
+    # Logo rejection is opt-in (VISUAL_VERIFY_REJECT_LOGO); the heuristic had a
+    # high false-positive rate, so by default it is advisory only.
+    from pipeline.visual_verifier import verify_asset
+
+    img = _make_image(tmp_path)
+    asset = {"path": str(img), "type": "image", "width": 1280}
+    obs = verify_asset(
+        asset, mode="enforce", image_analyzer=_logo_analyzer, reject_on_logo=True,
+    )
+    assert obs.rejected is True
+    assert "logo_overlay" in obs.reason
+
+
+def test_enforce_logo_is_advisory_by_default(tmp_path):
     from pipeline.visual_verifier import verify_asset
 
     img = _make_image(tmp_path)
     asset = {"path": str(img), "type": "image", "width": 1280}
     obs = verify_asset(asset, mode="enforce", image_analyzer=_logo_analyzer)
-    assert obs.rejected is True
-    assert "logo_overlay" in obs.reason
+    assert obs.logo_suspected is True
+    assert obs.rejected is False
+    assert "advisory" in obs.reason
 
 
 def test_enforce_rejects_clearly_low_resolution(tmp_path):
