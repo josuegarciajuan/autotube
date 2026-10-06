@@ -167,6 +167,44 @@ class EgressAgent:
     def fetch(self, url: str, timeout: int = 30) -> dict:
         return self._post("/fetch", {"url": url, "timeout": timeout})
 
+    def download_audio(self, url: str, dest_path: str, timeout: int = 1200) -> str:
+        """Descarga el audio de ``url`` vía yt-dlp en el agente (IP residencial).
+
+        El agente (datacenter→proxy residencial) evita el HTTP 403 que recibe
+        una descarga directa desde la IP del server.  Devuelve ``dest_path``.
+        """
+        res = self.ytdlp("audio", {"url": url})
+        if not res.get("ok"):
+            raise EgressAgentUnavailableError(
+                f"yt-dlp del agente falló: {res.get('error')}"
+            )
+        remote = (res.get("result") or {}).get("path")
+        if not remote:
+            raise EgressAgentUnavailableError("el agente no devolvió ruta de audio")
+
+        self._check_egress_health()
+        try:
+            resp = requests.get(
+                f"{self.base_url}/download", headers=self._headers(),
+                params={"path": remote}, stream=True,
+                timeout=max(self.timeout, timeout),
+            )
+        except requests.RequestException as exc:
+            raise EgressAgentUnavailableError(
+                f"descarga de audio desde el agente falló ({exc})"
+            ) from exc
+        if resp.status_code != 200:
+            raise EgressAgentUnavailableError(
+                f"HTTP {resp.status_code} al descargar audio del agente"
+            )
+        dest = Path(dest_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with open(dest, "wb") as fh:
+            for chunk in resp.iter_content(chunk_size=1 << 20):
+                if chunk:
+                    fh.write(chunk)
+        return str(dest)
+
     def upload(self, video_path: str, meta: dict,
                thumbnail_path: Optional[str] = None,
                staged_path: Optional[str] = None) -> dict:

@@ -253,12 +253,22 @@ class YouTubeViralScraper(BaseScraper):
             except ImportError:
                 self.keywords_eng = ["viral documentary"]
 
-        # Target video duration range (from panel "Duración — Objetivo", DB-authoritative)
+        # Target video duration range. Prefer the production target
+        # (PROD_VIDEO_DURATION_MIN/MAX, e.g. 6-9 min) which is the code intent;
+        # fall back to the panel's "Duración — Objetivo" (DB-authoritative,
+        # average ± discrepancy). The panel override had drifted to 15/20 min,
+        # which made Step 6 reject any realistic script as "gap too large".
         if self.config:
-            self.target_duration_min = getattr(self.config, "video_average_duration_min", 10) - \
-                                       getattr(self.config, "video_duration_discrepancy_min", 3)
-            self.target_duration_max = getattr(self.config, "video_average_duration_min", 10) + \
-                                       getattr(self.config, "video_duration_discrepancy_min", 3)
+            _pmin = getattr(self.config, "PROD_VIDEO_DURATION_MIN", None)
+            _pmax = getattr(self.config, "PROD_VIDEO_DURATION_MAX", None)
+            if _pmin and _pmax and float(_pmax) > float(_pmin):
+                self.target_duration_min = int(_pmin)
+                self.target_duration_max = int(_pmax)
+            else:
+                _avg = getattr(self.config, "video_average_duration_min", 10)
+                _disc = getattr(self.config, "video_duration_discrepancy_min", 3)
+                self.target_duration_min = _avg - _disc
+                self.target_duration_max = _avg + _disc
         else:
             self.target_duration_min = 8
             self.target_duration_max = 14
@@ -1542,12 +1552,62 @@ class YouTubeViralScraper(BaseScraper):
             return fallback
         return None
 
+    def _download_audio_via_agent(self, video_url: str, audio_path: Path) -> bool:
+        """Download the audio through the channel's egress agent (residential IP).
+
+        Only called for egress-managed channels.  Returns True on success; on
+        any failure it logs and returns False so the caller can apply its
+        fail-closed policy (never fall back to the server IP).
+        """
+        try:
+            from api.services.egress_client import get_egress_client
+        except Exception:
+            return False
+        try:
+            client = get_egress_client(self.slug)
+        except Exception:
+            return False
+        if client is None:
+            return False
+        try:
+            client.download_audio(video_url, str(audio_path))
+            return audio_path.exists() and audio_path.stat().st_size > 0
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[%s] Egress-agent audio download failed (%s) — trying local yt-dlp",
+                self.canal, exc,
+            )
+            return False
+
     def _download_audio(self, video_url: str, video_id: str) -> str | None:
         """Download audio-only from a YouTube video using yt-dlp. Returns path to audio file."""
         audio_path = _VIRAL_AUDIO_DIR / f"{video_id}.mp3"
         if audio_path.exists():
             logger.info("[%s] Audio already downloaded: %s", self.canal, audio_path)
             return str(audio_path)
+
+        # ── Egress isolation: a managed channel MUST go through the agent ──
+        # Direct downloads from the datacenter IP get HTTP 403 from YouTube, and
+        # using the server IP for a managed channel would break the egress
+        # invariant.  Non-managed channels keep the local path.
+        try:
+            from api.services.egress_client import is_egress_managed
+            _managed = is_egress_managed(self.slug)
+        except Exception:
+            _managed = False
+        if _managed:
+            if (self._download_audio_via_agent(video_url, audio_path)
+                    and audio_path.exists()):
+                size_mb = audio_path.stat().st_size / (1024 * 1024)
+                logger.info("[%s] Audio downloaded via egress agent: %.1f MB",
+                            self.canal, size_mb)
+                return str(audio_path)
+            logger.error(
+                "[%s] Canal gestionado: el agente egress no entregó el audio — "
+                "NO se descarga en local (fail-closed, invariante egress)",
+                self.canal,
+            )
+            return None
 
         logger.info("[%s] Downloading audio from: %s", self.canal, video_url)
         cmd = [
@@ -1562,6 +1622,13 @@ class YouTubeViralScraper(BaseScraper):
             "--fragment-retries", "3",
             "--user-agent", random.choice(_USER_AGENTS),
         ]
+        # Optional resilience knobs (no-ops when unset).
+        _cookies = os.getenv("YTDLP_COOKIES_FILE", "")
+        if _cookies and Path(_cookies).exists():
+            cmd += ["--cookies", _cookies]
+        _proxy = os.getenv("EGRESS_PROXY1", "") or os.getenv("PROXY_URL", "")
+        if _proxy:
+            cmd += ["--proxy", _proxy]
 
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
@@ -1730,11 +1797,25 @@ class YouTubeViralScraper(BaseScraper):
         # CRITICAL: This is NOT a translation. The LLM creates new content.
         if english_text:
             canal_niche = getattr(self.config, "CANAL_NICHE_DESCRIPTION", "documentary")
+            # Give the model an explicit word target. Without it, Step 5 returned
+            # ~500-word scripts that Step 6 then rejected as "content gap too
+            # large" (the whole candidate was discarded).
+            try:
+                from config.voice_timing import words_for_duration
+                _tw_min = words_for_duration(self.config, max(self.target_duration_min, 1))
+                _tw_max = words_for_duration(self.config, self.target_duration_max)
+            except Exception:
+                _tw_min, _tw_max = 900, 1600
+            _src_cap = int(os.getenv("VIRAL_MAX_SOURCE_CHARS", "24000"))
             user_msg = (
                 f"Create an ORIGINAL Spanish documentary script from this English transcript.\n"
                 f"EXTRACT facts and data — DO NOT translate the text.\n"
-                f"Channel niche: {canal_niche}\n\n"
-                f"SOURCE TRANSCRIPT (facts only — discard style):\n{english_text[:8000]}"
+                f"Channel niche: {canal_niche}\n"
+                f"TARGET LENGTH: {_tw_min}-{_tw_max} words "
+                f"(roughly {max(self.target_duration_min,1)}-{self.target_duration_max} minutes "
+                f"of narration). If the source is short, expand with relevant factual context "
+                f"(definitions, background, consequences) — never pad with filler.\n\n"
+                f"SOURCE TRANSCRIPT (facts only — discard style):\n{english_text[:_src_cap]}"
             )
             translated_script = self._call_llm(
                 _ADAPT_SCRIPT_ORIGINAL_SYSTEM_PROMPT, user_msg, temperature=0.75
@@ -1881,7 +1962,8 @@ class YouTubeViralScraper(BaseScraper):
             target_words_range=f"{target_words_min}-{target_words_max}",
         )
 
-        user_msg = f"Adapt this Spanish script to {target_min}-{target_max} minutes:\n\n{script_es[:8000]}"
+        _src_cap = int(os.getenv("VIRAL_MAX_SOURCE_CHARS", "24000"))
+        user_msg = f"Adapt this Spanish script to {target_min}-{target_max} minutes:\n\n{script_es[:_src_cap]}"
         adapted = self._call_llm(system_prompt, user_msg, temperature=0.4)
 
         if adapted:

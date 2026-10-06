@@ -101,6 +101,52 @@ def watch_status(cfg: AgentConfig, yt_id: str) -> dict:
     return {"ok": True, "result": {"status": status}}
 
 
+def ytdlp_audio(cfg: AgentConfig, url: str, audio_format: str = "mp3",
+                quality: str = "128K") -> dict:
+    """Descarga el audio de un vídeo con yt-dlp DESDE la IP residencial.
+
+    Necesario porque la descarga directa desde el datacenter recibe HTTP 403.
+    Devuelve la ruta del fichero en el VPS; el server lo recupera por
+    ``/download``.
+    """
+    import os
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    ytdlp_bin = os.getenv("YTDLP_BIN", "yt-dlp")
+    outdir = Path(tempfile.mkdtemp(prefix="agent_audio_"))
+    outtmpl = str(outdir / "%(id)s.%(ext)s")
+    ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+    cmd = [
+        ytdlp_bin, url,
+        "-x", "--audio-format", audio_format,
+        "--audio-quality", quality,
+        "-o", outtmpl,
+        "--no-warnings", "--no-check-certificate",
+        "--retries", "3", "--fragment-retries", "3",
+        "--user-agent", ua,
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        candidates = sorted(
+            (p for p in outdir.rglob("*") if p.is_file()),
+            key=lambda p: p.stat().st_size, reverse=True,
+        )
+        if not candidates:
+            err = (proc.stderr or "")[-800:].replace("\n", " ")
+            return {"ok": False, "error": f"yt-dlp no produjo audio: {err}"}
+        chosen = candidates[0]
+        return {"ok": True, "result": {
+            "path": str(chosen), "size": chosen.stat().st_size,
+        }}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "yt-dlp timeout (>900s)"}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)[:1000]}
+
+
 def egress_check(cfg: AgentConfig) -> dict:
     """Devuelve la IP pública y geolocalización reales de salida de la VPS.
 
@@ -146,6 +192,7 @@ _YTDLP_OPS = {
     "channel_stats": ytdlp_channel_stats,
     "rss": rss_feed,
     "watch_status": watch_status,
+    "audio": ytdlp_audio,
 }
 
 

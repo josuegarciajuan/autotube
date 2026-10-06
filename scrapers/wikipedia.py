@@ -11,7 +11,9 @@ from config.defaults import (
     CANAL_NAME as _DEFAULT_CANAL,
     WIKIPEDIA_CATEGORIES as _DEFAULT_CATEGORIES,
 )
-from scrapers.base import BaseScraper, register_scraper
+from scrapers.base import (
+    BaseScraper, register_scraper, global_host_rate_limit, API_USER_AGENT,
+)
 
 if TYPE_CHECKING:
     from database.db import Database
@@ -216,10 +218,19 @@ class WikipediaScraper(BaseScraper):
         Returns response body as string, or None on failure.
         """
         import time as _time
+        try:
+            _host = url.split("/")[2]
+        except IndexError:
+            _host = "en.wikipedia.org"
         for attempt in range(self.max_retries + 1):
+            # Respect the same cross-process per-host limit as BaseScraper._request.
+            global_host_rate_limit(_host, self.rate_limit)
             try:
                 import urllib.request as _ur
-                req = _ur.Request(url, headers={"User-Agent": self.USER_AGENT})
+                req = _ur.Request(url, headers={
+                    "User-Agent": self.USER_AGENT,
+                    "Api-User-Agent": API_USER_AGENT,
+                })
                 with _ur.urlopen(req, timeout=30) as resp:
                     content = resp.read()
                     # Try to decode
@@ -231,7 +242,7 @@ class WikipediaScraper(BaseScraper):
                     attempt + 1, self.max_retries + 1, url, exc,
                 )
                 if attempt < self.max_retries:
-                    _time.sleep(self.rate_limit)
+                    _time.sleep(max(self.rate_limit, 3.0) * (2 ** attempt))
         return None
 
     def save_to_db(self, db: Database) -> int:
