@@ -62,7 +62,9 @@ async def supervise_loop(
                     if age is not None:
                         seen_heartbeat = True
                     elapsed_since_start = time.monotonic() - started_at
-                    from api.services.lifecycle_monitor import task_is_stale
+                    from api.services.lifecycle_monitor import (
+                        task_is_stale, TASK_TIMEOUTS,
+                    )
                     # 1) Heartbeat conocido pero superado su timeout (loop
                     #    colgado a mitad de iteración).
                     stale_timeout = (
@@ -73,15 +75,23 @@ async def supervise_loop(
                     # 2) Loop que nunca emitió heartbeat in-process: bloqueado
                     #    antes de latir. NEVER_HEARTBEAT_GRACE > max sleep
                     #    inicial (300s) para no matar arranques legítimos.
+                    #    Solo aplica a tareas REGISTRADAS en TASK_TIMEOUTS: un
+                    #    loop que legítimamente no toca heartbeat (p.ej.
+                    #    egress_monitor, playwright_reaper) no debe morir por
+                    #    "never touched".
                     never_heartbeat = (
                         elapsed_since_start >= NEVER_HEARTBEAT_GRACE
                         and not seen_heartbeat
+                        and task_name in TASK_TIMEOUTS
                     )
                     if stale_timeout or never_heartbeat:
+                        # Per-loop alert_type so different loops don't collapse
+                        # into one row with a misleading aggregated count.
                         logger.error(
                             "Background loop '%s' heartbeat is stale%s; cancelling safely",
                             task_name,
                             " (never touched)" if never_heartbeat else "",
+                            extra={"alert_type": f"task_stalled_loop_{task_name}"},
                         )
                         child.cancel()
                         try:
