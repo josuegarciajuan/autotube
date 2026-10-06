@@ -3568,9 +3568,14 @@ def _finalize_short_dispatch(slot_id, job_id, channel_id, short_id=None,
                 "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (retries + 1, retries + 1, slot_id),
             )
+            # Mark the attempt as failed (closed) instead of leaving it in
+            # 'retrying' forever: the retry re-dispatches a NEW job, so this row
+            # would otherwise be reaped 6h later as an "orphaned retry".
             conn.execute(
-                "UPDATE generation_jobs SET status = 'retrying', "
-                "error_msg = 'No short_id returned (retry ' || ? || '/2)' WHERE id = ?",
+                "UPDATE generation_jobs SET status = 'failed', "
+                "finished_at = CURRENT_TIMESTAMP, "
+                "error_msg = 'No short_id returned (attempt failed; retry ' || ? || '/2 scheduled)' "
+                "WHERE id = ?",
                 (retries + 1, job_id),
             )
             conn.commit()
@@ -3774,8 +3779,10 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
                     (retries + 1, retries + 1, slot_id),
                 )
                 conn.execute(
-                    "UPDATE generation_jobs SET status = 'retrying', "
-                    "error_msg = 'No short_id returned (retry ' || ? || '/2)' WHERE id = ?",
+                    "UPDATE generation_jobs SET status = 'failed', "
+                    "finished_at = CURRENT_TIMESTAMP, "
+                    "error_msg = 'No short_id returned (attempt failed; retry ' || ? || '/2 scheduled)' "
+                    "WHERE id = ?",
                     (retries + 1, job_id),
                 )
                 conn.commit()
@@ -3913,8 +3920,9 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
                     (retries + 1, f"Auto-retry after error (attempt {retries+1}/2): {str(e)[:200]}", slot_id),
                 )
                 conn.execute(
-                "UPDATE generation_jobs SET status = 'retrying', error_msg = ? WHERE id = ?",
-                    (f"Exception (retry {retries+1}/2): {str(e)[:300]}", job_id),
+                "UPDATE generation_jobs SET status = 'failed', finished_at = CURRENT_TIMESTAMP, "
+                "error_msg = ? WHERE id = ?",
+                    (f"Exception (attempt failed; retry {retries+1}/2 scheduled): {str(e)[:300]}", job_id),
                 )
                 conn.commit()
                 logger.warning(
@@ -6639,6 +6647,19 @@ def _resolve_source_video(video: dict, clip_start: float, clip_end: float):
     section_start = max(0, clip_start - padding)
     section_end = clip_end + padding
     section_spec = f"*{section_start:.1f}-{section_end:.1f}"
+
+    # 2a. Delegación a nodos residenciales (la casa recibe 403 de YouTube).
+    try:
+        from pipeline_dist.ytdlp_clip_dist import download_clip_dist
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as _dtmp:
+            _dist_path = _dtmp.name
+        _dist_ok = download_clip_dist(yt_url, section_spec, _dist_path, video_id=yt_id)
+        if _dist_ok and Path(_dist_ok).exists() and Path(_dist_ok).stat().st_size > 0:
+            logger.info("clip source via fleet (residential IP): %s", _dist_ok)
+            return Path(_dist_ok), padding
+        Path(_dist_path).unlink(missing_ok=True)
+    except Exception as _dist_exc:  # noqa: BLE001 — nunca rompe el pipeline
+        logger.debug("ytdlp-clip-dist no disponible (%s) — ruta local", _dist_exc)
 
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
         tmp_path = tmp.name

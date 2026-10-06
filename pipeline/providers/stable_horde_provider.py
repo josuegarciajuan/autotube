@@ -66,6 +66,10 @@ _MIN_VALID_BYTES = 5000                # mirrors media_fetcher._is_valid_ai_imag
 _AUTH_HEADER = "api" + "key"
 
 
+class _KudosRejected(Exception):
+    """Async rejected because the request needs upfront kudos (size too large)."""
+
+
 def _round_to_64(value: int) -> int:
     """Return *value* rounded down to the nearest multiple of 64 (min 64)."""
     try:
@@ -202,14 +206,22 @@ class StableHordeProvider:
                     height=attempt_h,
                     output_path=output_path,
                 )
+            except _KudosRejected as exc:
+                # Size/kudos rejection: retry once at the smaller fallback size.
+                logger.info(
+                    "Stable Horde rechazó por kudos (%s) — reintento a %dx%d",
+                    exc, FALLBACK_WIDTH, FALLBACK_HEIGHT,
+                )
+                continue
             except Exception as exc:  # noqa: BLE001 — fail-open
                 logger.error("Stable Horde generation failed: %s", exc)
                 return None
             if result is not None:
                 self._maybe_upscale(result)
                 return result
-            # A kudos/size rejection is worth one retry at the smaller size.
-            # Other failures simply fall through to the next attempt (if any).
+            # Any other failure (timeout/faulted/empty) is terminal: do NOT
+            # waste another full queue+render cycle retrying a smaller size.
+            return None
         logger.warning("Stable Horde exhausted attempts — no image generated")
         return None
 
@@ -275,6 +287,9 @@ class StableHordeProvider:
             logger.warning(
                 "Stable Horde async rejected (HTTP %s): %s", resp.status_code, body
             )
+            # A kudos/size rejection is retryable at a smaller resolution.
+            if "kudos" in body.lower():
+                raise _KudosRejected(body or f"HTTP {resp.status_code}")
             return None
 
         request_id = None

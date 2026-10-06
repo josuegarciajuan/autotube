@@ -764,6 +764,11 @@ con yt-dlp. Verificado (oct 2026, yt-dlp 2026.08.19): fallan `liveyourdre2` (cas
   `TMPDIR=/tmp` y `HOME=/tmp`.
 - Provisioning: binario standalone `yt-dlp_linux` en `/usr/local/bin/yt-dlp`
   (los nodos tienen Python 3.4–3.8, demasiado antiguo para `pip install`).
+- **Clips de shorts**: `autotube-ytdlp-clip` (misma tag `ytdlp`) descarga la
+  sección del vídeo fuente cuando no hay mp4 local; usa `player_client=android`
+  (el cliente por defecto solo ofrece HLS y el corte falla). Enganche:
+  `api/services/shorts_scheduler.py::_resolve_source_video` →
+  `pipeline_dist/ytdlp_clip_dist.py::download_clip_dist`.
 - Invocación manual: `ss-execute submit --definition autotube-ytdlp-audio --params '<json>' --wait`.
 
 **Estado (oct 2026):** nodos con `local-sd` = `mail`, `oficina`, `vps649560`.

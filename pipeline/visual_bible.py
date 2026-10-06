@@ -365,7 +365,10 @@ class VisualBibleGenerator:
         list of scene-map entries (dicts) that have a valid ``scene`` index
         and a non-empty ``visual_concept``; empty list on total failure.
         """
-        missing_list = ", ".join(str(i) for i in missing_indices)
+        # Gap-fill is BATCHED: sending all missing concepts in one call (e.g.
+        # 100+ scenes) produced JSON truncated by max_tokens ("Unterminated
+        # string"), so the recovery call failed too. Chunks keep each response
+        # well inside the model's output budget.
         system_prompt = (
             "Eres un director de fotografia y diseno visual experto en documentales.\n"
             "Una biblia visual previa omitio los conceptos visuales de algunas escenas.\n"
@@ -380,46 +383,58 @@ class VisualBibleGenerator:
             '"has_protagonist": false, "bridge_from_prev": null, '
             '"visual_density": "simple|balanced|rich"}]}'
         )
-        user_prompt = (
-            f"Faltan los conceptos visuales de las escenas con indices: "
-            f"[{missing_list}] (de un total de {num_scenes} escenas).\n"
-            "Genera UNA entrada por escena faltante, cada una con su indice exacto.\n\n"
-            f"GUION:\n---\n{script_text}\n---"
-        )
 
-        result = None
-        for entry, client in self._script_gen.model_pool.iter_models():
-            if model_name and model_name not in (entry.model_id, entry.display_name):
-                continue
-            try:
-                result = self._script_gen._llm_json_call(
-                    thinking=True,
-                    client=client,
-                    model=entry.model_id,
-                    model_name=entry.display_name,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    temperature=0.7,
-                )
-                break
-            except Exception as exc:
-                logger.warning(
-                    "Visual bible gap fill: model %s failed: %s",
-                    entry.display_name, exc,
-                )
+        try:
+            import os as _os
+            _chunk = int(_os.getenv("VISUAL_BIBLE_GAPFILL_CHUNK", "20") or 20)
+        except (TypeError, ValueError):
+            _chunk = 20
+        _chunk = max(1, _chunk)
 
-        if isinstance(result, dict):
-            entries = result.get("scene_visual_map") or []
-            if isinstance(entries, list):
-                valid = [
-                    e for e in entries
-                    if isinstance(e, dict)
-                    and (e.get("visual_concept") or "").strip()
-                ]
-                if valid:
-                    return valid
+        collected: list[dict] = []
+        indices = list(missing_indices)
+        for start in range(0, len(indices), _chunk):
+            batch = indices[start:start + _chunk]
+            missing_list = ", ".join(str(i) for i in batch)
+            user_prompt = (
+                f"Faltan los conceptos visuales de las escenas con indices: "
+                f"[{missing_list}] (de un total de {num_scenes} escenas).\n"
+                "Genera UNA entrada por escena faltante, cada una con su indice exacto.\n\n"
+                f"GUION:\n---\n{script_text}\n---"
+            )
+            result = None
+            for entry, client in self._script_gen.model_pool.iter_models():
+                if model_name and model_name not in (entry.model_id, entry.display_name):
+                    continue
+                try:
+                    result = self._script_gen._llm_json_call(
+                        thinking=True,
+                        client=client,
+                        model=entry.model_id,
+                        model_name=entry.display_name,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        temperature=0.7,
+                    )
+                    break
+                except Exception as exc:
+                    logger.warning(
+                        "Visual bible gap fill: model %s failed (batch %d): %s",
+                        entry.display_name, start, exc,
+                    )
+            if isinstance(result, dict):
+                entries = result.get("scene_visual_map") or []
+                if isinstance(entries, list):
+                    collected.extend(
+                        e for e in entries
+                        if isinstance(e, dict)
+                        and (e.get("visual_concept") or "").strip()
+                    )
+
+        if collected:
+            return collected
         logger.warning(
             "Visual bible gap fill failed — %d scenes stay without concepts",
             len(missing_indices),
