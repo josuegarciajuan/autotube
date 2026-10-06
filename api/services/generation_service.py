@@ -4467,7 +4467,9 @@ async def force_cancel_and_cleanup(job_id: int, video_id: int, channel_slug: str
     if not result["killed_worker"]:
         try:
             pgrep = subprocess.run(
-                ["pgrep", "-f", f"full_pipeline_worker.*--job-id {job_id}"],
+                # Match both long-form and shorts subprocess workers so the
+                # /cancel endpoint also stops a running short render.
+                ["pgrep", "-f", f"(full_pipeline_worker|shorts_worker).*--job-id {job_id}"],
                 capture_output=True, text=True, timeout=5,
             )
             if pgrep.stdout.strip():
@@ -4554,6 +4556,11 @@ async def force_cancel_and_cleanup(job_id: int, video_id: int, channel_slug: str
     except Exception as exc:
         logger.error("DB update after cancel failed for job #%d: %s", job_id, exc)
 
+    # `return result` was misplaced inside `_read_worker_log_tail` (unreachable),
+    # so this function returned None and the /cancel endpoint raised a 500
+    # (`'NoneType' object is not subscriptable`) after doing the work.
+    return result
+
 
 def _read_worker_log_tail(job_id: int, lines: int = 12) -> str:
     """Read last N lines from worker log for diagnostic context in failed alerts."""
@@ -4564,5 +4571,3 @@ def _read_worker_log_tail(job_id: int, lines: int = 12) -> str:
             return "".join(all_lines[-lines:]).rstrip()
     except Exception:
         return ""
-
-    return result
