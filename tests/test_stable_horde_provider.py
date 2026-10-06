@@ -228,6 +228,8 @@ def test_default_config_wires_stable_horde():
 
     chain = defaults.MEDIA_STRATEGY["ai_image_providers"]
     assert "stable_horde" in chain
-    # order: pollinations (cheap/fast) → stable_horde → local_sd
-    assert chain.index("stable_horde") < chain.index("local_sd")
+    # order: pollinations → local_sd (fleet cache, instant) → stable_horde.
+    # local_sd goes first so the pre-generated fleet cache wins; stable_horde
+    # is the fallback when the fleet is unavailable/uncached.
+    assert chain.index("local_sd") < chain.index("stable_horde")
     assert defaults.MEDIA_STRATEGY["ai_stable_horde_model"] == "stable_diffusion"
