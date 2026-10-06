@@ -16,6 +16,7 @@ Usage:
 
 import json
 import logging
+import os
 import re
 import time
 from datetime import datetime, timezone
@@ -152,6 +153,16 @@ PHASE_TIMEOUTS = {
 # heartbeat es más reciente que esto, la fase progresa aunque supere su timeout
 # (p. ej. un render de muchas escenas → falso positivo "stuck", video 2469).
 STUCK_HEARTBEAT_STALE_MIN = 15
+
+# Congelación REAL de progreso, independiente del heartbeat. `_check_video_phase_stuck`
+# se fía del heartbeat, que sigue latiendo aunque un render/concat distribuido
+# delegado esté encallado (el worker espera al motor) → esa fase nunca alertaba.
+# Aquí se compara phase+pipeline_phase+progress contra un snapshot en
+# `system_state` y se alerta si no cambia en GENERATION_STALL_MIN minutos.
+GENERATION_STALL_MIN = int(os.environ.get("GENERATION_STALL_MIN", "25") or 25)
+GENERATION_STALL_WATCH = os.environ.get(
+    "GENERATION_STALL_WATCH", "true"
+).strip().lower() not in ("0", "false", "no", "off")
 
 # Videos stuck in uploaded_private (not yet public) for too long
 PUBLISH_DELAY_THRESHOLD_HOURS = 48  # warn if uploaded_private > 48h
@@ -391,6 +402,9 @@ def check_all_health(db) -> dict:
 
     # ── Check 1: Videos stuck in a phase ──
     created += _check_video_phase_stuck(db)
+
+    # ── Check 1.5: Frozen generation progress (heartbeat-independent) ──
+    created += _check_generation_progress_freeze(db)
 
     # ── Check 2: Shorts stuck in a phase ──
     created += _check_short_stuck(db)
@@ -904,6 +918,103 @@ def _check_short_stuck(db) -> int:
                         pass
     except Exception as exc:
         logger.warning("Short stuck check failed: %s", exc)
+    return created
+
+
+def _check_generation_progress_freeze(db) -> int:
+    """Alerta cuando un long-form running deja de avanzar (fase+progreso congelados).
+
+    Complementa ``_check_video_phase_stuck``: ese se fía del heartbeat, que sigue
+    latiendo aunque un render/concat distribuido delegado esté encallado (el
+    worker solo espera al motor), de modo que la fase congelada nunca alertaba.
+    Aquí se guarda en ``system_state['gen_stall_watch']`` la firma
+    ``phase|pipeline_phase|progress`` de cada job y se alerta si no cambia en
+    ``GENERATION_STALL_MIN`` minutos, sin mirar el heartbeat.
+
+    Al avanzar (o desaparecer el job) se resuelve la alerta previa. Nunca mata
+    nada: la limpieza de huérfanos la hacen los barridos existentes.
+    """
+    if not GENERATION_STALL_WATCH:
+        return 0
+    created = 0
+    try:
+        now = _utcnow()
+        with db._connect() as conn:
+            rows = conn.execute(
+                """SELECT g.id AS job_id, g.video_id, g.channel_id, g.phase,
+                          g.pipeline_phase, g.progress
+                   FROM generation_jobs g
+                   WHERE g.status = 'running'
+                     AND g.action NOT IN ('generate_native_short', 'generate_clip_short',
+                                          'generate_standalone_short', 'upload_only')"""
+            ).fetchall()
+
+            snap_row = conn.execute(
+                "SELECT value FROM system_state WHERE key = 'gen_stall_watch'"
+            ).fetchone()
+            try:
+                snap = json.loads(snap_row["value"]) if snap_row and snap_row["value"] else {}
+            except (TypeError, ValueError):
+                snap = {}
+            if not isinstance(snap, dict):
+                snap = {}
+
+            active_ids = set()
+            for row in rows:
+                jid = str(row["job_id"])
+                active_ids.add(jid)
+                sig = (f"{row['phase'] or ''}|{row['pipeline_phase'] or ''}|"
+                       f"{row['progress']}")
+                entry = snap.get(jid)
+                if not entry or entry.get("sig") != sig:
+                    # Avanzó (o es la primera vez): reinicia el reloj y cierra
+                    # cualquier alerta de estancamiento previa de este vídeo.
+                    snap[jid] = {"sig": sig,
+                                 "since": now.strftime("%Y-%m-%d %H:%M:%S")}
+                    if row["video_id"]:
+                        conn.execute(
+                            """UPDATE pipeline_alerts SET resolved = 1,
+                                   resolved_at = datetime('now')
+                               WHERE entity_type = 'video' AND entity_id = ?
+                                 AND alert_type = 'generation_stalled'
+                                 AND resolved = 0""",
+                            (row["video_id"],),
+                        )
+                    continue
+
+                try:
+                    since = datetime.strptime(entry["since"][:19], "%Y-%m-%d %H:%M:%S")
+                except (ValueError, TypeError, KeyError):
+                    since = now
+                stalled_min = (now - since).total_seconds() / 60.0
+                if stalled_min >= GENERATION_STALL_MIN and row["video_id"]:
+                    created += _maybe_create_alert(
+                        db, conn, "video", row["video_id"], row["channel_id"],
+                        "generation_stalled", "critical",
+                        f"Video #{row['video_id']} sin avanzar {int(stalled_min)} min",
+                        (f"Job #{row['job_id']} fase '{row['phase']}/"
+                         f"{row['pipeline_phase']}' congelada en {row['progress']}% "
+                         f"durante {int(stalled_min)} min (worker vivo pero sin "
+                         f"avanzar; posible subproceso distribuido encallado)."),
+                        {"job_id": row["job_id"], "phase": row["phase"],
+                         "pipeline_phase": row["pipeline_phase"],
+                         "progress": row["progress"],
+                         "stalled_minutes": int(stalled_min)},
+                    )
+
+            # Olvida jobs que ya no están running.
+            for jid in list(snap.keys()):
+                if jid not in active_ids:
+                    snap.pop(jid, None)
+
+            conn.execute(
+                "INSERT OR REPLACE INTO system_state(key, value, updated_at) "
+                "VALUES ('gen_stall_watch', ?, datetime('now'))",
+                (json.dumps(snap),),
+            )
+            conn.commit()
+    except Exception as exc:
+        logger.warning("Generation progress freeze check failed: %s", exc)
     return created
 
 

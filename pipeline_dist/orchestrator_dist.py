@@ -65,6 +65,21 @@ def _env_int(name: str, default: int = 0) -> int:
         return default
 
 
+def _dist_repair_rounds() -> int:
+    """Rondas de relanzamiento del exec distribuido COMPLETO antes del fallback local.
+
+    El motor falla el exec entero si una sola unidad agota sus reintentos, así que
+    en vez de tirar todo a render local se relanza el exec completo con id nuevo:
+    el scheduler re-planifica entre nodos elegibles y las unidades vuelven a tener
+    intentos (posiblemente en otro nodo). Opt-in con ``AUTOTUBE_DIST_REPAIR``
+    (default on); ``AUTOTUBE_DIST_REPAIR_ROUNDS`` (default 2). 0 = comportamiento
+    antiguo (un solo intento).
+    """
+    if not _env_flag("AUTOTUBE_DIST_REPAIR", True):
+        return 0
+    return max(0, _env_int("AUTOTUBE_DIST_REPAIR_ROUNDS", 2))
+
+
 AI_IMAGES_CACHE = "_dist_cache"
 
 
@@ -85,12 +100,14 @@ class DistributedOrchestrator(PipelineOrchestrator):
     # ── Fase 4 sustituida: render distribuido con fallback local ────────────
     def phase_video(self, script: dict, audio_data: dict,
                     media_assets: list, job_id: int = None) -> Optional[dict]:
+        dist_failed = None
         if _env_flag("AUTOTUBE_DIST_RENDER_V2", False):
             try:
                 if self._pre_render_scenes_v2(script, audio_data, media_assets, job_id):
                     logger.info("[%s] Render v2 distribuido completo; ensamblado local.",
                                 self.canal)
             except Exception as exc:  # noqa: BLE001 — all-or-nothing => local
+                dist_failed = str(exc)
                 logger.warning(
                     "[%s] Render v2 distribuido no aplicable (%s: %s). "
                     "Render local completo (identidad garantizada).",
@@ -109,7 +126,18 @@ class DistributedOrchestrator(PipelineOrchestrator):
                 )
         if _env_flag("AUTOTUBE_DIST_CONCAT", False):
             self._install_dist_concat()
-        return super().phase_video(script, audio_data, media_assets, job_id=job_id)
+        try:
+            return super().phase_video(script, audio_data, media_assets, job_id=job_id)
+        except Exception as local_exc:  # noqa: BLE001 — escalada tras fallback local
+            # Escalada reparar → local → re-encolar: si el render distribuido
+            # agotó la reparación Y el render local también falló, se propaga el
+            # marcador para que el worker re-encole el vídeo desde cero (tope
+            # MAX_RETRY_ATTEMPTS) en vez de dejarlo muerto.
+            if dist_failed and "dist_repair_exhausted" in dist_failed:
+                raise RuntimeError(
+                    f"{dist_failed} | fallback local también falló: {local_exc}"
+                ) from local_exc
+            raise
 
     # ── Imágenes IA: pre-generación distribuida (opt-in, all-or-nothing) ─────
     def _prefetch_ai_images(self, bloques, scene_ranges, script=None):
@@ -471,6 +499,60 @@ class DistributedOrchestrator(PipelineOrchestrator):
             return obj
         return str(obj)
 
+    @staticmethod
+    def _dist_with_repair(*, submit_fn, wait_fn, is_complete, phase: str,
+                          canal: str, repair_rounds: int, obs_name: str,
+                          attempt_ctx: Optional[dict] = None) -> dict:
+        """``submit → wait`` con relanzamiento del exec COMPLETO antes de rendirse.
+
+        El motor (``distengine.js::_maybeCombine``) falla el exec entero en cuanto
+        una sola unidad agota sus reintentos y no publica unidades parciales, así
+        que no se puede "rellenar solo lo que falta" desde aquí. En su lugar, ante
+        un exec incompleto o un estancamiento, se reenvía el exec COMPLETO con un
+        **id nuevo**: el scheduler lo re-planifica entre los nodos elegibles y las
+        unidades vuelven a tener intentos, normalmente en otro nodo.
+
+        ``submit_fn(attempt) -> eid``, ``wait_fn(eid) -> summary``,
+        ``is_complete(summary) -> bool``. Lanza ``ScenePlanError`` si se agotan
+        las ``repair_rounds`` (el llamante cae entonces a la ruta local). Con
+        ``repair_rounds=0`` el comportamiento es el antiguo (un solo intento).
+        """
+        attempt = 0
+        last_err = ""
+        while True:
+            eid = submit_fn(attempt)
+            try:
+                summary = wait_fn(eid)
+                if is_complete(summary):
+                    return summary
+                last_err = f"{phase} {summary.get('status')}: {summary.get('error')}"
+            except ScenePlanError as exc:
+                last_err = str(exc)
+            if attempt >= repair_rounds:
+                err = last_err or f"{phase} incompleto"
+                # Marcador reconocible por el re-encolado del worker
+                # (`_auto_retry_if_transient`): el subproceso distribuido delegado
+                # falló tras agotar las rondas de reparación → el llamante caerá a
+                # local y, si éste también falla, el vídeo se reintenta desde cero.
+                logger.error(
+                    "[%s] %s: reparación distribuida agotada tras %d rondas (%s) — "
+                    "dist_repair_exhausted; fallback local y, si falla, re-encolado.",
+                    canal, phase, attempt, err[:200],
+                )
+                raise ScenePlanError(f"dist_repair_exhausted: {err}")
+            attempt += 1
+            logger.warning(
+                "[%s] %s ronda %d incompleta (%s) — relanzando EXEC COMPLETO en la "
+                "flota (el scheduler reasigna en otro nodo) antes del fallback local.",
+                canal, phase, attempt, last_err[:160],
+            )
+            try:
+                from pipeline.observability import obs_event
+                obs_event(obs_name, channel=canal, exec_id=eid, attempt=attempt,
+                          reason=last_err[:200], **(attempt_ctx or {}))
+            except Exception:
+                pass
+
     def _pre_render_scenes_v2(self, script, audio_data, media_assets, job_id) -> bool:
         scene_ranges = getattr(self, "_last_scene_ranges", None)
         if not scene_ranges or not media_assets or len(scene_ranges) != len(media_assets):
@@ -515,7 +597,6 @@ class DistributedOrchestrator(PipelineOrchestrator):
 
         nonce = os.environ.get("AUTOTUBE_DIST_EXEC_NONCE", "").strip()
         base_id = f"atube-render2-{self.canal}-{self.db_video_id or 'x'}"
-        exec_id = sanitize_id(f"{base_id}-{nonce}" if nonce else f"{base_id}-{uuid.uuid4().hex[:8]}")
         tags = [t.strip() for t in
                 os.environ.get("AUTOTUBE_RENDER_TAGS", "render").split(",") if t.strip()]
         params = {
@@ -536,16 +617,6 @@ class DistributedOrchestrator(PipelineOrchestrator):
         else:
             _render_deadline = int(_render_timeout * 3 + 300)
         self._emit_progress(38, "video", f"Render v2 distribuido: {len(scenes_params)} escenas")
-        eid = dsl_client.submit(
-            "autotube-render-scene", params, exec_id=exec_id,
-            label=f"autotube render v2 {self.canal}",
-            max_inflight=int(os.environ.get("AUTOTUBE_DIST_MAX_INFLIGHT", "0") or 0) or None,
-            max_attempts=3, max_units=len(scenes_params) + 16,
-            deadline_sec=_render_deadline,
-            req={"cores": 2, "memMb": 2048},
-        )
-        logger.info("[%s] Render v2 exec=%s (%d escenas)",
-                    self.canal, eid, len(scenes_params))
 
         def _progress(summary: dict) -> None:
             p = (summary or {}).get("progress") or {}
@@ -556,20 +627,44 @@ class DistributedOrchestrator(PipelineOrchestrator):
                 f"Render v2 distribuido: {acc}/{tot} escenas",
             )
 
-        summary = self._wait_dist_stall_aware(
-            eid, _render_timeout, _progress,
-            stall_sec=float(os.environ.get("AUTOTUBE_DIST_RENDER_STALL_SEC", "900") or 900),
-            phase="render v2",
+        repair_rounds = _dist_repair_rounds()
+
+        def _submit(attempt_index: int) -> str:
+            exec_id = sanitize_id(
+                f"{base_id}-{nonce}-r{attempt_index}" if nonce
+                else f"{base_id}-{uuid.uuid4().hex[:8]}"
+            )
+            eid = dsl_client.submit(
+                "autotube-render-scene", params, exec_id=exec_id,
+                label=f"autotube render v2 {self.canal}",
+                max_inflight=int(os.environ.get("AUTOTUBE_DIST_MAX_INFLIGHT", "0") or 0) or None,
+                max_attempts=3, max_units=len(scenes_params) + 16,
+                deadline_sec=_render_deadline,
+                req={"cores": 2, "memMb": 2048},
+            )
+            logger.info("[%s] Render v2 exec=%s (%d escenas, ronda %d/%d)",
+                        self.canal, eid, len(scenes_params), attempt_index, repair_rounds)
+            return eid
+
+        def _wait(eid: str) -> dict:
+            return self._wait_dist_stall_aware(
+                eid, _render_timeout, _progress,
+                stall_sec=float(os.environ.get("AUTOTUBE_DIST_RENDER_STALL_SEC", "900") or 900),
+                phase="render v2",
+            )
+
+        def _complete(summary: dict) -> bool:
+            return (summary.get("status") == "done"
+                    and len(dsl_client.accepted_scenes(summary)) == len(scenes_params))
+
+        summary = self._dist_with_repair(
+            submit_fn=_submit, wait_fn=_wait, is_complete=_complete,
+            phase="render v2", canal=self.canal, repair_rounds=repair_rounds,
+            obs_name="dist_render_repair",
+            attempt_ctx={"scenes": len(scenes_params)},
         )
-        if summary.get("status") != "done":
-            raise ScenePlanError(
-                f"render v2 {summary.get('status')}: {summary.get('error')}"
-            )
+
         scenes = dsl_client.accepted_scenes(summary)
-        if len(scenes) != len(scenes_params):
-            raise ScenePlanError(
-                f"render v2 devolvió {len(scenes)} escenas, esperaba {len(scenes_params)}"
-            )
         placed = []
         try:
             for entry in scenes:
@@ -607,17 +702,29 @@ class DistributedOrchestrator(PipelineOrchestrator):
         orig = ve._concat_body_batched
 
         def _wrapped(segment_paths, block_ranges, output_path, batch_size=25):
+            dist_exc = None
             try:
                 if self._dist_concat_body_batched(
                     segment_paths, block_ranges, output_path, batch_size,
                 ):
                     return output_path
             except Exception as exc:  # noqa: BLE001 — fallback local
+                dist_exc = exc
                 logger.warning(
                     "[%s] Concat distribuido no aplicable (%s: %s); local.",
                     self.canal, type(exc).__name__, exc,
                 )
-            return orig(segment_paths, block_ranges, output_path, batch_size)
+            try:
+                return orig(segment_paths, block_ranges, output_path, batch_size)
+            except Exception as local_exc:  # noqa: BLE001 — escalada
+                # Igual que en render: si el concat distribuido agotó la
+                # reparación y el local también falla, se propaga el marcador
+                # para re-encolar el vídeo desde cero (bounded).
+                if dist_exc is not None and "dist_repair_exhausted" in str(dist_exc):
+                    raise RuntimeError(
+                        f"{dist_exc} | fallback local concat también falló: {local_exc}"
+                    ) from local_exc
+                raise
 
         ve._concat_body_batched = _wrapped
         ve._dist_concat_installed = True
@@ -667,9 +774,6 @@ class DistributedOrchestrator(PipelineOrchestrator):
 
         nonce = os.environ.get("AUTOTUBE_DIST_EXEC_NONCE", "").strip()
         base = f"atube-concat-{self.canal}-{self.db_video_id or 'x'}"
-        exec_id = sanitize_id(
-            f"{base}-{nonce}" if nonce else f"{base}-{uuid.uuid4().hex[:8]}"
-        )
         tags = [t.strip() for t in
                 os.environ.get("AUTOTUBE_ASSEMBLE_TAGS", "render").split(",")
                 if t.strip()]
@@ -692,15 +796,6 @@ class DistributedOrchestrator(PipelineOrchestrator):
                 float(os.environ.get("AUTOTUBE_DIST_TIMEOUT_SEC", "1800") or 1800) * 2 + 300
             )
         self._emit_progress(70, "video", f"Concat distribuido: {len(batches)} batches")
-        eid = dsl_client.submit(
-            "autotube-concat-batch", params, exec_id=exec_id,
-            label=f"autotube concat {self.canal}",
-            max_inflight=min(4, len(batches)), max_attempts=2,
-            max_units=len(batches) + 8, deadline_sec=_concat_deadline,
-            req={"cores": 4, "memMb": 2048},
-        )
-        logger.info("[%s] Concat distribuido exec=%s (%d batches)",
-                    self.canal, eid, len(batches))
 
         def _progress(summary: dict) -> None:
             p = (summary or {}).get("progress") or {}
@@ -711,20 +806,42 @@ class DistributedOrchestrator(PipelineOrchestrator):
                 f"Concat distribuido: {acc}/{tot} batches",
             )
 
-        summary = self._wait_dist_stall_aware(
-            eid, _concat_timeout, _progress,
-            stall_sec=float(os.environ.get("AUTOTUBE_DIST_CONCAT_STALL_SEC", "900") or 900),
-            phase="concat",
+        repair_rounds = _dist_repair_rounds()
+
+        def _submit(attempt_index: int) -> str:
+            exec_id = sanitize_id(
+                f"{base}-{nonce}-r{attempt_index}" if nonce
+                else f"{base}-{uuid.uuid4().hex[:8]}"
+            )
+            eid = dsl_client.submit(
+                "autotube-concat-batch", params, exec_id=exec_id,
+                label=f"autotube concat {self.canal}",
+                max_inflight=min(4, len(batches)), max_attempts=2,
+                max_units=len(batches) + 8, deadline_sec=_concat_deadline,
+                req={"cores": 4, "memMb": 2048},
+            )
+            logger.info("[%s] Concat distribuido exec=%s (%d batches, ronda %d/%d)",
+                        self.canal, eid, len(batches), attempt_index, repair_rounds)
+            return eid
+
+        def _wait(eid: str) -> dict:
+            return self._wait_dist_stall_aware(
+                eid, _concat_timeout, _progress,
+                stall_sec=float(os.environ.get("AUTOTUBE_DIST_CONCAT_STALL_SEC", "900") or 900),
+                phase="concat",
+            )
+
+        def _complete(summary: dict) -> bool:
+            its = (summary.get("result") or {}).get("batches") or []
+            return summary.get("status") == "done" and len(its) == len(batches)
+
+        summary = self._dist_with_repair(
+            submit_fn=_submit, wait_fn=_wait, is_complete=_complete,
+            phase="concat", canal=self.canal, repair_rounds=repair_rounds,
+            obs_name="dist_concat_repair", attempt_ctx={"batches": len(batches)},
         )
-        if summary.get("status") != "done":
-            raise ScenePlanError(
-                f"concat distribuido {summary.get('status')}: {summary.get('error')}"
-            )
+
         items = (summary.get("result") or {}).get("batches") or []
-        if len(items) != len(batches):
-            raise ScenePlanError(
-                f"concat devolvió {len(items)} batches, esperaba {len(batches)}"
-            )
         merged = staging / "merged"
         merged.mkdir(parents=True, exist_ok=True)
         order = []

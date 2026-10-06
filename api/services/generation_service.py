@@ -1351,6 +1351,10 @@ def _auto_retry_if_transient(job_id: int, video_id: int):
     TRANSIENT_PATTERNS = [
         "timeout", "memory guard", "broken pipe", "brokenpipe",
         "orphaned: process lost", "memory", "abortado: memoria",
+        # Subproceso distribuido delegado que falló tras agotar la reparación en
+        # la flota (pipeline_dist): se reintenta el vídeo desde cero (tope
+        # MAX_RETRY_ATTEMPTS). El fallback local ya se intentó antes.
+        "dist_repair_exhausted",
     ]
     is_transient = any(p in error_msg for p in TRANSIENT_PATTERNS)
     
