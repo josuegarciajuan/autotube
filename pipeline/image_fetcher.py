@@ -623,7 +623,10 @@ class ImageFetcher:
                 logger.error("Fallback provider (Pixabay) also failed: %s", exc)
 
         if not results:
-            logger.error("No images found for scene: %r", scene_description)
+            # Recoverable: the caller can fall back to other tiers/assets.
+            # Logged as WARNING so it does not raise a critical alert via the
+            # observability bridge (only hard provider failures stay ERROR).
+            logger.warning("No images found for scene: %r", scene_description)
             return []
 
         paths: list[Path] = []
