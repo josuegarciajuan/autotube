@@ -62,6 +62,15 @@ DEFAULT_402_COOLDOWN_SEC = 1800
 _SHARED_WALL_UNTIL = 0.0
 
 
+def wall_active() -> bool:
+    """True mientras el muro x402 (402) siga abierto en este proceso.
+
+    Expuesto para que otros módulos (p. ej. ``media_fetcher``) respeten el
+    disyuntor compartido del provider y no construyan peticiones condenadas.
+    """
+    return bool(_SHARED_WALL_UNTIL) and time.monotonic() < _SHARED_WALL_UNTIL
+
+
 class PollinationsProvider:
     """Generate images via the free Pollinations.ai API.
 
@@ -236,8 +245,16 @@ class PollinationsProvider:
         except requests.Timeout:
             logger.error("Pollinations request timed out after %ds", REQUEST_TIMEOUT)
         except requests.HTTPError as exc:
-            status = exc.response.status_code if exc.response else 0
-            if status == 402:
+            # OJO: ``requests.Response.__bool__`` es ``self.ok`` → False para
+            # 4xx/5xx, así que `if exc.response` daba False justo en el 402 y el
+            # status se quedaba en 0 (el disyuntor NUNCA se abría y el 402 se
+            # registraba como ``logger.error`` → alerta crítica ruidosa).
+            status = exc.response.status_code if exc.response is not None else 0
+            exc_text = str(exc)
+            is_payment_required = (
+                status == 402 or "402" in exc_text or "Payment Required" in exc_text
+            )
+            if is_payment_required:
                 self._wall_until = time.monotonic() + self._wall_cooldown
                 _SHARED_WALL_UNTIL = self._wall_until
                 logger.warning(

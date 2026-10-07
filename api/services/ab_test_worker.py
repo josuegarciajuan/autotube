@@ -487,6 +487,10 @@ class ABTestWorker:
             return {"ctr": 0.0, "impressions": 0, "avg_duration": 0.0}
 
         # ── Try local DB (video_stats_history) first ──────────
+        # ``fetch_error`` distingue un fallo real de fetch (excepción) de la
+        # simple ausencia de datos (0 impresiones). Solo lo primero merece una
+        # alerta; "sin datos todavía" es un estado normal del test pendiente.
+        fetch_error = False
         try:
             conn = self._get_db_conn()
             stats_rows = conn.execute("""
@@ -524,6 +528,7 @@ class ABTestWorker:
                     }
         except Exception as exc:
             logger.debug("Local CTR fetch failed for %s: %s", video_id, exc)
+            fetch_error = True
 
         # ── Fuente fiable: embudo de alcance (Reporting API reach, v60) ──
         # La Analytics API NO expone impresiones orgánicas; el Reporting API sí.
@@ -545,6 +550,7 @@ class ABTestWorker:
                 }
         except Exception as exc:
             logger.debug("Reach CTR fetch failed for %s: %s", video_id, exc)
+            fetch_error = True
 
         # ── Fallback: YouTube Analytics API ────────────────────
         if channel_slug:
@@ -582,17 +588,27 @@ class ABTestWorker:
                         }
             except Exception as exc:
                 logger.debug("API CTR fetch failed for %s: %s", video_id, exc)
+                fetch_error = True
 
-        # ── Alert if both local and API failed ──
-        video_id = row.get("video_id")
-        channel_id = row.get("channel_id")
-        self._raise_ab_alert(
-            video_id, channel_id,
-            'ctr_fetch_failed',
-            f'No se pudo obtener CTR para video {video_id}',
-            f'Ni la DB local ni la YouTube Analytics API devolvieron datos de CTR para {yt_video_id}. '
-            f'El A/B test seguirá en fase pending hasta recibir datos.'
-        )
+        # ── Alerta solo ante un fallo real de fetch ──
+        # Si todas las fuentes devolvieron 0 impresiones sin excepción, el vídeo
+        # simplemente aún no tiene datos: el test sigue en 'pending' en silencio
+        # (alertar aquí era ruido recurrente por vídeos sin impresiones).
+        if fetch_error:
+            video_id = row.get("video_id")
+            channel_id = row.get("channel_id")
+            self._raise_ab_alert(
+                video_id, channel_id,
+                'ctr_fetch_failed',
+                f'No se pudo obtener CTR para video {video_id}',
+                f'Ni la DB local ni la YouTube Analytics API devolvieron datos de CTR para {yt_video_id}. '
+                f'El A/B test seguirá en fase pending hasta recibir datos.'
+            )
+        else:
+            logger.debug(
+                "No CTR data yet for video %s (sin impresiones) — test sigue pending",
+                video_id,
+            )
         return {"ctr": 0.0, "impressions": 0, "avg_duration": 0.0}
 
     # ═══════════════════════════════════════════════════════════════

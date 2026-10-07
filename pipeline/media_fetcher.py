@@ -45,7 +45,16 @@ _POLLINATIONS_BREAK_UNTIL = 0.0
 
 
 def _pollinations_circuit_open() -> bool:
-    return time.monotonic() < _POLLINATIONS_BREAK_UNTIL
+    if time.monotonic() < _POLLINATIONS_BREAK_UNTIL:
+        return True
+    # El provider mantiene su propio disyuntor compartido (se abre al detectar
+    # el 402 dentro de ``generate()``, donde se traga la excepción). Respetarlo
+    # aquí evita construir peticiones condenadas escena tras escena.
+    try:
+        from pipeline.providers.pollinations_provider import wall_active
+        return wall_active()
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _trip_pollinations_breaker(cooldown_sec: float) -> None:
