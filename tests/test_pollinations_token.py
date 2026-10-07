@@ -25,6 +25,10 @@ def _fake_402_get(calls):
             status_code = 402
             content = b""
 
+            def __bool__(self):
+                # Mimic requests.Response.__bool__ == self.ok (False en 4xx).
+                return self.status_code < 400
+
             def raise_for_status(self):
                 raise requests.HTTPError(response=self)
 
@@ -75,6 +79,9 @@ def test_token_sent_as_bearer(monkeypatch, tmp_path):
             status_code = 402
             content = b""
 
+            def __bool__(self):
+                return self.status_code < 400
+
             def raise_for_status(self):
                 raise requests.HTTPError(response=self)
 
@@ -84,3 +91,25 @@ def test_token_sent_as_bearer(monkeypatch, tmp_path):
     p = pp.PollinationsProvider(token="tok-abc")
     p.generate("escena", tmp_path / "b.jpg")
     assert seen["headers"].get("Authorization") == "Bearer tok-abc"
+
+
+def test_402_is_not_logged_as_error(monkeypatch, tmp_path, caplog):
+    """Regresión: un 402 debe registrarse como warning y abrir el disyuntor.
+
+    Antes ``if exc.response`` era False para 4xx (``Response.__bool__``), el
+    402 caía en la rama ``else`` como ``logger.error`` → alerta crítica ruidosa
+    y el disyuntor nunca se abría.
+    """
+    import logging
+
+    pp._SHARED_WALL_UNTIL = 0.0
+    monkeypatch.setattr(pp.requests, "get", _fake_402_get([]))
+    p = pp.PollinationsProvider()
+
+    with caplog.at_level(logging.WARNING, logger=pp.__name__):
+        assert p.generate("escena", tmp_path / "c.jpg") is None
+
+    error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert not error_records, f"402 no debe emitir ERROR: {[r.getMessage() for r in error_records]}"
+    assert pp.wall_active() is True
+    assert p._wall_until > 0

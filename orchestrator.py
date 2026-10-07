@@ -886,9 +886,14 @@ class PipelineOrchestrator:
         """Alerta de sistema cuando se difiere por coherencia de nicho (F4)."""
         try:
             from api.services.lifecycle_monitor import emit_alert
+            # entity_id = channel_id: el dedup de pipeline_alerts por
+            # (entity_type, entity_id, alert_type) debe ser POR CANAL. Con
+            # entity_id=0 todas las alertas colisionaban y las de un canal
+            # sobrescribían el mensaje/metadata de otro.
+            channel_id = self._get_channel_id()
             emit_alert(
-                db=self.db, entity_type="system", entity_id=0,
-                channel_id=self._get_channel_id(),
+                db=self.db, entity_type="system", entity_id=channel_id,
+                channel_id=channel_id,
                 alert_type="topic_off_niche_deferred", severity="warning",
                 title=f"[{self.canal}] Selección diferida por nicho",
                 message=(f"No hay tema que encaje con el nicho del canal ({reason}). "

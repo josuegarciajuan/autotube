@@ -4319,7 +4319,7 @@ async def get_ab_test_status(video_id: int):
         db = ExtendedDatabase()
 
         # Get A/B test record
-        conn = db._get_conn()
+        conn = db._connect()
         row = conn.execute(
             "SELECT vab.*, v.yt_video_id as v_yt, v.titulo_final, v.created_at as v_created, "
             "ch.slug as channel_slug, ch.name as channel_name "
