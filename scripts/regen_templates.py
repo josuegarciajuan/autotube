@@ -15,8 +15,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 logging.basicConfig(level=logging.INFO, format="%(levelname)s [template-regen] %(message)s")
 logger = logging.getLogger("template-regen")
 
-# Channel list is loaded dynamically from DB at runtime
-CHANNELS = {}  # populated by load_channels_from_db()
+def load_channels_from_db() -> list[str]:
+    """Slugs de los canales activos según la DB (vacío si no se puede leer)."""
+    try:
+        from database.db_extended import ExtendedDatabase
+        rows = ExtendedDatabase().get_channels(active_only=True)
+        slugs = [r.get("slug") for r in rows if r.get("slug")]
+        logger.info("Canales activos cargados de la DB: %s", slugs)
+        return slugs
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("No se pudieron cargar canales de la DB: %s", exc)
+        return []
 
 
 def regen_channel(slug: str) -> dict:
@@ -55,14 +64,19 @@ def main():
     parser.add_argument("--channel", type=str, default=None, help="Single channel slug to regenerate")
     args = parser.parse_args()
 
-    channels_to_run = (
-        [args.channel] if args.channel
-        else list(CHANNELS)
-    )
-
-    if args.channel and args.channel not in CHANNELS:
-        logger.error("Unknown channel: %s. Available: %s", args.channel, list(CHANNELS))
-        sys.exit(1)
+    available = load_channels_from_db()
+    if args.channel:
+        if available and args.channel not in available:
+            logger.warning(
+                "El canal %s no consta como activo en la DB (%s); se intenta igualmente.",
+                args.channel, available,
+            )
+        channels_to_run = [args.channel]
+    else:
+        channels_to_run = available
+        if not channels_to_run:
+            logger.error("No hay canales activos en la DB y no se pasó --channel.")
+            sys.exit(1)
 
     success = 0
     fail = 0
