@@ -293,18 +293,21 @@ class MediaFetcher:
             upscale_sharpen = bool(getattr(self._config, "AI_UPSCALE_SHARPEN_ENABLED", True))
             upscale_sharpen_amount = float(getattr(self._config, "AI_UPSCALE_SHARPEN_AMOUNT", 0.4))
             upscale_sharpen_sigma = float(getattr(self._config, "AI_UPSCALE_SHARPEN_SIGMA", 2.0))
-            self._pollinations = PollinationsProvider(
-                model=self._media_strategy.get("ai_pollinations_model") or "flux",
-                width=1920,
-                height=1080,
-                cache_dir=ai_cache_dir,
-                upscale_min=upscale_min,
-                upscale_model=upscale_model,
-                upscale_sharpen=upscale_sharpen,
-                upscale_sharpen_amount=upscale_sharpen_amount,
-                upscale_sharpen_sigma=upscale_sharpen_sigma,
-            )
-            logger.info("AI image provider registered: pollinations (free, no-auth)")
+            # Pollinations está descatalogado (muro x402, oct 2026): solo se
+            # instancia si aparece explícitamente en la cadena configurada.
+            if "pollinations" in (self._media_strategy.get("ai_image_providers") or []):
+                self._pollinations = PollinationsProvider(
+                    model=self._media_strategy.get("ai_pollinations_model") or "flux",
+                    width=1920,
+                    height=1080,
+                    cache_dir=ai_cache_dir,
+                    upscale_min=upscale_min,
+                    upscale_model=upscale_model,
+                    upscale_sharpen=upscale_sharpen,
+                    upscale_sharpen_amount=upscale_sharpen_amount,
+                    upscale_sharpen_sigma=upscale_sharpen_sigma,
+                )
+                logger.info("AI image provider registered: pollinations (free, no-auth)")
         except Exception as exc:
             logger.warning("Pollinations provider init failed: %s", exc)
 

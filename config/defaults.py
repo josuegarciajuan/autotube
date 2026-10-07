@@ -490,13 +490,15 @@ MEDIA_STRATEGY = {
     # as their primary tier (before falling back to stock images).
     "ai_image_primary": True,
     # Ordered list of free AI providers to try:
-    #   1. pollinations  (fast ~8s; mostly walled at 402 oct 2026)
-    #   2. local_sd      (CPU ~2-3 min/img; **cached** by the fleet prefetch
+    #   1. local_sd      (CPU ~2-3 min/img; **cached** by the fleet prefetch
     #                     `autotube-ai-image` for AI-tier scenes → instant)
-    #   3. stable_horde  (free crowdsourced cloud, ~2 min/img incl. queue)
+    #   2. stable_horde  (free crowdsourced cloud, ~2 min/img incl. queue)
     # local_sd goes BEFORE stable_horde so the pre-generated fleet cache wins;
     # stable_horde is the fallback when the fleet is unavailable/uncached.
-    "ai_image_providers": ["pollinations", "local_sd", "stable_horde"],
+    # Pollinations DESCATALOGADO (oct 2026): su API quedó tras el muro de pago
+    # x402 (402 Payment Required) y dejó de ser fiable. Se retira de la cadena;
+    # el proveedor sigue en el código por si se reactiva con token.
+    "ai_image_providers": ["local_sd", "stable_horde"],
     # Circuit breaker for Pollinations 402 (Payment Required). After the first
     # 402 in a process, skip Pollinations for this cooldown (seconds) so it
     # doesn't flood logs/alerts and waste the attempt budget; retried once the
@@ -1211,14 +1213,19 @@ EDITORIAL_RECOVERY_REVIEW = {
 # sube (validation_failed). Kill-switch: RENDER_GATE_ENABLED=False por canal.
 # Lo consume pipeline/render_gate.py vía VideoValidator.post_validate.
 RENDER_GATE_ENABLED = True
-RENDER_GATE_BLACK_PIX_TH = 0.10
+# pix_th = umbral de luminancia (fracción 0-1) por debajo del cual un píxel
+# cuenta como negro. Los templates de marca (intro/CTA/outro) usan fondos
+# oscuros con luminancia media ~0.08 (YAVG≈20), que con 0.10 se clasificaban
+# como "negro" entero y bloqueaban el vídeo. Con 0.03 solo se detecta negro
+# real (placeholder/asset ausente, YAVG≲8) y no el branding oscuro intencional.
+RENDER_GATE_BLACK_PIX_TH = 0.03
 RENDER_GATE_BLACK_MIN_SEC = 2.0
 RENDER_GATE_MAX_BLACK_SEC = 5.0
-# Exención de intro/outro: las tarjetas de marca (fondo oscuro) al principio/
-# final del vídeo se detectan como "negro" y son legítimas. Se ignoran los
-# tramos negros pegados a un extremo que además sean cortos (≤ N s) y no
-# dominen el vídeo (≤ fracción de la duración). Un vídeo íntegramente negro o
-# un tramo largo real sigue bloqueando.
+# Exención de ventana de marca: intro al principio y CTA+outro al final se
+# montan con fondo oscuro y blackdetect los marca como negro. Se exime todo
+# tramo negro que caiga dentro de los primeros/últimos RENDER_GATE_EDGE_IGNORE_SEC
+# que además sea corto (≤ N s) y no domine el vídeo (≤ fracción de la duración).
+# Un vídeo íntegramente negro o un tramo largo real sigue bloqueando.
 RENDER_GATE_EDGE_IGNORE_SEC = 30.0
 RENDER_GATE_EDGE_MAX_FRACTION = 0.15
 RENDER_GATE_SILENCE_DB = -40
