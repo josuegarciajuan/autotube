@@ -490,13 +490,15 @@ MEDIA_STRATEGY = {
     # as their primary tier (before falling back to stock images).
     "ai_image_primary": True,
     # Ordered list of free AI providers to try:
-    #   1. pollinations  (fast ~8s; mostly walled at 402 oct 2026)
-    #   2. local_sd      (CPU ~2-3 min/img; **cached** by the fleet prefetch
+    #   1. local_sd      (CPU ~2-3 min/img; **cached** by the fleet prefetch
     #                     `autotube-ai-image` for AI-tier scenes → instant)
-    #   3. stable_horde  (free crowdsourced cloud, ~2 min/img incl. queue)
+    #   2. stable_horde  (free crowdsourced cloud, ~2 min/img incl. queue)
     # local_sd goes BEFORE stable_horde so the pre-generated fleet cache wins;
     # stable_horde is the fallback when the fleet is unavailable/uncached.
-    "ai_image_providers": ["pollinations", "local_sd", "stable_horde"],
+    # Pollinations DESCATALOGADO (oct 2026): su API quedó tras el muro de pago
+    # x402 (402 Payment Required) y dejó de ser fiable. Se retira de la cadena;
+    # el proveedor sigue en el código por si se reactiva con token.
+    "ai_image_providers": ["local_sd", "stable_horde"],
     # Circuit breaker for Pollinations 402 (Payment Required). After the first
     # 402 in a process, skip Pollinations for this cooldown (seconds) so it
     # doesn't flood logs/alerts and waste the attempt budget; retried once the
