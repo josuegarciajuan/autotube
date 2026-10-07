@@ -1211,14 +1211,19 @@ EDITORIAL_RECOVERY_REVIEW = {
 # sube (validation_failed). Kill-switch: RENDER_GATE_ENABLED=False por canal.
 # Lo consume pipeline/render_gate.py vía VideoValidator.post_validate.
 RENDER_GATE_ENABLED = True
-RENDER_GATE_BLACK_PIX_TH = 0.10
+# pix_th = umbral de luminancia (fracción 0-1) por debajo del cual un píxel
+# cuenta como negro. Los templates de marca (intro/CTA/outro) usan fondos
+# oscuros con luminancia media ~0.08 (YAVG≈20), que con 0.10 se clasificaban
+# como "negro" entero y bloqueaban el vídeo. Con 0.03 solo se detecta negro
+# real (placeholder/asset ausente, YAVG≲8) y no el branding oscuro intencional.
+RENDER_GATE_BLACK_PIX_TH = 0.03
 RENDER_GATE_BLACK_MIN_SEC = 2.0
 RENDER_GATE_MAX_BLACK_SEC = 5.0
-# Exención de intro/outro: las tarjetas de marca (fondo oscuro) al principio/
-# final del vídeo se detectan como "negro" y son legítimas. Se ignoran los
-# tramos negros pegados a un extremo que además sean cortos (≤ N s) y no
-# dominen el vídeo (≤ fracción de la duración). Un vídeo íntegramente negro o
-# un tramo largo real sigue bloqueando.
+# Exención de ventana de marca: intro al principio y CTA+outro al final se
+# montan con fondo oscuro y blackdetect los marca como negro. Se exime todo
+# tramo negro que caiga dentro de los primeros/últimos RENDER_GATE_EDGE_IGNORE_SEC
+# que además sea corto (≤ N s) y no domine el vídeo (≤ fracción de la duración).
+# Un vídeo íntegramente negro o un tramo largo real sigue bloqueando.
 RENDER_GATE_EDGE_IGNORE_SEC = 30.0
 RENDER_GATE_EDGE_MAX_FRACTION = 0.15
 RENDER_GATE_SILENCE_DB = -40

@@ -5,16 +5,17 @@ suba a YouTube. Es **bloqueante** por defecto y **fail-open ante errores de
 herramienta** (un fallo del gate en sí nunca bloquea: solo bloquea si detecta
 contenido defectuoso con evidencia).
 
-Intro/outro: el pipeline monta tarjetas de marca ("intro") al principio y
-("outro"/CTA) al final con fondo oscuro (p.ej. ``(22, 18, 12)``), que
-``blackdetect`` clasifica como negro. Esos tramos son legítimos y NO deben
-bloquear la subida. Por eso los tramos negros que empiezan en ``0`` o terminan
-en EOF se excluyen del conteo si cumplen DOS condiciones de seguridad:
-  - su duración ≤ ``RENDER_GATE_EDGE_IGNORE_SEC`` (ventana de intro/outro), y
-  - su duración ≤ ``RENDER_GATE_EDGE_MAX_FRACTION`` de la duración total.
+Intro/outro: el pipeline monta tarjetas de marca ("intro" al principio;
+"CTA"+"outro" al final) con fondo oscuro (YAVG≈20), que ``blackdetect`` podía
+clasificar como negro. Dos defensas:
+  - ``RENDER_GATE_BLACK_PIX_TH`` bajo (0.03): solo cuenta como negro real
+    (YAVG≲8), no el branding oscuro intencional.
+  - Ventana de marca: un tramo negro que caiga dentro de los primeros/últimos
+    ``RENDER_GATE_EDGE_IGNORE_SEC`` segundos se exime si su duración ≤ esa
+    ventana y ≤ ``RENDER_GATE_EDGE_MAX_FRACTION`` de la duración total.
 
-Así un vídeo completamente negro (o un tramo negro largo real al principio/final)
-sigue bloqueando, pero las tarjetas cortas de marca no.
+Así un vídeo completamente negro (o un tramo negro largo real en el cuerpo)
+sigue bloqueando, pero las tarjetas de marca no.
 
 Kill-switch: ``RENDER_GATE_ENABLED=False`` (config por canal o global).
 
@@ -35,12 +36,13 @@ logger = logging.getLogger(__name__)
 
 DEFAULTS = {
     "RENDER_GATE_ENABLED": True,
-    # blackdetect
-    "RENDER_GATE_BLACK_PIX_TH": 0.10,
+    # blackdetect — 0.03 solo marca negro real (YAVG≲8); el branding oscuro de
+    # las tarjetas de marca (YAVG≈20) deja de confundirse con negro.
+    "RENDER_GATE_BLACK_PIX_TH": 0.03,
     "RENDER_GATE_BLACK_MIN_SEC": 2.0,     # trozo negro mínimo considerado
     "RENDER_GATE_MAX_BLACK_SEC": 5.0,     # total de negro permitido antes de bloquear
-    # Exención de intro/outro (tramos negros pegados a los extremos).
-    "RENDER_GATE_EDGE_IGNORE_SEC": 30.0,  # ventana máx. de intro/outro a eximir
+    # Exención de la ventana de marca (intro al principio; CTA+outro al final).
+    "RENDER_GATE_EDGE_IGNORE_SEC": 30.0,  # ventana de marca a eximir en cada extremo
     "RENDER_GATE_EDGE_MAX_FRACTION": 0.15,  # y como fracción de la duración total
     # silencedetect
     "RENDER_GATE_SILENCE_DB": -40,
@@ -131,12 +133,14 @@ def _split_edge_black(
     edge_sec: float,
     max_fraction: float,
 ) -> tuple[float, int, float, int]:
-    """Separa tramos negros de cuerpo (bloqueantes) y de intro/outro (exentos).
+    """Separa tramos negros de cuerpo (bloqueantes) y de marca (intro/outro, exentos).
 
-    Un tramo se exime solo si está pegado a un extremo (empieza en 0 o termina
-    en EOF) Y es corto (`≤ edge_sec`) Y no domina el vídeo
-    (`≤ max_fraction * duración`). Si no se conoce la duración, no se exime nada
-    (fail-safe: se mantiene el comportamiento bloqueante original).
+    Un tramo se exime si cae dentro de la **ventana de marca** —los primeros o
+    últimos ``edge_sec`` segundos— Y es corto (``≤ edge_sec``) Y no domina el
+    vídeo (``≤ max_fraction * duración``). La ventana (en vez de exigir que el
+    negro toque el extremo exacto) es necesaria porque el CTA+outro pueden dejar
+    una cola visible (end card) tras el negro. Si no se conoce la duración, no
+    se exime nada (fail-safe: se mantiene el comportamiento bloqueante original).
     """
     counted_total = counted_count = 0.0
     ignored_total = ignored_count = 0.0
@@ -147,8 +151,8 @@ def _split_edge_black(
         return counted_total, counted_count, 0.0, 0.0
 
     for start, end, dur in runs:
-        is_head = start <= _EDGE_EPS
-        is_tail = (duration - end) <= _EDGE_EPS
+        is_head = start <= edge_sec
+        is_tail = (duration - end) <= edge_sec
         short_enough = dur <= edge_sec
         not_dominant = dur <= max_fraction * duration
         if (is_head or is_tail) and short_enough and not_dominant:
