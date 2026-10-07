@@ -44,6 +44,25 @@ ALERT_TYPE_LONGFORM_MISMATCH = "longform_visibility_mismatch"
 # Visibilidades externas que indican RESTRICCIÓN/retirada real en YouTube.
 _RESTRICTED_EXTERNAL = {"private", "removed", "age_restricted", "unavailable", "login_required"}
 
+# Mismatches de visibilidad long-form ACEPTADOS por el operador (p. ej. YouTube
+# restringió por edad un vídeo que la BD cree público). Se guarda una lista de
+# ids de vídeo en system_state; para esos no se vuelve a emitir la alerta. Es
+# quirúrgico: NO silencia el tipo entero, así que un mismatch nuevo en OTRO
+# vídeo sigue alertando.
+ACK_KEY = "longform_mismatch_ack"
+
+
+def _acked_mismatch_video_ids(db) -> set:
+    """Ids de vídeo cuyo mismatch de visibilidad long-form está aceptado."""
+    try:
+        raw = db.get_system_state(ACK_KEY)
+        if not raw:
+            return set()
+        data = json.loads(raw)
+        return {int(x) for x in data} if isinstance(data, list) else set()
+    except Exception:  # noqa: BLE001
+        return set()
+
 _FEED_CACHE: dict[int, tuple] = {}
 
 
@@ -338,6 +357,7 @@ def reconcile_recent_videos(db=None, lookback_days: int = 45) -> dict:
         db = ExtendedDatabase()
     now = datetime.now(timezone.utc)
     summary = {"checked": 0, "updated": 0, "alerts": 0, "errors": 0}
+    acked_ids = _acked_mismatch_video_ids(db)
     since = (now - timedelta(days=lookback_days)).isoformat()
     with db._connect() as conn:
         rows = conn.execute(
@@ -388,13 +408,19 @@ def reconcile_recent_videos(db=None, lookback_days: int = 45) -> dict:
                           and visibility == "public")
 
             if dangerous:
-                from api.services.lifecycle_monitor import emit_alert
-                if emit_alert(db, entity_type="video", entity_id=video["id"],
-                              channel_id=video["channel_id"], alert_type=ALERT_TYPE_LONGFORM_MISMATCH,
-                              severity="critical", title=f"Visibilidad externa discrepante: vídeo #{video['id']}",
-                              message=f"BD={expected}; YouTube={visibility}. No se cambia privacidad automáticamente.",
-                              metadata={"db_privacy": expected, "external": visibility, "yt_id": video["yt_video_id"]}):
-                    summary["alerts"] += 1
+                if video["id"] in acked_ids:
+                    logger.debug(
+                        "Long-form #%s: mismatch BD=%s/YT=%s aceptado por el operador — sin alerta",
+                        video["id"], expected, visibility,
+                    )
+                else:
+                    from api.services.lifecycle_monitor import emit_alert
+                    if emit_alert(db, entity_type="video", entity_id=video["id"],
+                                  channel_id=video["channel_id"], alert_type=ALERT_TYPE_LONGFORM_MISMATCH,
+                                  severity="critical", title=f"Visibilidad externa discrepante: vídeo #{video['id']}",
+                                  message=f"BD={expected}; YouTube={visibility}. No se cambia privacidad automáticamente.",
+                                  metadata={"db_privacy": expected, "external": visibility, "yt_id": video["yt_video_id"]}):
+                        summary["alerts"] += 1
             elif benign_lag:
                 logger.debug(
                     "Long-form #%s: YouTube ya público, BD=%s (lag del verificador) — sin alerta",

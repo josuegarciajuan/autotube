@@ -7,6 +7,7 @@ Covers:
   and raises a 'short_publish_stuck' alert for private shorts past publish_at.
 """
 
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -192,3 +193,61 @@ def test_reconcile_skips_recently_checked(monkeypatch):
     monkeypatch.setattr(rec, "classify_video_visibility", lambda yt: "public")
     summary = rec.reconcile_recent_shorts(db)
     assert summary["checked"] == 0  # cooldown respected
+
+
+# ── long-form visibility mismatch: ack quirúrgico por vídeo ─────
+class _VideosDB:
+    """sqlite in-memory con la tabla `videos` mínima para reconcile_recent_videos."""
+
+    def __init__(self, ack):
+        import sqlite3
+
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute(
+            """CREATE TABLE videos (
+                 id INTEGER PRIMARY KEY, channel_id INTEGER, yt_video_id TEXT,
+                 status TEXT, privacy_status TEXT, yt_visibility TEXT,
+                 yt_checked_at TEXT, yt_checked_source TEXT, titulo_final TEXT,
+                 uploaded_at TEXT, created_at TEXT)"""
+        )
+        self.conn.execute(
+            "INSERT INTO videos (id, channel_id, yt_video_id, status, privacy_status, uploaded_at) "
+            "VALUES (2424, 3, '_WGQO1utSXs', 'published', 'public', ?)",
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+        self.conn.commit()
+        self._ack = ack
+
+    def _connect(self):
+        return self.conn
+
+    def get_system_state(self, key):
+        if key == rec.ACK_KEY:
+            return json.dumps(self._ack)
+        return None
+
+
+def _run_longform_mismatch(monkeypatch, ack):
+    db = _VideosDB(ack)
+    monkeypatch.setattr(rec, "classify_video_visibility", lambda yt: "age_restricted")
+    monkeypatch.setattr(rec, "_feed_public_ids", lambda db_, cid: {})
+    calls = []
+    monkeypatch.setattr(
+        "api.services.lifecycle_monitor.emit_alert",
+        lambda db_, **kw: calls.append(kw) or 1,
+    )
+    summary = rec.reconcile_recent_videos(db)
+    return summary, calls
+
+
+def test_longform_mismatch_acked_does_not_alert(monkeypatch):
+    summary, calls = _run_longform_mismatch(monkeypatch, [2424])
+    assert summary["alerts"] == 0
+    assert calls == [], "un mismatch aceptado por el operador no debe alertar"
+
+
+def test_longform_mismatch_without_ack_alerts(monkeypatch):
+    summary, calls = _run_longform_mismatch(monkeypatch, [])
+    assert summary["alerts"] == 1
+    assert calls and calls[0]["alert_type"] == rec.ALERT_TYPE_LONGFORM_MISMATCH
