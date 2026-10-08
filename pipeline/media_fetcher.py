@@ -1236,7 +1236,15 @@ class MediaFetcher:
         # (the slowest provider in the chain): ~25s/step + 45s overhead.
         # ago 2026: the fixed 180s/image assumed Local SD ~3 min, but at 20
         # steps it really takes ~15 min → false timeouts on long videos.
-        n_ai = n_scenes - len(video_scenes)
+        #
+        # oct 2026 (fix false media timeouts): budget the images that will
+        # ACTUALLY be fetched. The RAM governor above hard-caps video assets at
+        # MAX_ABSOLUTE_VIDEOS, forcing every remaining video-priority scene to
+        # image-only at runtime. Using the raw classification count understated
+        # the image workload (e.g. 148 scenes / 111 video-priority / cap 50 →
+        # 37 images budgeted but ~98 fetched) and aborted otherwise-valid videos
+        # with a premature "Media phase timeout".
+        n_ai = n_scenes - min(len(video_scenes), MAX_ABSOLUTE_VIDEOS)
         _sd_steps = int(self._media_strategy.get("ai_local_sd_steps", 8) or 8)
         _ai_scene_secs = max(180, 45 + _sd_steps * 25)  # 8 steps → 245s; 20 → 545s
         _cb_phase_timeout = max(3600, 600 + n_scenes * 30 + n_ai * _ai_scene_secs)
