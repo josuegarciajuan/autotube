@@ -3257,7 +3257,11 @@ class VideoEditor:
         color_pal = self.canal.get("COLOR_PALETTE", COLOR_PALETTE)
         accent_color = color_pal.get("accent", (200, 160, 40))
         text_color = color_pal.get("text", (230, 230, 230))
-        bg_color = self.canal.get("OUTRO_BG_COLOR", (5, 5, 5))
+        # oct 2026: preferir el color de marca (palette secondary) antes que un
+        # gris casi negro por defecto. Un fondo (5,5,5) tiene luminancia por
+        # debajo del umbral de blackdetect (pix_th≈0.03) y hace que el gate de
+        # render marque el outro programático como "negro real".
+        bg_color = self.canal.get("OUTRO_BG_COLOR") or color_pal.get("secondary") or (15, 32, 62)
         font_size = self.canal.get("OUTRO_FONT_SIZE", 52)
 
         cta_like = self.canal.get("OUTRO_CTA_LIKE", "👍 Like")
@@ -3371,7 +3375,11 @@ class VideoEditor:
         color_pal = self.canal.get("COLOR_PALETTE", COLOR_PALETTE)
         accent_color = color_pal.get("accent", (200, 160, 40))
         text_color = color_pal.get("text", (230, 230, 230))
-        bg_color = self.canal.get("CTA_BG_COLOR", (8, 8, 10))
+        # oct 2026: preferir el color de marca (palette secondary) antes que un
+        # gris casi negro por defecto. Un fondo (8,8,10) tiene luminancia por
+        # debajo del umbral de blackdetect (pix_th≈0.03) y hace que el gate de
+        # render marque el CTA programático (≈10 s) como "negro real".
+        bg_color = self.canal.get("CTA_BG_COLOR") or color_pal.get("secondary") or (15, 32, 62)
         font_size = self.canal.get("CTA_FONT_SIZE", 44)
 
         # CTA text with optional variant rotation
