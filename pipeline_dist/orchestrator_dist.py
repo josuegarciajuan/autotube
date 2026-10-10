@@ -742,7 +742,11 @@ class DistributedOrchestrator(PipelineOrchestrator):
         vig = float(canal.get("VIGNETTE_INTENSITY", 0) or 0)
         preset = str(canal.get("FFMPEG_PRESET", settings_mod.FFMPEG_PRESET_DEFAULT))
 
-        staging = Path(tempfile.mkdtemp(prefix="autotube_concat_dist_"))
+        # staging efímero: TemporaryDirectory garantiza el borrado al salir del
+        # ámbito (éxito o excepción). Sin esto, cada concat distribuido dejaba
+        # ~1-2 GB en /tmp/autotube_concat_dist_* (fuga de disco; ver GC).
+        _staging_ctx = tempfile.TemporaryDirectory(prefix="autotube_concat_dist_")
+        staging = Path(_staging_ctx.name)
         batches = []
         for bi, start in enumerate(range(0, n, batch_size)):
             segs = segment_paths[start:start + batch_size]
@@ -870,6 +874,7 @@ class DistributedOrchestrator(PipelineOrchestrator):
             )
         logger.info("[%s] Concat distribuido OK: %d batches → %s",
                     self.canal, len(batches), output_path)
+        _staging_ctx.cleanup()
         return True
 
     def _pre_render_scenes(self, script: dict, audio_data: dict,
