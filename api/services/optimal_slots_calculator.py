@@ -706,7 +706,26 @@ class OptimalSlotsCalculator:
         if not pending:
             return 0
 
-        # Round-robin assignment across optimal slots
+        # Round-robin assignment across optimal slots.
+        # `planned_slots` tiene UNIQUE(channel_id, target_public_at): con jitter
+        # aleatorio dos slots podían colisionar en el mismo minuto y el UPDATE
+        # abortaba el replan completo ("UNIQUE constraint failed", canal4 oct-2026).
+        # Reservamos el minuto: si ya está tomado (por otro slot pendiente o por
+        # una fila existente del canal), desplazamos +1 min hasta hallar hueco.
+        reserved: set[str] = set()
+
+        def _slot_exists(conn, channel_id: int, ts: str, slot_id: int) -> bool:
+            try:
+                row = conn.execute(
+                    """SELECT 1 FROM planned_slots
+                       WHERE channel_id = ? AND target_public_at = ? AND id != ?
+                       LIMIT 1""",
+                    (channel_id, ts, slot_id),
+                ).fetchone()
+                return row is not None
+            except Exception:
+                return False
+
         updated = 0
         for i, slot in enumerate(pending):
             optimal_slot = target_hours[i % len(target_hours)]
@@ -729,9 +748,19 @@ class OptimalSlotsCalculator:
             if target_local <= now_local:
                 target_local += timedelta(days=1)
 
-            target_local_str = target_local.strftime("%Y-%m-%d %H:%M:%S")
-
             with self._db._connect() as conn:
+                # Buscar un minuto libre (máx 24h de margen) que respete el UNIQUE.
+                for _ in range(1440):
+                    target_local_str = target_local.strftime("%Y-%m-%d %H:%M:%S")
+                    if target_local_str not in reserved and not _slot_exists(
+                        conn, channel_id, target_local_str, slot["id"]
+                    ):
+                        break
+                    target_local += timedelta(minutes=1)
+                else:
+                    target_local_str = target_local.strftime("%Y-%m-%d %H:%M:%S")
+
+                reserved.add(target_local_str)
                 conn.execute(
                     """UPDATE planned_slots
                        SET target_public_at = ?

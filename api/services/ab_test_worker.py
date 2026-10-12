@@ -98,13 +98,10 @@ class ABTestWorker:
 
         Also enforces: only 1 video per channel in test at a time.
         """
-        conn = self.db._get_conn() if hasattr(self.db, '_get_conn') else None
-        if conn is None:
-            # Fallback: use raw sqlite3
-            import sqlite3
-            from config.settings import DATABASE_PATH
-            conn = sqlite3.connect(str(DATABASE_PATH))
-            conn.row_factory = sqlite3.Row
+        # ExtendedDatabase expone ``_connect()`` (no ``_get_conn``). Usarlo
+        # directamente evita el AttributeError recurrente ("'ExtendedDatabase'
+        # object has no attribute '_get_conn'") y mantiene WAL/config del pool.
+        conn = self.db._connect()
 
         cutoff = (now - timedelta(hours=self.first_check_hours)).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -924,14 +921,8 @@ class ABTestWorker:
     # ═══════════════════════════════════════════════════════════════
 
     def _get_db_conn(self):
-        """Get a database connection."""
-        if hasattr(self.db, '_get_conn'):
-            return self.db._get_conn()
-        import sqlite3
-        from config.settings import DATABASE_PATH
-        conn = sqlite3.connect(str(DATABASE_PATH))
-        conn.row_factory = sqlite3.Row
-        return conn
+        """Get a database connection (ExtendedDatabase expone ``_connect``)."""
+        return self.db._connect()
 
     def _update_phase(self, video_id: int, phase: str, now: datetime):
         """Update phase and relevant timestamp."""
