@@ -15,7 +15,10 @@ cd /root/autotube
 
 mkdir -p logs
 LOG="logs/dup_cleanup_$(date +%Y%m%d_%H%M%S).log"
-exec >> "$LOG" 2>&1
+# Log a fichero Y al journal de systemd (stderr), para que `systemctl status`
+# muestre la causa real de un fallo. Antes solo se redirigía al fichero, que
+# además logrotate truncan cada hora, dejando el journal vacío.
+exec > >(tee -a "$LOG") 2>&1
 
 echo "=== Limpieza programada de duplicados: $(date) ==="
 
