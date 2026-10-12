@@ -41,8 +41,11 @@ if [ "$GUARD" != "ok" ]; then
 fi
 
 # ── 1. Regenerar diagnóstico (info in_db fresca) ──────────────────
+# `diagnose_all_channels.py` exige un selector explícito (--channel-id/--slug/
+# --project/--all). Sin él argparse aborta con rc=2 y el script entero fallaba
+# antes de limpiar (regresión desde ~sep-2026). `--all` requiere `--yes`.
 echo "── Diagnóstico ──"
-python3 scripts/diagnose_all_channels.py
+python3 scripts/diagnose_all_channels.py --all --yes
 DIAG_RC=$?
 if [ $DIAG_RC -ne 0 ]; then
     echo "❌ Diagnóstico falló (rc=$DIAG_RC) — abortando"
