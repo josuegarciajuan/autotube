@@ -1,0 +1,12 @@
+[Unit]
+Description=Autotube — limpieza programada de duplicados de YouTube
+After=autotube-panel.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/autotube
+ExecStart=/bin/bash /root/autotube/scripts/scheduled_dup_cleanup.sh
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+# No reiniciar: es un trabajo puntual. Si falla, el timer reintentará mañana.

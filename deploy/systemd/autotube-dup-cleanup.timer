@@ -1,0 +1,14 @@
+[Unit]
+Description=Ejecuta la limpieza de duplicados de YouTube a diario (09:30 CEST)
+Requires=autotube-dup-cleanup.service
+
+[Timer]
+# 09:30 Europe/Madrid: la cuota de YouTube Data API se resetea a las 00:00 PT
+# (~09:00 CEST). Ejecutar a las 04:00 consumía la cola de la cuota del día PT
+# anterior y chocaba con 403 quotaExceeded en mitad de la limpieza.
+OnCalendar=*-*-* 09:30:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
