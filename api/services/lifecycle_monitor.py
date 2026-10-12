@@ -97,7 +97,7 @@ CRITICAL_REVIEW_ALERTS = {"review_visibility_mismatch", "review_exact_duplicate"
 # Los checkpoints de recuperación, las revisiones editoriales OK y el heartbeat
 # de marcado IA son informativos y de alta frecuencia; sin retención se acumulan
 # sin fin en el panel. Se retiran solos pasados N días.
-INFO_ALERT_RETENTION_DAYS = 7
+INFO_ALERT_RETENTION_DAYS = 2
 INFO_ALERT_RETENTION_TYPES = (
     "recovery_checkpoint_",
     "editorial_review_success",

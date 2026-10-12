@@ -274,3 +274,14 @@ def test_build_api_log_handler_defaults(tmp_path):
         assert handler.backupCount == 10
     finally:
         handler.close()
+
+
+def test_is_llm_credit_error_detects_deepseek_402():
+    msg = ("Error code: 402 - {'error': {'message': 'Insufficient Balance', "
+           "'code': 'invalid_request_error'}}")
+    assert observability.is_llm_credit_error(msg) is True
+    assert observability.is_llm_credit_error("insufficient_quota") is True
+    # Ruido no relacionado con créditos nunca debe silenciarse.
+    assert observability.is_llm_credit_error("Render slot timeout") is False
+    assert observability.is_llm_credit_error("") is False
+    assert observability.is_llm_credit_error(None) is False

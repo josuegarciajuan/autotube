@@ -309,13 +309,92 @@ class YouTubeViralScraper(BaseScraper):
 
         self._llm_initialized = True
 
+    def _build_llm_pool(self):
+        """Build (once) the multi-provider LLM pool with automatic failover.
+
+        Antes este scraper construía un cliente DeepSeek fijo: cuando la cuenta
+        se quedaba sin saldo (HTTP 402 "Insufficient Balance") fallaba en todas
+        las llamadas sin saltar a OpenAI, generando una cascada de alertas
+        ``error_scrapers_youtube_viral``. Ahora reutiliza el ModelPool (mismo
+        failover y circuit-breaker que script_generator).
+        """
+        if getattr(self, "_llm_pool", None) is not None:
+            return self._llm_pool
+        try:
+            from config.model_pool import ModelPool
+            pool = ModelPool.from_env()
+            self._llm_pool = pool if pool else None
+        except Exception as exc:  # noqa: BLE001 — fail-open to legacy path
+            logger.warning("[%s] ModelPool init failed (%s) — legacy single client", self.canal, exc)
+            self._llm_pool = None
+        return self._llm_pool
+
     def _call_llm(self, system_prompt: str, user_message: str, temperature: float = 0.7) -> str | None:
-        """Call the LLM for translation/paraphrasing/adaptation with retries."""
+        """Call the LLM for translation/paraphrasing/adaptation with failover.
+
+        Itera el ModelPool (DeepSeek → OpenAI). Un error definitivo (cuota/
+        créditos/auth, p. ej. 402 "Insufficient Balance") marca el proveedor en
+        cooldown y salta al siguiente sin reintentar el caído.
+        """
         self._init_llm()
-        if not self._llm_api_key:
+        from config.model_pool import is_non_retryable_error, mark_provider_unavailable
+
+        pool = self._build_llm_pool()
+        if pool:
+            last_error = None
+            for entry, client in pool.iter_models():
+                for attempt in range(1, self.max_retries + 1):
+                    try:
+                        resp = client.chat.completions.create(
+                            model=entry.model_id,
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_message},
+                            ],
+                            temperature=temperature,
+                            max_tokens=4096,
+                        )
+                        content = resp.choices[0].message.content
+                        if not content:
+                            # DeepSeek thinking mode: response may be in reasoning_content
+                            from config.llm_helpers import _extract_reasoning_content
+                            reasoning = _extract_reasoning_content(resp)
+                            if reasoning and reasoning.strip():
+                                content = reasoning.strip()
+                        if content:
+                            content = content.strip()
+                            if not self._is_spanish_text(content):
+                                logger.warning("[%s] LLM returned non-Spanish text (attempt %d) — discarding",
+                                               self.canal, attempt)
+                                if attempt < self.max_retries:
+                                    continue
+                                return None
+                        return content if content else None
+                    except Exception as e:  # noqa: BLE001
+                        last_error = e
+                        if is_non_retryable_error(e):
+                            # No reintentar el proveedor caído: saltar al siguiente.
+                            mark_provider_unavailable(entry.provider)
+                            logger.warning(
+                                "[%s] LLM provider %s no disponible (definitivo): %s — failover",
+                                self.canal, entry.provider, e,
+                            )
+                            break
+                        if attempt < self.max_retries:
+                            wait = 2 ** attempt
+                            logger.warning("[%s] LLM call failed (attempt %d/%d): %s — retrying in %ds",
+                                           self.canal, attempt, self.max_retries, e, wait)
+                            time.sleep(wait)
+                else:
+                    continue
+            if last_error is not None:
+                logger.error("[%s] LLM call failed after all providers: %s",
+                             self.canal, last_error)
             return None
 
-        last_error = None
+        # ── Legacy single-client path (pool no disponible) ──
+        if not self._llm_api_key:
+            return None
         for attempt in range(1, self.max_retries + 1):
             try:
                 from openai import OpenAI
@@ -331,32 +410,27 @@ class YouTubeViralScraper(BaseScraper):
                 )
                 content = resp.choices[0].message.content
                 if not content:
-                    # DeepSeek thinking mode: response may be in reasoning_content
                     from config.llm_helpers import _extract_reasoning_content
                     reasoning = _extract_reasoning_content(resp)
                     if reasoning and reasoning.strip():
-                        logger.info("[%s] LLM fallback: using reasoning_content (thinking mode)", self.canal)
                         content = reasoning.strip()
                 if content:
                     content = content.strip()
                     if not self._is_spanish_text(content):
-                        logger.warning("[%s] LLM returned non-Spanish text (attempt %d) — discarding",
-                                       self.canal, attempt)
                         if attempt < self.max_retries:
                             continue
                         return None
                 return content if content else None
-            except Exception as e:
-                last_error = e
+            except Exception as e:  # noqa: BLE001
+                if is_non_retryable_error(e):
+                    logger.warning("[%s] LLM proveedor no disponible (definitivo): %s",
+                                   self.canal, e)
+                    return None
                 if attempt < self.max_retries:
-                    wait = 2 ** attempt  # exponential backoff: 2s, 4s, 8s
-                    logger.warning("[%s] LLM call failed (attempt %d/%d): %s — retrying in %ds",
-                                   self.canal, attempt, self.max_retries, e, wait)
-                    time.sleep(wait)
+                    time.sleep(2 ** attempt)
                 else:
                     logger.error("[%s] LLM call failed after %d attempts: %s",
                                  self.canal, self.max_retries, e)
-
         return None
 
     @staticmethod

@@ -813,6 +813,43 @@ def _is_ignored(logger_name: Any, message: Any) -> bool:
     return any(p in haystack for p in patterns)
 
 
+# ── Anti-cascada de créditos LLM ──────────────────────────────
+# Cuando la cuenta del proveedor LLM se queda sin saldo/cuota, CADA módulo que
+# llama al LLM registra su propio ERROR y generaba su propia alerta crítica
+# ``error_<módulo>``: una sola causa se materializaba como 6+ tipos distintos
+# (oct-2026, DeepSeek $0). El problema ya lo cubre la alerta única
+# ``llm_credit_exhausted``; aquí se descartan las derivadas para no ahogar el
+# panel con ruido de la MISMA causa.
+_LLM_CREDIT_ERROR_PATTERNS = (
+    "insufficient balance",
+    "insufficient_balance",
+    "balance is insufficient",
+    "insufficient_quota",
+    "credit_balance_exhausted",
+    "exceeded your current quota",
+    "no credits remaining",
+    "out of credits",
+    "insufficient funds",
+    "billing_not_active",
+)
+
+
+def is_llm_credit_error(message: Any) -> bool:
+    """True si *message* denota agotamiento de créditos/cuota del LLM.
+
+    Fail-safe: ante cualquier duda o error devuelve False (nunca silencia un
+    fallo real por accidente).
+    """
+    try:
+        text = str(message or "").lower()
+        if not text:
+            return False
+        return any(p in text for p in _LLM_CREDIT_ERROR_PATTERNS)
+    except Exception:  # pragma: no cover - defensive
+        return False
+
+
+
 def _entity_from_context(ctx: Dict[str, Any]):
     """Return ``(entity_type, entity_id, channel_id)`` inferred from context."""
     try:
@@ -1064,6 +1101,9 @@ def obs_error(
         redacted_message = _redact_text(raw_message, 500)
         if _is_ignored(event, redacted_message):
             return
+        # Anti-cascada: un fallo por créditos LLM ya lo cubre llm_credit_exhausted.
+        if is_llm_credit_error(raw_message):
+            return
         _submit_error_alert(
             alert_type=alert_type,
             title=title or f"Error: {event}",
@@ -1180,6 +1220,10 @@ class CriticalErrorAlertHandler(logging.Handler):
         except Exception:
             raw_message = str(getattr(record, "msg", ""))
         redacted_message = _redact_text(raw_message, 500)
+        # Anti-cascada: descartar derivadas de un fallo por créditos LLM — la
+        # alerta única `llm_credit_exhausted` (credit checker) ya lo representa.
+        if is_llm_credit_error(raw_message):
+            return
         explicit_title = getattr(record, "alert_title", None)
         title = str(explicit_title) if explicit_title else (
             f"Errores de {logger_name or 'sistema'}"

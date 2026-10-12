@@ -54,6 +54,13 @@ _NON_RETRYABLE_PATTERNS = (
     "billing_not_active",
     "out of credits",
     "insufficient funds",
+    # DeepSeek devuelve HTTP 402 con "Insufficient Balance" cuando la cuenta se
+    # queda sin saldo. Sin estos patrones NO se reconocía como definitivo: se
+    # reintentaba el proveedor caído 3 veces por llamada y el failover a OpenAI
+    # nunca saltaba (cascada de alertas error_* durante la caída de oct-2026).
+    "insufficient balance",
+    "insufficient_balance",
+    "balance is insufficient",
     "invalid_api_key",
     "invalid api key",
     "incorrect api key",
@@ -68,7 +75,9 @@ def is_non_retryable_error(exc: Exception) -> bool:
     if any(p in msg for p in _NON_RETRYABLE_PATTERNS):
         return True
     status = getattr(exc, "status_code", None)
-    if status == 401:
+    # 402 Payment Required (DeepSeek sin saldo, Pollinations x402) y 401/403
+    # (auth) son definitivos: no tiene sentido reintentar el mismo proveedor.
+    if status in (401, 402, 403):
         return True
     return False
 

@@ -599,38 +599,88 @@ def _check_ram_gate(logger, timeout_sec: int = 600, threshold: int | None = None
 
 # ── Phase pipelining: DB-based render slot (macro-fase B) ────────
 
-def _acquire_render_slot(job_id: int, db, timeout_sec: int = 7200) -> bool:
+def _acquire_render_slot(job_id: int, db, timeout_sec: int = None) -> bool:
     """Acquire exclusive render access via a DB-based lock.
-    
-    Used for phase pipelining: worker B does prep phases while worker A 
-    renders. Before entering the video (render) phase, the worker must 
+
+    Used for phase pipelining: worker B does prep phases while worker A
+    renders. Before entering the video (render) phase, the worker must
     acquire this slot to ensure only ONE render runs at a time.
-    
+
     The lock is implemented as a simple atomic check: count other jobs
-    in 'render' phase, and if zero, update this job's pipeline_phase to 
-    'render'. The UPDATE + check happens in the same transaction for 
+    in 'render' phase, and if zero, update this job's pipeline_phase to
+    'render'. The UPDATE + check happens in the same transaction for
     atomicity.
-    
+
+    Robustez (oct-2026): un render largo-legítimo o un holder ZOMBI
+    (proceso muerto / render distribuido encallado) retenían el slot y los
+    jobs en espera fallaban en bloque ("Render slot timeout — otro render
+    activo >2h"). Ahora:
+      * ``RENDER_SLOT_TIMEOUT_SEC`` (def. 4 h) — espera máxima del que quiere
+        entrar; configurable sin tocar código.
+      * Se RECLAMA el slot de un holder muerto (heartbeat stale >
+        ``RENDER_SLOT_STALE_HEARTBEAT_SEC``, def. 15 min).
+      * Se RECLAMA el slot de un holder con progreso CONGELADO
+        (``phase``+``progress`` sin avanzar > ``RENDER_SLOT_STALL_SEC``, def.
+        30 min) tras superar ``RENDER_SLOT_MAX_HOLD_SEC`` (def. 3 h).
+
     Returns True if acquired, False on timeout.
     """
+    import os as _os
     import time as _time
     logger = logging.getLogger("autotube.worker")
+
+    if timeout_sec is None:
+        try:
+            timeout_sec = int(_os.environ.get("RENDER_SLOT_TIMEOUT_SEC", "14400") or 14400)
+        except (TypeError, ValueError):
+            timeout_sec = 14400
+    try:
+        stale_hb_sec = int(_os.environ.get("RENDER_SLOT_STALE_HEARTBEAT_SEC", "900") or 900)
+    except (TypeError, ValueError):
+        stale_hb_sec = 900
+    try:
+        max_hold_sec = int(_os.environ.get("RENDER_SLOT_MAX_HOLD_SEC", "10800") or 10800)
+    except (TypeError, ValueError):
+        max_hold_sec = 10800
+    try:
+        stall_sec = int(_os.environ.get("RENDER_SLOT_STALL_SEC", "1800") or 1800)
+    except (TypeError, ValueError):
+        stall_sec = 1800
+
     deadline = _time.time() + timeout_sec
-    
+    # Snapshot del progreso del holder para detectar congelación real.
+    holder_state: dict = {}
+
+    def _reclaim_holder(reason: str, holder_job_id: int) -> None:
+        """Release a stuck holder's render lock so a waiting job can proceed."""
+        try:
+            with db._connect() as conn:
+                conn.execute(
+                    "UPDATE generation_jobs SET pipeline_phase = NULL WHERE id = ? AND pipeline_phase = 'render'",
+                    (holder_job_id,),
+                )
+                conn.commit()
+            logger.warning(
+                "Render slot reclaimed from job #%d (%s) — job #%d podrá renderizar",
+                holder_job_id, reason, job_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — nunca romper la espera
+            logger.warning("No se pudo reclamar el slot del job #%d: %s", holder_job_id, exc)
+
     while _time.time() < deadline:
         with db._connect() as conn:
-            # Atomic check-and-claim: count other active renders
-            row = conn.execute(
-                """SELECT COUNT(*) as cnt FROM generation_jobs
+            # Holders actuales del slot de render
+            holders = conn.execute(
+                """SELECT id, phase, progress, last_heartbeat_at, started_at
+                   FROM generation_jobs
                    WHERE status IN ('running', 'queued')
                      AND pipeline_phase = 'render'
                      AND id != ?""",
                 (job_id,),
-            ).fetchone()
-            active_renders = row["cnt"] if row else 0
-            
-            if active_renders == 0:
-                # No other render active — claim the slot
+            ).fetchall()
+
+            if not holders:
+                # No hay otro render activo — reclamar el slot
                 conn.execute(
                     "UPDATE generation_jobs SET pipeline_phase='render' WHERE id=?",
                     (job_id,),
@@ -638,13 +688,52 @@ def _acquire_render_slot(job_id: int, db, timeout_sec: int = 7200) -> bool:
                 conn.commit()
                 logger.info("Render slot acquired for job #%d", job_id)
                 return True
-        
+
+            # Diagnóstico de holders: reclamar si están muertos o congelados.
+            now_mono = _time.time()
+            for h in holders:
+                hid = h["id"]
+                try:
+                    hb_age = None
+                    if h["last_heartbeat_at"]:
+                        from datetime import datetime as _dt, timezone as _tz
+                        hb = _dt.fromisoformat(str(h["last_heartbeat_at"]))
+                        if hb.tzinfo is None:
+                            hb = hb.replace(tzinfo=_tz.utc)
+                        hb_age = (_dt.now(_tz.utc) - hb).total_seconds()
+                    # 1) Holder muerto (heartbeat stale)
+                    if hb_age is not None and hb_age > stale_hb_sec:
+                        _reclaim_holder(f"heartbeat stale {int(hb_age)}s", hid)
+                        holder_state.pop(hid, None)
+                        continue
+                    # 2) Holder con progreso congelado tras superar el máximo
+                    sig = f"{h['phase']}|{h['progress']}"
+                    st = holder_state.get(hid)
+                    if st is None or st.get("sig") != sig:
+                        holder_state[hid] = {"sig": sig, "since": now_mono}
+                        continue
+                    frozen_for = now_mono - st["since"]
+                    held_for = None
+                    if h["started_at"]:
+                        from datetime import datetime as _dt, timezone as _tz
+                        sa = _dt.fromisoformat(str(h["started_at"]))
+                        if sa.tzinfo is None:
+                            sa = sa.replace(tzinfo=_tz.utc)
+                        held_for = (_dt.now(_tz.utc) - sa).total_seconds()
+                    if frozen_for > stall_sec and (held_for is None or held_for > max_hold_sec):
+                        _reclaim_holder(
+                            f"progreso congelado {int(frozen_for)}s (held {int(held_for or 0)}s)", hid,
+                        )
+                        holder_state.pop(hid, None)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Holder check failed for #%s: %s", hid, exc)
+
         logger.info(
             "Waiting for render slot (job #%d) — %d active render(s)",
-            job_id, active_renders,
+            job_id, len(holders),
         )
         _time.sleep(30)
-    
+
     logger.error(
         "Render slot timeout for job #%d after %ds", job_id, timeout_sec,
     )
@@ -1348,8 +1437,8 @@ def run_job(
             # ── Phase pipelining: acquire exclusive render slot ──
             # Wait until no other job is in the render phase. This allows
             # another worker to do prep phases (scrape→media) while we wait.
-            if not _acquire_render_slot(job_id, db, timeout_sec=7200):
-                error_msg = "Render slot timeout — otro render activo >2h"
+            if not _acquire_render_slot(job_id, db):
+                error_msg = "Render slot timeout — otro render activo demasiado tiempo"
                 db.update_job(job_id, status="failed", error_msg=error_msg)
                 db.update_video(video_id, status="error", progress_phase="video",
                                 error_message=error_msg)
