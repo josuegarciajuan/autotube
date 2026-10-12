@@ -128,8 +128,17 @@ def _select_canonical(group: list[dict]) -> dict:
     return canonical, duplicates
 
 
-def _delete_video(service, yt_video_id: str, channel_slug: str = "") -> bool:
-    """Delete a YouTube video. Returns True on success."""
+def _delete_video(service, yt_video_id: str, channel_slug: str = "") -> str:
+    """Delete a YouTube video.
+
+    Returns a status code (not just bool) para distinguir un fallo REAL de un
+    límite transitorio de cuota:
+      * "ok"     — borrado correctamente.
+      * "gone"   — ya no existe (404): se considera éxito.
+      * "quota"  — 403 quotaExceeded: transitorio, se reintenta en la próxima
+                   ejecución (NO debe marcar el servicio como fallido).
+      * "error"  — fallo real (permisos, 5xx, excepción).
+    """
     try:
         service.videos().delete(id=yt_video_id).execute()
         # ── Track quota (diagnostic) ──────────────────────────
@@ -141,14 +150,25 @@ def _delete_video(service, yt_video_id: str, channel_slug: str = "") -> bool:
             except Exception:
                 pass
         logger.info("  🗑️  Deleted: %s", yt_video_id)
-        return True
+        return "ok"
     except HttpError as exc:
         reason = str(exc)[:200]
-        if "videoNotFound" in reason or "404" in reason:
+        low = reason.lower()
+        if "videonotfound" in low or "404" in low:
             logger.info("  ⚠️  Already deleted / not found: %s (marking DB)", yt_video_id)
-            return True  # Treat as success — already gone
+            return "gone"
+        # 403 por límite de cuota del proyecto — transitorio (resetea a diario PT).
+        if "quota" in low or "quotaexceeded" in low:
+            logger.warning(
+                "  ⏸️  Cuota de YouTube agotada al borrar %s — se reintentará "
+                "en la próxima ejecución", yt_video_id,
+            )
+            return "quota"
         logger.error("  ❌ Failed to delete %s: %s", yt_video_id, reason)
-        return False
+        return "error"
+    except Exception as exc:  # noqa: BLE001
+        logger.error("  ❌ Error inesperado borrando %s: %s", yt_video_id, exc)
+        return "error"
 
 
 def _mark_deleted_in_db(db: ExtendedDatabase, video: dict, slug: str):
@@ -173,7 +193,8 @@ def process_channel(slug: str, duplicates: list, yt_service,
                     db: ExtendedDatabase, dry_run: bool,
                     max_delete: int, auto_yes: bool = False) -> dict:
     """Process all duplicate groups for one channel. Returns stats dict."""
-    stats = {"groups": 0, "deleted": 0, "failed": 0, "skipped": 0, "quota": 0}
+    stats = {"groups": 0, "deleted": 0, "failed": 0, "skipped": 0,
+             "quota": 0, "quota_exceeded": 0}
 
     if not duplicates:
         logger.info("[%s] No duplicate groups to process", slug)
@@ -202,8 +223,12 @@ def process_channel(slug: str, duplicates: list, yt_service,
         logger.info("[%s] Auto-confirmado (--yes) — procediendo", slug)
 
     remaining_deletes = max_delete if max_delete else 99999
+    quota_hit = False  # cuota agotada en ESTE canal: parar y dejar el resto para la próxima
 
     for group_idx, group in enumerate(duplicates):
+        if quota_hit:
+            stats["skipped"] += sum(max(0, len(g) - 1) for g in duplicates[group_idx:])
+            break
         if remaining_deletes <= 0:
             logger.info("[%s] Max delete cap reached (%d) — stopping", slug, max_delete)
             stats["skipped"] += sum(max(0, len(g) - 1) for g in duplicates[group_idx:])
@@ -223,14 +248,20 @@ def process_channel(slug: str, duplicates: list, yt_service,
             print(f"    🗑️  DEL:   {vid['yt_video_id']} ({vid.get('views', 0):,} views)")
 
             if not dry_run:
-                success = _delete_video(yt_service, vid["yt_video_id"], channel_slug=slug)
+                status = _delete_video(yt_service, vid["yt_video_id"], channel_slug=slug)
                 stats["quota"] += QUOTA_PER_DELETE
 
-                if success:
+                if status in ("ok", "gone"):
                     _mark_deleted_in_db(db, vid, slug)
                     stats["deleted"] += 1
                     remaining_deletes -= 1
                     time.sleep(0.5)  # Rate-limit: don't hammer YT API
+                elif status == "quota":
+                    # Transitorio: no es un fallo real. Parar este canal y dejar
+                    # el resto para la próxima ejecución con cuota fresca.
+                    stats["quota_exceeded"] += 1
+                    quota_hit = True
+                    break
                 else:
                     stats["failed"] += 1
             else:
@@ -259,7 +290,7 @@ def run_cleanup(report_path: Path = None, channel_filter: str = None,
 
     db = ExtendedDatabase()
     all_stats = {"total_deleted": 0, "total_failed": 0, "total_skipped": 0,
-                 "total_quota": 0, "channels": {}}
+                 "total_quota": 0, "total_quota_exceeded": 0, "channels": {}}
 
     channels = list(report.get("channels", {}).keys())
     if channel_filter:
@@ -286,6 +317,7 @@ def run_cleanup(report_path: Path = None, channel_filter: str = None,
         all_stats["total_failed"] += stats["failed"]
         all_stats["total_skipped"] += stats["skipped"]
         all_stats["total_quota"] += stats["quota"]
+        all_stats["total_quota_exceeded"] += stats.get("quota_exceeded", 0)
         all_stats["channels"][slug] = stats
 
     return all_stats
@@ -299,6 +331,7 @@ def print_final_summary(stats: dict, dry_run: bool):
     print(f"{'='*60}")
     print(f"  Vídeos borrados:      {stats['total_deleted']}")
     print(f"  Fallos:               {stats['total_failed']}")
+    print(f"  Cuota agotada (trans.): {stats.get('total_quota_exceeded', 0)}")
     print(f"  Saltados (cap):       {stats['total_skipped']}")
     print(f"  Quota total usada:    ~{stats['total_quota']} unidades")
     print(f"{'='*60}")
@@ -308,8 +341,10 @@ def print_final_summary(stats: dict, dry_run: bool):
         print(f"  Para ejecutar: python3 scripts/cleanup_yt_duplicates.py --execute")
     elif not dry_run:
         print(f"\n  ✅ {stats['total_deleted']} duplicados eliminados de YouTube.")
+        if stats.get('total_quota_exceeded', 0) > 0:
+            print("  ⏸️  Cuota agotada — queda backlog para la próxima ejecución (no es error).")
         if stats["total_failed"] > 0:
-            print(f"  ⚠️  {stats['total_failed']} fallos — revisa los logs.")
+            print(f"  ⚠️  {stats['total_failed']} fallos reales — revisa los logs.")
 
 
 if __name__ == "__main__":
