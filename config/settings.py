@@ -173,11 +173,21 @@ OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.8"))
 OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "4096"))
 
 # ── Vision model (image analysis: thumbnails, etc.) ────────────
-# Uses OpenAI by default (gpt-4o-mini supports vision/multimodal)
-# Override with VISION_MODEL / VISION_API_KEY / VISION_BASE_URL env vars
+# Any OpenAI-compatible endpoint works (the code no longer forces OpenAI).
+# Default keeps the historical OpenAI behaviour; to use the central local IA
+# API (josue.ink/ia, OpenAI-compatible) set in the environment:
+#   VISION_BASE_URL=http://127.0.0.1:8140/v1
+#   VISION_MODEL=local-vision
+#   VISION_API_KEY=<project key "autotube">   # secret, never commit
+# See docs/vision-local-api.md.
 VISION_MODEL = os.getenv("VISION_MODEL", "gpt-4o-mini")
 VISION_API_KEY = os.getenv("VISION_API_KEY", OPENAI_API_KEY)
 VISION_BASE_URL = os.getenv("VISION_BASE_URL", "https://api.openai.com/v1")
+# Reject images larger than this (MB) before base64-encoding/sending them.
+VISION_MAX_IMAGE_MB = float(os.getenv("VISION_MAX_IMAGE_MB", "8"))
+# Send response_format={"type": "json_object"} on the vision call. Set to
+# "false" for OpenAI-compatible backends that reject response_format.
+VISION_JSON_MODE = os.getenv("VISION_JSON_MODE", "true").lower() in ("1", "true", "yes")
 
 # ── LLM Credit Monitoring ──────────────────────────────────────
 # How often to check DeepSeek balance / OpenAI quota errors (hours)

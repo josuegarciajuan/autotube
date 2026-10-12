@@ -804,39 +804,148 @@ def _download_thumbnail(url: str, canal_slug: str) -> str | None:
     return None
 
 
-def _analyze_thumbnail_vision(image_path: str, config: SimpleNamespace) -> dict | None:
-    """Use vision-capable LLM (gpt-4o-mini) to analyze thumbnail composition.
+# Formats a vision endpoint reliably accepts; anything else is rejected.
+SUPPORTED_VISION_MIMES = ("image/jpeg", "image/png", "image/webp")
 
-    Failover bidireccional: el proveedor de visión (OpenAI por defecto) es el
-    primario; si falla (sin créditos, key revocada, red) se intenta DeepSeek.
-    DeepSeek no es multimodal, así que ese fallback puede fallar también — en
-    tal caso se degrada a ``None`` sin romper la generación.
+# Keys the vision model is asked to return and their expected JSON types.
+_VISION_STRING_KEYS = ("description", "composition", "text_overlay", "emotion", "style")
+_VISION_LIST_KEYS = ("objects", "colors")
+
+
+def _detect_image_mime(data: bytes) -> str | None:
+    """Return the MIME type from magic bytes, or None if unsupported.
+
+    Recognises only the formats a vision endpoint reliably accepts
+    (jpeg/png/webp); everything else is rejected by the caller with a clear
+    log line instead of being mislabelled as ``image/jpeg``.
+    """
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def _extract_json_object(content: str | None) -> dict | None:
+    """Best-effort parse of a JSON object from an LLM reply.
+
+    Local models often wrap JSON in markdown fences or add prose around it, so
+    we try the raw text, then a de-fenced block, then the outermost braces.
+    Returns None when nothing parses (never raises).
+    """
+    if not content or not content.strip():
+        return None
+
+    stripped = content.strip()
+    defenced = stripped
+    if defenced.startswith("```"):
+        defenced = defenced.split("\n", 1)[1] if "\n" in defenced else defenced
+        if defenced.rstrip().endswith("```"):
+            defenced = defenced.rstrip()[:-3]
+        defenced = defenced.strip()
+
+    for text in (stripped, defenced):
+        try:
+            parsed = json.loads(text)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+
+    start, end = defenced.find("{"), defenced.rfind("}")
+    if 0 <= start < end:
+        try:
+            parsed = json.loads(defenced[start:end + 1])
+        except (ValueError, TypeError):
+            return None
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _validate_vision_analysis(data: object) -> tuple[bool, str]:
+    """Validate the shape of a vision-analysis object.
+
+    Only the types of the known keys are checked; missing keys are fine (the
+    caller uses ``.get`` with defaults). Returns ``(ok, reason)``.
+    """
+    if not isinstance(data, dict):
+        return False, f"root is {type(data).__name__}, expected object"
+    for key in _VISION_STRING_KEYS:
+        if key in data and not isinstance(data[key], str):
+            return False, f"'{key}' must be a string, got {type(data[key]).__name__}"
+    for key in _VISION_LIST_KEYS:
+        if key in data and not isinstance(data[key], list):
+            return False, f"'{key}' must be a list, got {type(data[key]).__name__}"
+    return True, ""
+
+
+def _analyze_thumbnail_vision(image_path: str, config: SimpleNamespace) -> dict | None:
+    """Analyze a thumbnail with a vision-capable OpenAI-compatible model.
+
+    The provider is fully configuration-driven through ``VISION_*`` settings
+    (base URL, model, key), so it can point at OpenAI or at the central local
+    IA API (``josue.ink/ia``, alias ``local-vision``) without code changes.
+    There is a single vision candidate: DeepSeek is *not* multimodal and is no
+    longer attempted as a fallback.
+
+    Degrades to ``None`` (the caller then uses a generic prompt) on any of:
+    missing key, unreadable file, unsupported format, oversized image, provider
+    error, non-JSON reply or a reply with the wrong JSON schema. Never logs
+    image data or credentials.
     """
     from config.settings import (
         VISION_MODEL, VISION_API_KEY, VISION_BASE_URL,
-        LLM_API_KEY, LLM_BASE_URL, LLM_MODEL,
+        VISION_MAX_IMAGE_MB, VISION_JSON_MODE,
     )
     from config.llm_client import chat_completion_with_failover
     import base64
+    import os
 
-    if not VISION_API_KEY and not LLM_API_KEY:
-        logger.warning("No VISION_API_KEY/LLM_API_KEY configured — cannot analyze thumbnail")
+    if not VISION_API_KEY:
+        logger.warning("Vision: no VISION_API_KEY configured — cannot analyze thumbnail")
         return None
 
-    # Read image as base64
+    # Size guard *before* reading the whole file into memory.
+    try:
+        size_bytes = os.path.getsize(image_path)
+    except OSError as e:
+        logger.warning("Vision: cannot stat image: %s", e)
+        return None
+
+    max_bytes = int(VISION_MAX_IMAGE_MB * 1024 * 1024)
+    if size_bytes > max_bytes:
+        logger.warning(
+            "Vision: image too large (%d bytes > %.3g MB) — skipping analysis "
+            "(raise VISION_MAX_IMAGE_MB to allow)",
+            size_bytes, VISION_MAX_IMAGE_MB,
+        )
+        return None
+
     try:
         with open(image_path, "rb") as f:
-            img_b64 = base64.b64encode(f.read()).decode()
+            img_bytes = f.read()
     except Exception as e:
-        logger.warning("Failed to read image for vision analysis: %s", e)
+        logger.warning("Vision: failed to read image: %s", e)
         return None
 
-    # Candidatos de proveedor en orden: visión (OpenAI) → fallback (DeepSeek).
+    # Detect the real MIME from magic bytes instead of assuming jpeg.
+    mime = _detect_image_mime(img_bytes)
+    if mime is None:
+        logger.warning(
+            "Vision: unsupported image format (magic bytes); supported: %s — skipping",
+            ", ".join(SUPPORTED_VISION_MIMES),
+        )
+        return None
+
+    img_b64 = base64.b64encode(img_bytes).decode()
+
+    # Single vision candidate, configurable by env (OpenAI-compatible).
     candidate_providers = [
-        {"provider": "vision-openai", "credential": VISION_API_KEY,
+        {"provider": "vision", "credential": VISION_API_KEY,
          "base_url": VISION_BASE_URL, "model": VISION_MODEL},
-        {"provider": "deepseek", "credential": LLM_API_KEY,
-         "base_url": LLM_BASE_URL, "model": LLM_MODEL},
     ]
     system = """You are a thumbnail design analyst. Analyze the YouTube thumbnail image.
 Return a JSON object with:
@@ -850,6 +959,10 @@ Return a JSON object with:
   "style": "overall style category"
 }"""
 
+    call_kwargs: dict = {"temperature": 0.3, "max_tokens": 1500}
+    if VISION_JSON_MODE:
+        call_kwargs["response_format"] = {"type": "json_object"}
+
     try:
         resp = chat_completion_with_failover(
             candidate_providers,
@@ -859,19 +972,31 @@ Return a JSON object with:
                     "role": "user",
                     "content": [
                         {"type": "text", "text": "Analyze this YouTube thumbnail in detail:"},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
+                        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{img_b64}"}},
                     ],
                 },
             ],
-            temperature=0.3,
-            max_tokens=1500,
-            response_format={"type": "json_object"},
+            **call_kwargs,
         )
         content = resp.choices[0].message.content
-        return json.loads(content) if content else None
     except Exception as e:
         logger.warning("Vision AI call failed: %s", e)
         return None
+
+    data = _extract_json_object(content)
+    if data is None:
+        logger.warning(
+            "Vision: reply was not a valid JSON object (%d chars) — degrading to None",
+            len(content or ""),
+        )
+        return None
+
+    ok, reason = _validate_vision_analysis(data)
+    if not ok:
+        logger.warning("Vision: reply schema invalid (%s) — degrading to None", reason)
+        return None
+
+    return data
 
 
 def _modify_thumbnail_prompt(vision_analysis: dict, config: SimpleNamespace, keywords: list[str]) -> str:
