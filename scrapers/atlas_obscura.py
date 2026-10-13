@@ -12,6 +12,7 @@ Uses:
 from __future__ import annotations
 
 import logging
+import os
 import time
 import urllib.parse
 from types import SimpleNamespace
@@ -46,9 +47,12 @@ class AtlasObscuraScraper(BaseScraper):
 
     MIN_TEXT_LENGTH: int = 200
 
-    # Atlas Obscura bloquea (HTTP 403) la IP del datacenter. Intenta salir por el
-    # proxy de egreso residencial (fail-open a directo si el proxy falla).
-    USE_RESIDENTIAL_PROXY = True
+    # Atlas Obscura bloquea (HTTP 403) la IP del datacenter. El proxy de egreso
+    # residencial es OPCIONAL y está DESACTIVADO por defecto (actívalo con
+    # SCRAPER_USE_EGRESS_PROXY=true). Sin proxy, este scraper degrada sin romper.
+    USE_RESIDENTIAL_PROXY = (
+        os.getenv("SCRAPER_USE_EGRESS_PROXY", "false").lower() == "true"
+    )
 
     def __init__(
         self,
