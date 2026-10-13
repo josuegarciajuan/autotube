@@ -52,8 +52,14 @@ def submit(
     deadline_sec: Optional[int] = None,
     max_units: Optional[int] = None,
     req: Optional[dict] = None,
+    excluded_nodes: Optional[list] = None,
 ) -> str:
-    """Encola una ejecución. Devuelve el id (sanitizado)."""
+    """Encola una ejecución. Devuelve el id (sanitizado).
+
+    ``excluded_nodes`` es la denylist de nodos del motor (``excludedNodes``): la
+    ejecución no corre en ellos. El motor valida los nombres y rechaza la
+    petición si la exclusión deja la ejecución sin nodos elegibles.
+    """
     _ensure_dirs()
     eid = sanitize_id(exec_id) if exec_id else sanitize_id(
         f"atube-{int(time.time())}-{os.getpid()}"
@@ -71,6 +77,14 @@ def submit(
         payload["maxUnits"] = int(max_units)
     if req:
         payload["req"] = req
+    if excluded_nodes:
+        cleaned = []
+        for n in excluded_nodes:
+            name = str(n).strip()
+            if name and name not in cleaned:
+                cleaned.append(name)
+        if cleaned:
+            payload["excludedNodes"] = cleaned
     atomic_write_json(os.path.join(SPOOL_DIR, f"{eid}.json"), payload)
     return eid
 

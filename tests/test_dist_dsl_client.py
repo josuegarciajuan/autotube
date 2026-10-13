@@ -39,6 +39,19 @@ def test_submit_escribe_spool_y_wait_lee_resultado(tmp_path):
     assert client.accepted_scenes(summary) == []
 
 
+def test_submit_incluye_excluded_nodes(tmp_path):
+    client = _reload_client(str(tmp_path))
+    client.submit("synth-sum", {}, exec_id="excl-1",
+                  excluded_nodes=["liveyourdre2", " liveyourdre2 ", ""])
+    payload = json.load(open(os.path.join(str(tmp_path), "spool", "excl-1.json"), encoding="utf-8"))
+    assert payload["excludedNodes"] == ["liveyourdre2"]
+
+    # Ausente/None no añade la clave (comportamiento legacy intacto).
+    client.submit("synth-sum", {}, exec_id="excl-2")
+    payload2 = json.load(open(os.path.join(str(tmp_path), "spool", "excl-2.json"), encoding="utf-8"))
+    assert "excludedNodes" not in payload2
+
+
 def test_sanitiza_ids_peligrosos(tmp_path):
     client = _reload_client(str(tmp_path))
     eid = client.submit("synth-sum", {}, exec_id="../../etc/passwd")
