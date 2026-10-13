@@ -105,6 +105,19 @@ def _default_retries() -> int:
         return 1
 
 
+def _tts_allowed_nodes() -> list:
+    """Allowlist de nodos para el TTS (denylist de facto de la casa).
+
+    Lista separada por comas en ``AUTOTUBE_TTS_ALLOWED_NODES``. Sirve para que el
+    TTS delegado NO caiga en la casa (`liveyourdre2`) aunque tenga el tag
+    `kokoro`: el scheduler del pool solo entiende allowlist. Vacío/ausente =
+    sin restricción (comportamiento legacy). Nombres inexistentes los rechaza el
+    spool (fail-closed).
+    """
+    raw = os.environ.get("AUTOTUBE_TTS_ALLOWED_NODES", "")
+    return [n.strip() for n in str(raw).split(",") if n.strip()]
+
+
 def delegar(bloques: list, voice_config: dict, video_id=None, out_dir: str = ".",
             cta_text: str | None = None, timeout: float | None = None,
             poll: float = 5.0, retries: int | None = None) -> dict:
@@ -150,6 +163,9 @@ def delegar(bloques: list, voice_config: dict, video_id=None, out_dir: str = "."
             "fingerprint": _fingerprint({"bloques": bloques, "voice_config": voice_config,
                                          "cta_text": cta_text or ""}),
         }
+        allowed_nodes = _tts_allowed_nodes()
+        if allowed_nodes:
+            request["allowedNodes"] = allowed_nodes
         _write_json_atomic(os.path.join(SPOOL_DIR, f"{rid}.json"), request)
 
         job_id, result_dir, est = _buscar_estado(rid, timeout, poll)
