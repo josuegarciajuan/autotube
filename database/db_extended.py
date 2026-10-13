@@ -674,6 +674,29 @@ def normalize_media_paths(conn, logger):
         logger.info("Migration: normalized %d media paths to relative form", updates)
 
 
+def _rel_media_path(path) -> str:
+    """Normaliza una ruta de media a forma relativa al proyecto.
+
+    Acepta rutas absolutas bajo ``PROJECT_ROOT`` (las relativiza) y devuelve las
+    relativas tal cual (quitando el doble prefijo ``output/output/``). Rutas
+    externas (p.ej. ``/tmp/...``) se devuelven sin tocar. Fuente única para que
+    los locks de media y el preflight comparen en el mismo espacio.
+    """
+    if not path or not isinstance(path, str):
+        return str(path) if path is not None else ""
+    pr = str(PROJECT_ROOT)
+    if not path.startswith("/"):
+        if path.startswith("output/output/"):
+            return path[len("output/"):]
+        return path
+    if path.startswith(pr):
+        try:
+            return Path(path).relative_to(pr).as_posix()
+        except ValueError:
+            return path
+    return path
+
+
 def normalize_reach_date(value) -> str:
     """Normaliza la fecha del Reporting API a ISO ``YYYY-MM-DD``.
 
@@ -8426,19 +8449,38 @@ class ExtendedDatabase(Database):
                             target_public_at: str = None,
                             upload_window_start: int = 9,
                             upload_window_end: int = 11) -> int:
-        """Create a planned slot. Returns slot id."""
+        """Create a planned slot. Returns slot id.
+
+        Idempotente ante colisión con ``uq_active_planned_public_target``
+        (mismo ``(channel_id, target_public_at)`` con un slot pending/running):
+        en vez de propagar ``IntegrityError`` (que disparaba una alerta crítica
+        ``error_autotube_recovery_planner`` por un evento transitorio), devuelve
+        el id del slot activo ya existente. Si no se encuentra (carrera), -1.
+        """
         with self._connect() as conn:
-            cursor = conn.execute(
-                """INSERT INTO planned_slots (channel_id, date_key, scheduled_at,
-                   target_upload_at, target_public_at, upload_window_start, upload_window_end,
-                   slot_position, source_mode)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (channel_id, date_key, scheduled_at, target_upload_at,
-                 target_public_at, upload_window_start, upload_window_end,
-                 slot_position, source_mode),
-            )
-            conn.commit()
-            return cursor.lastrowid
+            try:
+                cursor = conn.execute(
+                    """INSERT INTO planned_slots (channel_id, date_key, scheduled_at,
+                       target_upload_at, target_public_at, upload_window_start, upload_window_end,
+                       slot_position, source_mode)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (channel_id, date_key, scheduled_at, target_upload_at,
+                     target_public_at, upload_window_start, upload_window_end,
+                     slot_position, source_mode),
+                )
+                conn.commit()
+                return cursor.lastrowid
+            except sqlite3.IntegrityError:
+                if target_public_at is None:
+                    raise
+                row = conn.execute(
+                    """SELECT id FROM planned_slots
+                       WHERE channel_id = ? AND target_public_at = ?
+                         AND status IN ('pending', 'running')
+                       ORDER BY id LIMIT 1""",
+                    (channel_id, target_public_at),
+                ).fetchone()
+                return int(row[0]) if row else -1
     
     def create_planned_slots_batch(self, slots: list[dict]) -> int:
         """Insert multiple slots. Collisions with active targets are skipped.
@@ -9426,7 +9468,14 @@ class ExtendedDatabase(Database):
 
     def lock_media_files(self, job_id: int, file_paths: list) -> int:
         """Register locks on media files for a job. Idempotent via UNIQUE constraint.
-        Returns the number of files locked."""
+        Returns the number of files locked.
+
+        Paths are normalized to project-root-relative form BEFORE storing so that
+        ``_preflight_cleanup`` (which iterates ``output/*`` as absolute Paths) can
+        match them. Antes se guardaban tal cual y, si llegaban absolutas, el
+        preflight nunca las reconocía → borraba el media de otros jobs en curso
+        (black-screen renders, oct 2026).
+        """
         if not file_paths:
             return 0
         locked = 0
@@ -9436,7 +9485,7 @@ class ExtendedDatabase(Database):
                     try:
                         conn.execute(
                             "INSERT OR IGNORE INTO media_file_locks (job_id, file_path) VALUES (?, ?)",
-                            (job_id, str(fp)),
+                            (job_id, _rel_media_path(fp)),
                         )
                         locked += 1
                     except Exception:
@@ -9445,6 +9494,33 @@ class ExtendedDatabase(Database):
         except Exception:
             pass
         return locked
+
+    def get_oldest_active_job_start_epoch(self) -> float | None:
+        """Epoch (UTC) de inicio del job running/queued más antiguo, o None.
+
+        Usado por el preflight para no borrar clips de un job que lleva horas en
+        la fase de media (cuyos locks aún no existen): se preserva todo lo escrito
+        desde que arrancó el job activo más antiguo.
+        """
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT MIN(created_at) FROM generation_jobs "
+                    "WHERE status IN ('running', 'queued')"
+                ).fetchone()
+            if not row or not row[0]:
+                return None
+            from datetime import datetime, timezone
+            raw = str(row[0]).replace("Z", "+00:00")
+            try:
+                dt = datetime.fromisoformat(raw)
+            except ValueError:
+                dt = datetime.strptime(str(row[0])[:19], "%Y-%m-%d %H:%M:%S")
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except Exception:
+            return None
 
     def unlock_media_files(self, job_id: int) -> int:
         """Release all media file locks for a job. Returns count of released locks."""
@@ -9460,7 +9536,12 @@ class ExtendedDatabase(Database):
             return 0
 
     def get_locked_file_paths(self) -> set:
-        """Get all file paths locked by currently active jobs (running/queued)."""
+        """Get all file paths locked by currently active jobs (running/queued).
+
+        Devuelve rutas normalizadas (relativas al proyecto) para que el preflight
+        las compare en el mismo espacio, incluso si alguna fila fue escrita con
+        ruta absoluta antes del fix de oct 2026.
+        """
         try:
             with self._connect() as conn:
                 rows = conn.execute("""
@@ -9469,7 +9550,7 @@ class ExtendedDatabase(Database):
                     JOIN generation_jobs gj ON ml.job_id = gj.id
                     WHERE gj.status IN ('running', 'queued')
                 """).fetchall()
-                return {str(row[0]) for row in rows} if rows else set()
+                return {_rel_media_path(row[0]) for row in rows} if rows else set()
         except Exception:
             return set()
 
@@ -9505,7 +9586,7 @@ class ExtendedDatabase(Database):
                 for a in media.get("assets", []) or []:
                     p = a.get("path")
                     if p:
-                        paths.add(str(p))
+                        paths.add(_rel_media_path(str(p)))
         except Exception:
             pass
         return paths

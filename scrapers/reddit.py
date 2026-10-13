@@ -36,6 +36,10 @@ class RedditScraper(BaseScraper):
 
     MIN_TEXT_LENGTH: int = 200
 
+    # Reddit bloquea (HTTP 403/429) las IPs de datacenter. Salir por el proxy de
+    # egreso residencial (EGRESS_PROXY1 → 58.68.169.25) restaura el scraping.
+    USE_RESIDENTIAL_PROXY = True
+
     # Legacy unauthenticated endpoint (bottom of priority chain)
     BASE_URL: str = "https://old.reddit.com"
 

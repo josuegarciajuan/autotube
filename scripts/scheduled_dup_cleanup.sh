@@ -90,10 +90,18 @@ PY
 echo "── Diagnóstico ──"
 python3 scripts/diagnose_all_channels.py --all --yes
 DIAG_RC=$?
-if [ $DIAG_RC -ne 0 ]; then
+# Semántica de salida de diagnose_all_channels.py:
+#   rc=0 → sin anomalías
+#   rc=1 → SÍ hay anomalías (informativo: duplicados, orphaned_on_yt,
+#          missing_thumbnail...). NO es un fallo: la limpieza debe continuar.
+#   rc>=2 → error real (CLI cambiada, excepción, DB inaccesible) → abortar.
+if [ $DIAG_RC -gt 1 ]; then
     echo "❌ Diagnóstico falló (rc=$DIAG_RC) — abortando"
     alert_fail "diagnóstico rc=$DIAG_RC (¿cambió la CLI de diagnose_all_channels.py?)"
     exit 1
+fi
+if [ $DIAG_RC -eq 1 ]; then
+    echo "ℹ️  Diagnóstico: anomalías detectadas (rc=1) — se procede con la limpieza."
 fi
 
 # ── 2. Limpieza de duplicados (auto-confirm, cap 30/canal) ─────────

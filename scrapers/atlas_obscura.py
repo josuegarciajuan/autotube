@@ -46,6 +46,10 @@ class AtlasObscuraScraper(BaseScraper):
 
     MIN_TEXT_LENGTH: int = 200
 
+    # Atlas Obscura bloquea (HTTP 403) la IP del datacenter. Intenta salir por el
+    # proxy de egreso residencial (fail-open a directo si el proxy falla).
+    USE_RESIDENTIAL_PROXY = True
+
     def __init__(
         self,
         categories: list[str] | None = None,

@@ -139,9 +139,12 @@ def build_report(db=None, days_now: int = 14) -> dict:
     # antes del inicio. Comparar manzanas con manzanas.
     since_start = (now.date() - started.date()).days
     win = max(1, min(int(days_now), since_start if since_start > 0 else int(days_now)))
-    now_start = (now - timedelta(days=win)).strftime("%Y%m%d")
-    pre_end = started.strftime("%Y%m%d")
-    pre_start = (started - timedelta(days=win)).strftime("%Y%m%d")
+    # IMPORTANTE: ``video_reach_daily.date`` está normalizado a ISO ``YYYY-MM-DD``
+    # (migración v66). Usar ``%Y%m%d`` aquí comparaba formatos incompatibles y
+    # dejaba las ventanas vacías → CTR None → falso "ESTANCADO" (bug oct 2026).
+    now_start = (now - timedelta(days=win)).strftime("%Y-%m-%d")
+    pre_end = started.strftime("%Y-%m-%d")
+    pre_start = (started - timedelta(days=win)).strftime("%Y-%m-%d")
     pre_end_date = started.strftime("%Y-%m-%d")
 
     interventions: list = []
@@ -161,9 +164,9 @@ def build_report(db=None, days_now: int = 14) -> dict:
             cid = int(ch.get("id") or 0)
             if not cid:
                 continue
-            long_now = _reach_metrics(conn, cid, now_start, "99999999", "LONG")
+            long_now = _reach_metrics(conn, cid, now_start, "9999-12-31", "LONG")
             long_pre = _reach_metrics(conn, cid, pre_start, pre_end, "LONG")
-            short_now = _reach_metrics(conn, cid, now_start, "99999999", "SHORT")
+            short_now = _reach_metrics(conn, cid, now_start, "9999-12-31", "SHORT")
             short_pre = _reach_metrics(conn, cid, pre_start, pre_end, "SHORT")
             subs_now, subs_pre = _subs_now_and_pre(conn, cid, pre_end_date)
 
