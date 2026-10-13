@@ -20,6 +20,7 @@ but only between 10:00-23:00 CEST (local time for Spain/Europe).
 """
 
 import logging
+import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
@@ -518,6 +519,15 @@ def _auto_recover_missing_publications_impl(db=None) -> dict:
                     scheduled_h, scheduled_m, up_h, up_m, source, slot_mode,
                 )
 
+            except sqlite3.IntegrityError as exc:
+                # Colisión esperada con uq_active_planned_public_target: ya existe
+                # un slot activo del mismo canal con ese target_public_at (lo ocupó
+                # un slot 'running' o un plan concurrente). Saltar en vez de abortar
+                # el batch o emitir una alerta crítica por una condición normal.
+                logger.info(
+                    "[%s] Recovery slot skipped (target activo ya ocupado): %s",
+                    slug, exc,
+                )
             except Exception as exc:
                 logger.error(
                     "[%s] Failed to create recovery slot: %s", slug, exc,

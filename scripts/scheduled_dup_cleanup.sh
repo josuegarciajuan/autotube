@@ -87,14 +87,16 @@ PY
 # `diagnose_all_channels.py` exige un selector explícito (--channel-id/--slug/
 # --project/--all). Sin él argparse aborta con rc=2 y el script entero fallaba
 # antes de limpiar (regresión desde ~sep-2026). `--all` requiere `--yes`.
+#
+# ⚠️  Semántica de salida de diagnose_all_channels.py:
+#   rc=0 → sin anomalías
+#   rc=1 → SÍ hay anomalías (informativo: duplicados, orphaned_on_yt,
+#          missing_thumbnail...). NO es un fallo: la limpieza DEBE continuar
+#          (encontrar duplicados es justo el propósito del servicio).
+#   rc>=2 → error real (CLI cambiada, excepción, DB inaccesible) → abortar.
 echo "── Diagnóstico ──"
 python3 scripts/diagnose_all_channels.py --all --yes
 DIAG_RC=$?
-# Semántica de salida de diagnose_all_channels.py:
-#   rc=0 → sin anomalías
-#   rc=1 → SÍ hay anomalías (informativo: duplicados, orphaned_on_yt,
-#          missing_thumbnail...). NO es un fallo: la limpieza debe continuar.
-#   rc>=2 → error real (CLI cambiada, excepción, DB inaccesible) → abortar.
 if [ $DIAG_RC -gt 1 ]; then
     echo "❌ Diagnóstico falló (rc=$DIAG_RC) — abortando"
     alert_fail "diagnóstico rc=$DIAG_RC (¿cambió la CLI de diagnose_all_channels.py?)"

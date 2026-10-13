@@ -342,7 +342,12 @@ class WikipediaScraper(BaseScraper):
             "format": "json",
         })
         url = f"{self.ACTION_BASE}?{params}"
-        data = self._request(url)
+        # Fail-open: una categoría inexistente (404) o un 5xx no debe abortar el scrape.
+        try:
+            data = self._request(url)
+        except (ContentNotFound, APIUnavailable) as exc:
+            self.logger.warning("Failed to fetch category '%s' (%s)", category, exc)
+            return []
         if data is None:
             self.logger.warning("Failed to fetch category: %s", category)
             return []
@@ -363,7 +368,12 @@ class WikipediaScraper(BaseScraper):
         """
         encoded_title = urllib.parse.quote(title.replace(" ", "_"))
         url = f"{self.REST_BASE}/page/summary/{encoded_title}"
-        data = self._request(url)
+        # Fail-open: un artículo que no existe o un 5xx no debe abortar el scrape.
+        try:
+            data = self._request(url)
+        except (ContentNotFound, APIUnavailable) as exc:
+            self.logger.debug("Page summary failed for '%s' (%s) — skipping", title, exc)
+            return None
         if data is None:
             return None
 

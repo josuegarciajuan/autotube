@@ -515,6 +515,13 @@ class VideoEditor:
         self._current_clip_idx = 0
         n_fallback = 0
         rendered_this_run = 0
+        # Early abort: if the OPENING scenes degrade to placeholder, the video
+        # would open with a black screen. The end-of-render gate catches this,
+        # but only after rendering the whole timeline (~50 min wasted on video
+        # #2631). Abort as soon as the first 3 consecutive opening segments are
+        # placeholders — fail fast and cheap.
+        _opening_placeholders = 0
+        _opening_run_broken = False
 
         for i, br in enumerate(block_ranges):
             # ── Checkpoint: skip already-rendered scenes ─────
@@ -643,6 +650,23 @@ class VideoEditor:
                 # Last resort — can't happen with _render_placeholder_segment, but be safe
                 self.logger.error("  Scene %d: CRITICAL — could not render placeholder", i)
                 segment_paths.append("")  # placeholder; will be caught by concat
+
+            # ── Early abort on opening placeholder run ──────────────
+            # Only the opening run matters (a mid-video gap is tolerated).
+            if not _opening_run_broken:
+                _seg_stem = Path(result_path).stem if result_path else ""
+                if "_placeholder" in _seg_stem or "_black" in _seg_stem:
+                    _opening_placeholders += 1
+                else:
+                    _opening_run_broken = True
+                if _opening_placeholders >= 3:
+                    raise RuntimeError(
+                        f"BLACK-SCREEN START (early): first {_opening_placeholders} "
+                        f"opening scenes are placeholders (media missing/unusable). "
+                        f"Aborting at scene {i + 1} instead of rendering the full "
+                        f"timeline. Likely cause: media files missing on disk or "
+                        f"hook assets rejected by dedup/all providers exhausted."
+                    )
 
             self._current_clip_idx += 1
             rendered_this_run += 1
