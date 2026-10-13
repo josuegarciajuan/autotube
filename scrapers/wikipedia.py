@@ -13,6 +13,7 @@ from config.defaults import (
 )
 from scrapers.base import (
     BaseScraper, register_scraper, global_host_rate_limit, API_USER_AGENT,
+    ContentNotFound, APIUnavailable,
 )
 
 if TYPE_CHECKING:
@@ -280,7 +281,16 @@ class WikipediaScraper(BaseScraper):
         articles: list[dict] = []
         for i in range(self.random_count):
             url = f"{self.REST_BASE}/page/random/summary"
-            data = self._request(url)
+            # Fail-open: un 404/5xx puntual de una fuente NO debe tumbar el
+            # scrape completo (antes un solo HTTP 404 en /page/random/summary
+            # propagaba ContentNotFound y abortaba el vídeo entero).
+            try:
+                data = self._request(url)
+            except (ContentNotFound, APIUnavailable) as exc:
+                self.logger.warning(
+                    "Random summary fetch failed (%s) — skipping this source", exc,
+                )
+                continue
             if data is None:
                 continue
 
@@ -326,7 +336,12 @@ class WikipediaScraper(BaseScraper):
             "format": "json",
         })
         url = f"{self.ACTION_BASE}?{params}"
-        data = self._request(url)
+        # Fail-open: una categoría inexistente (404) o un 5xx no debe abortar el scrape.
+        try:
+            data = self._request(url)
+        except (ContentNotFound, APIUnavailable) as exc:
+            self.logger.warning("Failed to fetch category '%s' (%s)", category, exc)
+            return []
         if data is None:
             self.logger.warning("Failed to fetch category: %s", category)
             return []
@@ -347,7 +362,12 @@ class WikipediaScraper(BaseScraper):
         """
         encoded_title = urllib.parse.quote(title.replace(" ", "_"))
         url = f"{self.REST_BASE}/page/summary/{encoded_title}"
-        data = self._request(url)
+        # Fail-open: un artículo que no existe o un 5xx no debe abortar el scrape.
+        try:
+            data = self._request(url)
+        except (ContentNotFound, APIUnavailable) as exc:
+            self.logger.debug("Page summary failed for '%s' (%s) — skipping", title, exc)
+            return None
         if data is None:
             return None
 
