@@ -124,6 +124,28 @@ Responde SOLO con un JSON array de {count} objetos."""
     return _fallback_topics_from_niche(ch_config, count=count)
 
 
+def _render_shorts_dist_aware(assets, audio_path, output_path, audio_duration, srt_path, scene_ranges):
+    """Renderiza el short en la flota si `AUTOTUBE_DIST_SHORTS` está activo; si no
+    (o si la ejecución distribuida falla), usa el render local. Fail-open: nunca
+    deja el short sin renderizar por culpa de la flota.
+    """
+    try:
+        from pipeline_dist import short_render_client as _src
+        if _src.enabled():
+            return _src.render_short_dist(
+                asset_items=assets, audio_path=audio_path, output_path=output_path,
+                audio_duration=audio_duration, srt_path=srt_path, scene_ranges=scene_ranges,
+            )
+    except Exception as exc:  # noqa: BLE001 — fallback local explícito
+        logger.warning("[standalone] render distribuido falló (%s) — fallback local", exc)
+    from pipeline.shorts_media import render_short_hybrid
+    render_short_hybrid(
+        asset_items=assets, audio_path=audio_path, output_path=output_path,
+        audio_duration=audio_duration, srt_path=srt_path, scene_ranges=scene_ranges,
+    )
+    return output_path
+
+
 def run_standalone_short(
     channel_slug: str,
     topic: dict,
@@ -254,13 +276,8 @@ def run_standalone_short(
         if not has_sufficient_visual_assets(assets, 0.5):
             raise RuntimeError("degraded render rejected: insufficient visual assets")
         render_path = output_dir / "render.mp4"
-        render_short_hybrid(
-            asset_items=assets,
-            audio_path=audio_path,
-            output_path=render_path,
-            audio_duration=audio_duration,
-            srt_path=srt_path,
-            scene_ranges=scene_ranges,
+        _render_shorts_dist_aware(
+            assets, audio_path, render_path, audio_duration, srt_path, scene_ranges,
         )
 
         # ── Cola unificada (ago 2026): generate_only → status='generated' ──
