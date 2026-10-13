@@ -77,6 +77,42 @@ def test_delegar_copia_artefactos(tmp_path, monkeypatch):
     assert payload["output_base"] == base
 
 
+def test_delegar_incluye_allowed_nodes_de_entorno(tmp_path, monkeypatch):
+    monkeypatch.setattr(B, "IN_DIR", str(tmp_path / "in"))
+    monkeypatch.setattr(B, "SPOOL_DIR", str(tmp_path / "spool"))
+    monkeypatch.setenv("AUTOTUBE_TTS_ALLOWED_NODES", "mail, dedi3133109 ,, ")
+    seen = {}
+
+    def fake_buscar(rid, timeout, poll):
+        seen["req"] = json.loads((tmp_path / "spool" / f"{rid}.json").read_text())
+        base = "narration_" + rid
+        rdir = tmp_path / "ret" / base
+        return "j", str(rdir), _preparar_resultado(rdir, rid, base)
+
+    monkeypatch.setattr(B, "_buscar_estado", fake_buscar)
+    monkeypatch.setattr(B, "_escribir_ack", lambda *a, **k: None)
+    B.delegar([{"tipo": "hook", "texto": "hola"}], {}, video_id=1, out_dir=str(tmp_path / "audio"))
+    assert seen["req"]["allowedNodes"] == ["mail", "dedi3133109"]
+
+
+def test_delegar_sin_env_no_anade_allowed_nodes(tmp_path, monkeypatch):
+    monkeypatch.setattr(B, "IN_DIR", str(tmp_path / "in"))
+    monkeypatch.setattr(B, "SPOOL_DIR", str(tmp_path / "spool"))
+    monkeypatch.delenv("AUTOTUBE_TTS_ALLOWED_NODES", raising=False)
+    seen = {}
+
+    def fake_buscar(rid, timeout, poll):
+        seen["req"] = json.loads((tmp_path / "spool" / f"{rid}.json").read_text())
+        base = "narration_" + rid
+        rdir = tmp_path / "ret" / base
+        return "j", str(rdir), _preparar_resultado(rdir, rid, base)
+
+    monkeypatch.setattr(B, "_buscar_estado", fake_buscar)
+    monkeypatch.setattr(B, "_escribir_ack", lambda *a, **k: None)
+    B.delegar([{"tipo": "hook", "texto": "hola"}], {}, video_id=1, out_dir=str(tmp_path / "audio"))
+    assert "allowedNodes" not in seen["req"]
+
+
 def test_delegar_sin_resultado_ok_falla(tmp_path, monkeypatch):
     monkeypatch.setattr(B, "IN_DIR", str(tmp_path / "in"))
     monkeypatch.setattr(B, "SPOOL_DIR", str(tmp_path / "spool"))
