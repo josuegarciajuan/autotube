@@ -80,6 +80,19 @@ def _dist_repair_rounds() -> int:
     return max(0, _env_int("AUTOTUBE_DIST_REPAIR_ROUNDS", 2))
 
 
+def _dist_excluded_nodes() -> list:
+    """Nodos a EXCLUIR de las ejecuciones distribuidas (denylist del motor).
+
+    Lista separada por comas en ``AUTOTUBE_DIST_EXCLUDED_NODES``. Sirve para
+    apartar de los pre-render los nodos que ya están muy cargados con su propio
+    trabajo local (p. ej. ``liveyourdre2``, que corre el pipeline long-form y el
+    plano de control). Vacío/ausente = sin exclusión (comportamiento legacy). El
+    motor valida los nombres y rechaza la petición si deja la ejecución sin nodos.
+    """
+    raw = os.environ.get("AUTOTUBE_DIST_EXCLUDED_NODES", "")
+    return [n.strip() for n in str(raw).split(",") if n.strip()]
+
+
 AI_IMAGES_CACHE = "_dist_cache"
 
 
@@ -330,6 +343,7 @@ class DistributedOrchestrator(PipelineOrchestrator):
             max_inflight=int(os.environ.get("AUTOTUBE_DIST_SD_MAX_INFLIGHT", "6") or 6),
             max_attempts=3, max_units=len(images_params) + 16,
             deadline_sec=_deadline,
+            excluded_nodes=_dist_excluded_nodes(),
             req={"cores": params["threads"], "memMb": params["memMb"]},
         )
         logger.info("[%s] ai-image exec=%s (%d escenas AI-tier de %d)",
@@ -640,6 +654,7 @@ class DistributedOrchestrator(PipelineOrchestrator):
                 max_inflight=int(os.environ.get("AUTOTUBE_DIST_MAX_INFLIGHT", "0") or 0) or None,
                 max_attempts=3, max_units=len(scenes_params) + 16,
                 deadline_sec=_render_deadline,
+                excluded_nodes=_dist_excluded_nodes(),
                 req={"cores": 2, "memMb": 2048},
             )
             logger.info("[%s] Render v2 exec=%s (%d escenas, ronda %d/%d)",
@@ -822,6 +837,7 @@ class DistributedOrchestrator(PipelineOrchestrator):
                 label=f"autotube concat {self.canal}",
                 max_inflight=min(4, len(batches)), max_attempts=2,
                 max_units=len(batches) + 8, deadline_sec=_concat_deadline,
+                excluded_nodes=_dist_excluded_nodes(),
                 req={"cores": 4, "memMb": 2048},
             )
             logger.info("[%s] Concat distribuido exec=%s (%d batches, ronda %d/%d)",
@@ -968,6 +984,7 @@ class DistributedOrchestrator(PipelineOrchestrator):
             max_attempts=int(os.environ.get("AUTOTUBE_DIST_MAX_ATTEMPTS", "3") or 3),
             deadline_sec=int(os.environ.get("AUTOTUBE_DIST_DEADLINE_SEC", "0") or 0) or None,
             max_units=len(scene_refs) + 16,
+            excluded_nodes=_dist_excluded_nodes(),
             req={"cores": threads, "memMb": mem_mb},
         )
         logger.info("[%s] Dist render exec=%s (spool)", self.canal, exec_id)
