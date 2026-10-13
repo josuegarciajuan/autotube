@@ -10,6 +10,7 @@ Source priority per subreddit (first to yield >0 posts wins):
 from __future__ import annotations
 
 import logging
+import os
 import time
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Callable
@@ -36,9 +37,13 @@ class RedditScraper(BaseScraper):
 
     MIN_TEXT_LENGTH: int = 200
 
-    # Reddit bloquea (HTTP 403/429) las IPs de datacenter. Salir por el proxy de
-    # egreso residencial (EGRESS_PROXY1 → 58.68.169.25) restaura el scraping.
-    USE_RESIDENTIAL_PROXY = True
+    # Reddit bloquea (HTTP 403/429) las IPs de datacenter. El scraping funciona
+    # por el mirror Arctic Shift (datacenter-friendly) + respaldo por demanda.
+    # El proxy de egreso residencial es OPCIONAL y está DESACTIVADO por defecto:
+    # actívalo con SCRAPER_USE_EGRESS_PROXY=true si dispones de proxy operativo.
+    USE_RESIDENTIAL_PROXY = (
+        os.getenv("SCRAPER_USE_EGRESS_PROXY", "false").lower() == "true"
+    )
 
     # Legacy unauthenticated endpoint (bottom of priority chain)
     BASE_URL: str = "https://old.reddit.com"
