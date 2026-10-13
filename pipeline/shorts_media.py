@@ -20,7 +20,20 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-import requests
+# `requests` solo se usa en las funciones de DESCARGA (fetch), no en el render.
+# Se importa de forma PEREZOSA para que este módulo —y en particular
+# `render_short_hybrid`— pueda importarse en contenedores de render que no
+# traen `requests` (p. ej. autotube-worker:1), sin arrastrar esa dependencia.
+requests = None
+
+
+def _req():
+    """Devuelve el módulo `requests`, importándolo la primera vez."""
+    global requests
+    if requests is None:
+        import requests as _r  # noqa: PLC0415 (import perezoso deliberado)
+        requests = _r
+    return requests
 
 logger = logging.getLogger(__name__)
 
@@ -643,6 +656,7 @@ def _download_image_asset(
     Returns asset_info dict with path, url, img_id, provider, content_hash,
     or None on failure.
     """
+    _req()  # import perezoso de requests (solo aquí, no en el render)
     download_url = photo.get("download_url", "")
     fallback_url = photo.get("fallback_download_url", "")
 
@@ -1520,6 +1534,7 @@ def fetch_portrait_images(
     """
     from config import settings
 
+    _req()  # import perezoso de requests
     unsplash, pixabay = _get_image_providers()
     style_mod = getattr(ch_config, "IMAGE_STYLE_MODIFIERS", "")
 
