@@ -616,6 +616,17 @@ class PipelineOrchestrator:
 
         content_items = self.db.get_unused_content(canal=self.canal, limit=5)
         if not content_items:
+            # Fallback por demanda de búsqueda (Fase 2, 0 cuota): cubre el caso de
+            # scrapers externos bloqueados (Reddit 403/429, Atlas Obscura 403,
+            # Quora 0) sin dejar el canal seco. Los candidatos están sesgados al
+            # nicho por construcción (seeds + autocomplete), así que pasan el
+            # niche-guard. (Fix oct 2026: canales "secos" → publish_coverage_dry.)
+            content_items = self._demand_items_as_content(limit=5)
+            if content_items:
+                logger.warning(
+                    "[%s] Sin fuentes scrapeadas — usando %d candidato(s) de "
+                    "demanda de búsqueda como respaldo", self.canal, len(content_items))
+        if not content_items:
             logger.warning(f"[{self.canal}] No unused content available for script generation")
             self.db.log_pipeline(self.canal, "script", "skipped",
                                  "No unused content")
@@ -671,6 +682,23 @@ class PipelineOrchestrator:
                 getattr(self, "config", None),
                 strict=_strict_niche,
             )
+            if _strict_niche and not content_items:
+                # Reintento con candidatos de demanda de búsqueda antes de diferir:
+                # si las fuentes scrapeadas eran todas fuera de nicho pero hay
+                # demanda on-niche persistida, es preferible guionar por ella que
+                # dejar el canal seco.
+                _demand_items = self._demand_items_as_content(limit=5)
+                if _demand_items:
+                    content_items, _ = filter_on_niche(
+                        _demand_items,
+                        lambda ci: f"{ci.get('title') or ''} {ci.get('text') or ''}"[:400],
+                        getattr(self, "config", None),
+                        strict=True,
+                    )
+                    if content_items:
+                        logger.info(
+                            "[%s] niche-guard: recuperado con %d candidato(s) de demanda on-niche",
+                            self.canal, len(content_items))
             if _strict_niche and not content_items:
                 logger.warning(
                     "[%s] niche-guard estricto: sin fuentes on-niche — difiriendo "
@@ -755,6 +783,15 @@ class PipelineOrchestrator:
         else:
             logger.warning(f"[{self.canal}] Todos los contenidos candidatos rechazados por seguridad")
             return None
+
+        # ── Marca de consumo del candidato de demanda (evita repetición) ──
+        if content_item.get("source") == "topic_demand" and content_item.get("demand_query"):
+            try:
+                _cid = self._get_channel_id()
+                if _cid is not None:
+                    self.db.mark_topic_demand_used(_cid, content_item["demand_query"])
+            except Exception as _mdq:  # noqa: BLE001
+                logger.debug("[%s] mark_topic_demand_used failed: %s", self.canal, _mdq)
 
         # ── Extract visual theme BEFORE script generation (Bug fix: ThemeExtractor was dead code) ──
         content_text = content_item.get("text", "")
@@ -2073,6 +2110,33 @@ class PipelineOrchestrator:
             return row["id"] if row else None
         except Exception:
             return None
+
+    def _demand_items_as_content(self, limit: int = 5) -> list[dict]:
+        """Convierte candidatos de demanda (Fase 2) en content_items de respaldo.
+
+        Permite guionar por demanda real cuando los scrapers externos están
+        bloqueados y ``get_unused_content`` queda vacío, evitando dejar el canal
+        seco. ``id`` es None (no son filas de raw_content); el consumo se marca
+        vía ``mark_topic_demand_used``.
+        """
+        items: list[dict] = []
+        for c in (getattr(self, "_demand_candidates", []) or []):
+            q = " ".join(str(c.get("query") or "").split())
+            if not q:
+                continue
+            items.append({
+                "id": None,
+                "source": "topic_demand",
+                "url": "",
+                "title": q[:200],
+                "text": q,
+                "subreddit": None,
+                "score": float(c.get("demand_score") or 0.0),
+                "demand_query": q,
+            })
+            if len(items) >= limit:
+                break
+        return items
 
     def _seed_topics_from_demand(self) -> list[dict]:
         """Fase 2: recolecta y persiste candidatos de tema por demanda de búsqueda.

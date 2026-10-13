@@ -13,6 +13,7 @@ from config.defaults import (
 )
 from scrapers.base import (
     BaseScraper, register_scraper, global_host_rate_limit, API_USER_AGENT,
+    ContentNotFound, RateLimitError, APIUnavailable, PermanentBlock,
 )
 
 if TYPE_CHECKING:
@@ -280,7 +281,22 @@ class WikipediaScraper(BaseScraper):
         articles: list[dict] = []
         for i in range(self.random_count):
             url = f"{self.REST_BASE}/page/random/summary"
-            data = self._request(url)
+            try:
+                data = self._request(url)
+            except ContentNotFound:
+                # El endpoint /page/random/summary puede devolver 404 de forma
+                # esporádica (redirect a un artículo sin summary). Es transitorio:
+                # se omite y se sigue, sin propagar al orchestrator (evita alertas
+                # críticas error_orchestrator por un evento normal).
+                self.logger.debug("Random summary 404 (transitorio) — skipping")
+                continue
+            except (RateLimitError, APIUnavailable, PermanentBlock) as exc:
+                self.logger.warning("Random summary no disponible (%s) — abortando random",
+                                    type(exc).__name__)
+                break
+            except Exception as exc:  # noqa: BLE001 — nunca tumbar el scrape entero
+                self.logger.debug("Random summary fallo inesperado: %s", exc)
+                continue
             if data is None:
                 continue
 

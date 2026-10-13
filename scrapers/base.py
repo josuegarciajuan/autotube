@@ -31,6 +31,35 @@ API_USER_AGENT = f"Autotube/1.0 (content-pipeline; contact: {_SCRAPER_CONTACT})"
 DEFAULT_HOST_MIN_INTERVAL_SEC = float(os.getenv("SCRAPER_HOST_MIN_INTERVAL_SEC", "3.0"))
 
 
+def resolve_egress_proxy() -> Optional[str]:
+    """URL del proxy de egreso (IP residencial) para scrapers, o ``None``.
+
+    Orden de resolución:
+      1. ``SCRAPER_EGRESS_PROXY`` (override explícito)
+      2. ``EGRESS_PROXY1`` (proxy HTTP residencial del VPS)
+      3. ``PROXY_*`` si ``PROXY_ENABLED=true`` (solo http; socks5 requiere PySocks)
+
+    Kill-switch: ``SCRAPER_EGRESS_PROXY_ENABLED=false`` → ``None``.
+    Nunca se loguea la URL (contiene credenciales).
+    """
+    if os.getenv("SCRAPER_EGRESS_PROXY_ENABLED", "true").lower() != "true":
+        return None
+    url = (os.getenv("SCRAPER_EGRESS_PROXY") or os.getenv("EGRESS_PROXY1") or "").strip()
+    if url:
+        return url
+    if os.getenv("PROXY_ENABLED", "false").lower() == "true":
+        ptype = os.getenv("PROXY_TYPE", "socks5")
+        host = os.getenv("PROXY_HOST", "127.0.0.1")
+        port = os.getenv("PROXY_PORT", "1080")
+        user = os.getenv("PROXY_USER", "")
+        pw = os.getenv("PROXY_PASS", "")
+        auth = f"{user}:{pw}@" if user else ""
+        scheme = "http" if ptype == "http" else "socks5"
+        return f"{scheme}://{auth}{host}:{port}"
+    return None
+
+
+
 def global_host_rate_limit(host: str, min_interval: float) -> None:
     """Block until at least ``min_interval`` seconds passed since the last
     request to ``host`` by ANY process.  Fail-open on any error."""
@@ -179,6 +208,10 @@ class BaseScraper(ABC):
         "Api-User-Agent": API_USER_AGENT,
     }
 
+    # Subclases que reciben HTTP 403/429 desde la IP del datacenter (p. ej. Reddit)
+    # pueden activar el proxy de egreso residencial poniendo esto a True.
+    USE_RESIDENTIAL_PROXY = False
+
     def __init__(
         self,
         config: Optional[SimpleNamespace] = None,
@@ -190,6 +223,44 @@ class BaseScraper(ABC):
         self.max_retries = max_retries
         self._last_request_time: float = 0.0
         self.logger = logging.getLogger(self.__class__.__name__)
+        self._proxy_opener = None
+
+    def _urlopen(self, req, timeout: float = 8.0):
+        """urlopen con proxy de egreso si la subclase lo activa.
+
+        Fail-open: si el proxy falla (p. ej. HTTP 407 por credenciales inválidas
+        o no responde), se desactiva para el resto de la sesión y se reintenta en
+        directo. Así activar el egress residencial NUNCA rompe el scraping que ya
+        funciona desde el datacenter (p. ej. el mirror Arctic Shift de Reddit).
+        """
+        if self.USE_RESIDENTIAL_PROXY and self._proxy_opener is not False:
+            if self._proxy_opener is None:
+                proxy = resolve_egress_proxy()
+                if proxy:
+                    handler = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+                    self._proxy_opener = urllib.request.build_opener(handler)
+                    self.logger.info("Scraper using residential egress proxy")
+                else:
+                    self._proxy_opener = False
+            if self._proxy_opener:
+                try:
+                    return self._proxy_opener.open(req, timeout=timeout)
+                except urllib.error.HTTPError as e:
+                    if e.code in (407, 502, 503, 504):
+                        self.logger.warning(
+                            "Egress proxy failed (HTTP %d) — disabling proxy, "
+                            "falling back to direct connection", e.code,
+                        )
+                        self._proxy_opener = False
+                    else:
+                        raise
+                except (urllib.error.URLError, OSError) as e:
+                    self.logger.warning(
+                        "Egress proxy unreachable (%s) — disabling proxy, "
+                        "falling back to direct connection", type(e).__name__,
+                    )
+                    self._proxy_opener = False
+        return urllib.request.urlopen(req, timeout=timeout)
 
     @abstractmethod
     def scrape(self) -> list[dict]:
@@ -259,7 +330,7 @@ class BaseScraper(ABC):
 
         for attempt in range(1, self.max_retries + 1):
             try:
-                with urllib.request.urlopen(req, timeout=8) as resp:
+                with self._urlopen(req, timeout=8) as resp:
                     body = resp.read().decode("utf-8")
                     self._last_request_time = time.time()
                     return json.loads(body)
@@ -340,7 +411,7 @@ class BaseScraper(ABC):
 
         for attempt in range(1, self.max_retries + 1):
             try:
-                with urllib.request.urlopen(req, timeout=15) as resp:
+                with self._urlopen(req, timeout=15) as resp:
                     body = resp.read().decode("utf-8", errors="replace")
                     self._last_request_time = time.time()
                     return body
