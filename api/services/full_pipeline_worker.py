@@ -755,6 +755,10 @@ def _preflight_cleanup(logger):
     locked = _db.get_locked_file_paths()
     error_paths = _db.get_error_video_media_paths(max_age_hours=48)
     preserved = locked | error_paths
+    # Basenames como red de seguridad: si por cualquier motivo una ruta quedó en
+    # otro formato, preservamos igual el archivo (fail-safe: nunca borrar media
+    # de otro job por un desajuste de formato de ruta).
+    preserved_names = {os.path.basename(p) for p in preserved if p}
 
     # A concurrent job can be mid-fetch for hours and only registers its media
     # locks at the END of the media phase (orchestrator.phase_media).  Until
@@ -766,6 +770,13 @@ def _preflight_cleanup(logger):
     except (TypeError, ValueError):
         _recent_sec = 21600.0
     _recent_cutoff = time.time() - max(_recent_sec, 0.0)
+    # Endurecido: además, preserva todo lo escrito desde que arrancó el job
+    # activo más antiguo. La fase de media puede durar >8h y superar la ventana
+    # fija, así que un clip recién descargado por un job en curso NUNCA debe
+    # borrarse por antigüedad. (Bug oct 2026: 127 clips borrados → black-screen.)
+    _oldest_job = _db.get_oldest_active_job_start_epoch()
+    if _oldest_job is not None:
+        _recent_cutoff = min(_recent_cutoff, _oldest_job - 60.0)
 
     cleanup_dirs = [
         _PROJECT_ROOT / "output" / "video_clips",
@@ -779,7 +790,11 @@ def _preflight_cleanup(logger):
         for f in d.iterdir():
             if not f.is_file():
                 continue
-            if str(f) in preserved:
+            try:
+                rel = f.resolve().relative_to(_PROJECT_ROOT.resolve()).as_posix()
+            except (ValueError, OSError):
+                rel = f.name
+            if str(f) in preserved or rel in preserved or f.name in preserved_names:
                 continue
             try:
                 if f.stat().st_mtime >= _recent_cutoff:

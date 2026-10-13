@@ -493,6 +493,16 @@ def _auto_recover_missing_publications_impl(db=None) -> dict:
                     upload_window_end=chosen_we,
                 )
 
+                if slot_id is None or slot_id < 0:
+                    # Colisión UNIQUE no resuelta (carrera con otro plan): el target
+                    # ya está ocupado por un slot activo. No es un fallo.
+                    logger.info(
+                        "[%s] Recovery slot omitido: target %s ya ocupado por otro slot activo",
+                        slug, tp_at,
+                    )
+                    existing_times.append(chosen_time)
+                    continue
+
                 existing_times.append(chosen_time)
                 created_slots.append({
                     "slot_id": slot_id,
