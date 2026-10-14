@@ -416,7 +416,70 @@ def validate_short_script(script: dict) -> list[str]:
     return errors
 
 
+def _force_kokoro_config(ch_config):
+    """Devuelve una copia de ``ch_config`` con ``TTS_ENGINE='kokoro'``.
+
+    Se usa para forzar la rama Kokoro como fallback cuando edge-tts falla.
+    Copia los atributos a un SimpleNamespace (los configs son módulos/namespaces
+    de solo lectura). Fail-open: si no se puede copiar, devuelve el original.
+    """
+    import types
+    try:
+        src = vars(ch_config) if hasattr(ch_config, "__dict__") else {}
+        ns = types.SimpleNamespace()
+        for k, v in src.items():
+            setattr(ns, k, v)
+        ns.TTS_ENGINE = "kokoro"
+        return ns
+    except Exception:
+        return ch_config
+
+
 def synthesize_shorts_blocks(
+    bloques: list[dict],
+    ch_config,
+    output_audio_path: Path,
+    output_srt_path: Path,
+    voice: Optional[str] = None,
+    max_duration_sec: Optional[float] = None,
+    progress_cb: callable = None,
+) -> dict:
+    """Sintetiza un Short con el motor del canal y **fallback a Kokoro**.
+
+    Envuelve ``_synthesize_shorts_blocks_impl``: si el motor externo (edge-tts)
+    falla (p.ej. 403 de Microsoft), reintenta con Kokoro local en vez de perder
+    el Short. El fallback SOLO aplica a fallos del proveedor: el error de audio
+    demasiado largo se propaga sin reintentar (Kokoro daría el mismo problema).
+    """
+    from config.voice_resolver import resolve_channel_voice
+    try:
+        resolved = resolve_channel_voice(ch_config)
+    except Exception:
+        resolved = {"engine": "kokoro"}
+
+    if resolved.get("engine") == "kokoro":
+        return _synthesize_shorts_blocks_impl(
+            bloques, ch_config, output_audio_path, output_srt_path,
+            voice=voice, max_duration_sec=max_duration_sec, progress_cb=progress_cb,
+        )
+
+    try:
+        return _synthesize_shorts_blocks_impl(
+            bloques, ch_config, output_audio_path, output_srt_path,
+            voice=voice, max_duration_sec=max_duration_sec, progress_cb=progress_cb,
+        )
+    except Exception as exc:
+        if "too long" in str(exc).lower():
+            raise
+        logger.warning(
+            "🎙️ Short TTS con edge-tts falló (%s) — fallback a Kokoro local", exc)
+        return _synthesize_shorts_blocks_impl(
+            bloques, _force_kokoro_config(ch_config), output_audio_path, output_srt_path,
+            voice=None, max_duration_sec=max_duration_sec, progress_cb=progress_cb,
+        )
+
+
+def _synthesize_shorts_blocks_impl(
     bloques: list[dict],
     ch_config,
     output_audio_path: Path,

@@ -442,6 +442,38 @@ def build_tts_engine(config: Any) -> Any:
         return TTSEngine(voice_config)
 
 
+def build_kokoro_fallback_engine(config: Any) -> Any:
+    """Build a Kokoro engine regardless of the channel's ``TTS_ENGINE``.
+
+    Usado como fallback cuando el motor externo (edge-tts) falla: Microsoft
+    cambia el handshake/token (p.ej. el 403 por ``Sec-MS-GEC v2`` de oct 2026)
+    y deja sin voz a los canales configurados con edge-tts. Kokoro es local y
+    no depende de terceros. Reutiliza la voz/velocidad Kokoro del canal.
+    """
+    from pipeline.kokoro_tts import KokoroTTSEngine
+
+    voice = _get(config, "KOKORO_VOICE", "em_santa") or "em_santa"
+    tts_strategy = _get(config, "TTS_STRATEGY", {}) or {}
+    block_speeds = _kokoro_block_speeds(tts_strategy)
+    pause_between = _get(config, "KOKORO_PAUSE_BETWEEN_BLOCKS", None)
+    if pause_between is None:
+        pause_between = (tts_strategy.get("pause_between_blocks", 0.7)
+                         if isinstance(tts_strategy, dict) else 0.7)
+    voice_config = {
+        "kokoro_voice": voice,
+        "block_speeds": block_speeds,
+        "pause_between_blocks": pause_between,
+        "unload_every_n_blocks": _get(config, "KOKORO_UNLOAD_EVERY_N_BLOCKS", 0),
+        "expressive": bool(_get(config, "EXPRESSIVE_NARRATION", True)),
+        "prosody_profiles": _get(config, "PROSODY_PROFILES", {}) or {},
+        "tono_default": _get(config, "TONO_DEFAULT", "neutro"),
+        "max_segments": int(_get(config, "TONO_MAX_SEGMENTS_PER_BLOCK", 3) or 3),
+        "rate_base": block_speeds.get("base", 0.9),
+    }
+    logger.warning("🔊 TTS fallback: Kokoro (voice=%s) — edge-tts no disponible", voice)
+    return KokoroTTSEngine(voice_config)
+
+
 # ── Kokoro block_speeds from edge-tts rate strings ───────────
 
 def _kokoro_block_speeds(tts_strategy: dict) -> dict:
