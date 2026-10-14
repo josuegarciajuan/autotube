@@ -1525,9 +1525,25 @@ class PipelineOrchestrator:
                             pct = 31 + int((i_block / total) * 6)
                             self._emit_progress(pct, "tts",
                                 f"Generando voz: bloque {i_block}/{total}...")
-                    audio_path, timestamps = self.tts.generate_segmented(
-                        bloques, progress_cb=_tts_progress,
-                    )
+                    try:
+                        audio_path, timestamps = self.tts.generate_segmented(
+                            bloques, progress_cb=_tts_progress,
+                        )
+                    except Exception as _tts_exc:
+                        # Fallback: si el motor EXTERNO (edge-tts) falla (p.ej. 403
+                        # de Microsoft al cambiar el handshake/token), reintentar
+                        # con Kokoro local. Un fallo del proveedor externo no debe
+                        # tumbar el vídeo. Nunca reintenta si ya estamos en Kokoro.
+                        if type(self.tts).__name__ == "KokoroTTSEngine":
+                            raise
+                        logger.warning(
+                            "[%s] TTS con %s falló (%s) — fallback a Kokoro local",
+                            self.canal, type(self.tts).__name__, _tts_exc)
+                        from config.voice_resolver import build_kokoro_fallback_engine
+                        self.tts = build_kokoro_fallback_engine(self.config)
+                        audio_path, timestamps = self.tts.generate_segmented(
+                            bloques, progress_cb=_tts_progress,
+                        )
                 finally:
                     if tts_lock_acquired and channel_id is not None:
                         self.db.release_tts_lock(channel_id, job_id or 0)
