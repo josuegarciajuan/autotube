@@ -1714,7 +1714,14 @@ class YouTubeViralScraper(BaseScraper):
         _cookies = os.getenv("YTDLP_COOKIES_FILE", "")
         if _cookies and Path(_cookies).exists():
             cmd += ["--cookies", _cookies]
-        _proxy = os.getenv("EGRESS_PROXY1", "") or os.getenv("PROXY_URL", "")
+        # Proxy de egreso OPCIONAL y desactivado por defecto (igual que reddit y
+        # atlas_obscura): EGRESS_PROXY1 no está operativo (responde HTTP 407
+        # Proxy Authentication Required) y aplicarlo aquí rompía la descarga de
+        # audio con un 407 enmascarando la causa real. Actívalo solo si tienes un
+        # proxy funcional con SCRAPER_USE_EGRESS_PROXY=true.
+        _proxy = ""
+        if os.getenv("SCRAPER_USE_EGRESS_PROXY", "false").lower() == "true":
+            _proxy = os.getenv("EGRESS_PROXY1", "") or os.getenv("PROXY_URL", "")
         if _proxy:
             cmd += ["--proxy", _proxy]
 

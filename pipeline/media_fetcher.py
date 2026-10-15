@@ -1246,7 +1246,11 @@ class MediaFetcher:
         # with a premature "Media phase timeout".
         n_ai = n_scenes - min(len(video_scenes), MAX_ABSOLUTE_VIDEOS)
         _sd_steps = int(self._media_strategy.get("ai_local_sd_steps", 8) or 8)
-        _ai_scene_secs = max(180, 45 + _sd_steps * 25)  # 8 steps → 245s; 20 → 545s
+        # 35 s/step (antes 25): cuando la generación cae a Local SD en la casa
+        # (fleet no elegible), cada imagen tarda ~285-310 s a 8 steps, no ~180.
+        # El presupuesto anterior abortaba vídeos que ya habían completado casi
+        # todo (p. ej. #2651: 112/112 escenas hechas y timeout por 192 s).
+        _ai_scene_secs = max(180, 45 + _sd_steps * 35)  # 8 steps → 325s; 20 → 745s
         _cb_phase_timeout = max(3600, 600 + n_scenes * 30 + n_ai * _ai_scene_secs)
 
         # ── Reset video provider circuit breaker for this job ──
@@ -1415,8 +1419,13 @@ class MediaFetcher:
                     pass
 
             # ── Global timeout: abort if media phase takes too long ──
+            # Solo aborta si AÚN QUEDAN escenas por procesar. Si ya completamos
+            # la última escena (i == n_scenes-1), el trabajo está hecho: abortar
+            # por un timeout que se pasó durante la última imagen es un falso
+            # negativo que tira horas de render (vídeo #2651: 112/112 escenas y
+            # timeout a los 19342s sobre un límite de 19150s).
             elapsed = time.time() - _cb_phase_start
-            if elapsed > _cb_phase_timeout:
+            if elapsed > _cb_phase_timeout and i < n_scenes - 1:
                 error_msg = (
                     f"CRITICAL: Media phase timeout after {elapsed:.0f}s "
                     f"(limit={_cb_phase_timeout}s). Processed {i+1}/{n_scenes} scenes. "
@@ -1424,6 +1433,12 @@ class MediaFetcher:
                 )
                 logger.error(error_msg)
                 raise RuntimeError(error_msg)
+            if elapsed > _cb_phase_timeout:
+                logger.warning(
+                    "Media phase exceeded budget (%.0fs > %ss) pero ya completó "
+                    "%d/%d escenas — se continúa (no se aborta).",
+                    elapsed, _cb_phase_timeout, i + 1, n_scenes,
+                )
 
             # Rate limiting
             if i < n_scenes - 1:
