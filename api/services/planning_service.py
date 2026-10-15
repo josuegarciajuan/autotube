@@ -3256,6 +3256,138 @@ def continuous_generation_enabled(db=None) -> bool:
         return False
 
 
+# ── Prioridad de reintentos (A) ───────────────────────────────
+# La fábrica mantiene la capacidad long-form saturada, así que los vídeos que
+# fallan tras un arreglo (p. ej. TTS 403, timeout de media) quedaban en 'error'
+# y morían de inanición: nunca había un slot libre para reintentarlos. Estos
+# helpers reanudan un vídeo fallido con checkpoint ANTES de despachar trabajo
+# nuevo, cuando hay hueco. Idempotente y acotado (máx. intentos + antigüedad).
+RESUME_FAILED_MAX_ATTEMPTS = 3
+RESUME_FAILED_MAX_AGE_DAYS = 14
+# Tope diario de reintentos prioritarios para no monopolizar la capacidad
+# long-form (deja hueco a la generación nueva del plan).
+RESUME_FAILED_MAX_PER_DAY = 8
+# Fallos NO recuperables con un simple resume (contenido/seguridad/ensamblaje):
+# reintentarlos no ayuda y quemaría slots. Se excluyen.
+_RESUME_DENY_MARKERS = (
+    "content_safety", "seguridad", "black-screen", "black screen",
+    "placeholder-ratio", "off-niche", "diferido por nicho",
+)
+# Solo se reanudan fases donde el reintento aporta (los fixes de oct 2026 fueron
+# en TTS y media). Los fallos de ensamblaje/render (video/post_validate) NO se
+# reintentan: un resume reusaría el mismo media/problema.
+_RESUME_PHASE_ALLOW = (
+    "scrape", "script", "pre_validate", "tts", "media", "interrupted",
+)
+
+
+def _resumable_failed_video(db) -> dict | None:
+    """Vídeo 'error' resumible (checkpoint con guion) sin agotar reintentos."""
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """SELECT v.id, v.channel_id, v.progress_phase,
+                          COALESCE(v.error_message, '') AS error_message
+                   FROM videos v
+                   WHERE v.status = 'error'
+                     AND (v.yt_video_id IS NULL OR v.yt_video_id = '')
+                     AND v.checkpoint_data IS NOT NULL
+                     AND v.checkpoint_data LIKE '%"script"%'
+                     AND v.created_at > datetime('now', ?)
+                   ORDER BY v.id DESC""",
+                (f"-{RESUME_FAILED_MAX_AGE_DAYS} days",),
+            ).fetchall()
+            for r in rows:
+                if (r["progress_phase"] or "") not in _RESUME_PHASE_ALLOW:
+                    continue
+                err = (r["error_message"] or "").lower()
+                if any(m in err for m in _RESUME_DENY_MARKERS):
+                    continue
+                n_attempts = conn.execute(
+                    "SELECT COUNT(*) AS n FROM generation_jobs WHERE video_id = ?",
+                    (r["id"],),
+                ).fetchone()["n"]
+                if n_attempts >= RESUME_FAILED_MAX_ATTEMPTS:
+                    continue
+                if db.get_active_job_for_channel(r["channel_id"]):
+                    continue
+                return dict(r)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("resumable-failed scan failed: %s", exc)
+    return None
+
+
+def _try_resume_failed_video(db, loop=None) -> bool:
+    """Reanuda UN vídeo fallido si hay hueco. Devuelve True si reanudó alguno."""
+    # Tope diario (evita monopolizar la capacidad).
+    from datetime import date as _d_today
+    _budget_key = f"retry_priority_count_{_d_today.today().isoformat()}"
+    try:
+        _used = int(db.get_system_state(_budget_key) or 0)
+    except Exception:
+        _used = 0
+    if _used >= RESUME_FAILED_MAX_PER_DAY:
+        return False
+
+    video = _resumable_failed_video(db)
+    if not video:
+        return False
+    if db.count_active_longform_jobs() >= effective_max_concurrent_longform_jobs():
+        return False
+    if not _memory_ok(min_free_gb=2.5):
+        return False
+    try:
+        from api.services.factory_governor import factory_ok
+        if not factory_ok(db):
+            return False
+    except Exception:
+        pass
+
+    vid = video["id"]
+    cid = video["channel_id"]
+    with _DISPATCH_LOCK:
+        # Re-check under lock (TOCTOU).
+        if db.count_active_longform_jobs() >= effective_max_concurrent_longform_jobs():
+            return False
+        if db.get_active_job_for_channel(cid):
+            return False
+        v_now = db.get_video(vid)
+        if not v_now or v_now.get("status") != "error":
+            return False
+        db.update_video(vid, status="generating", error_message="")
+        job_id = db.create_job(cid, "generate_only", vid)
+        db.update_job(job_id, status="running",
+                      error_msg="Retry prioritario: reanudar vídeo fallido (checkpoint)")
+
+    import asyncio as _asyncio_retry
+    from api.services.generation_service import (
+        start_generation_job, start_generation_job_subprocess, USE_SUBPROCESS_WORKER,
+    )
+    if USE_SUBPROCESS_WORKER:
+        _coro = start_generation_job_subprocess(
+            job_id=job_id, channel_id=cid, video_id=vid, action="generate_only",
+        )
+    else:
+        _coro = start_generation_job(
+            job_id=job_id, channel_id=cid, video_id=vid, action="generate_only", resume=True,
+        )
+    if loop is not None:
+        _asyncio_retry.run_coroutine_threadsafe(_coro, loop)
+    else:
+        _asyncio_retry.create_task(_coro)
+
+    logger.info("[retry-priority] Reanudado vídeo #%s (canal %s) job=%s", vid, cid, job_id)
+    try:
+        db.set_system_state(_budget_key, str(_used + 1))
+    except Exception:
+        pass
+    try:
+        db.bump_system_counter("retry_priority_resumed")
+    except Exception:
+        pass
+    return True
+
+
 def process_planned_slots(db=None, loop=None) -> dict | None:
     """Check for due planned slots and dispatch generation if possible.
     
@@ -3297,7 +3429,20 @@ def process_planned_slots(db=None, loop=None) -> dict | None:
         db.reconcile_active_public_slot_caps()
     except Exception as exc:
         logger.warning("Active public-slot cap reconciliation skipped: %s", exc)
-    
+
+    # 1c. PRIORIDAD DE REINTENTOS (A): antes de despachar trabajo NUEVO, reanudar
+    # un vídeo fallido con checkpoint si hay hueco. Evita la inanición de los
+    # reintentos cuando la capacidad long-form está saturada (bug oct 2026).
+    try:
+        if _try_resume_failed_video(db, loop=loop):
+            logger.info(
+                "Planned slot deferred: se reanudó un vídeo fallido "
+                "(prioridad de reintento)"
+            )
+            return None
+    except Exception as exc:  # noqa: BLE001 — nunca bloquea la planificación
+        logger.warning("Retry-priority skipped: %s", exc)
+
     # 2. Find candidate slots and pick the best one by priority score
     from datetime import date as _date
     today_str = _date.today().isoformat()
