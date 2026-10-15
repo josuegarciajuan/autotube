@@ -47,8 +47,11 @@ PROD_SCRIPT_BLOCKS_MIN = 6
 PROD_SCRIPT_BLOCKS_MAX = 10
 PROD_VIDEO_DURATION_MIN = 6
 PROD_VIDEO_DURATION_MAX = 9
-VIDEO_AVERAGE_DURATION_MIN = 7
-VIDEO_DURATION_DISCREPANCY_MIN = 2
+# Duración objetivo ("Duración — Objetivo" del panel). Fuente autoritativa:
+# video_validator y _get_word_target usan este rango (no PROD_VIDEO_DURATION_*).
+# Alineado con el valor efectivo en la DB (canal4 = 20 ± 4 min → largo formato).
+VIDEO_AVERAGE_DURATION_MIN = 20
+VIDEO_DURATION_DISCREPANCY_MIN = 4
 
 # Scene pacing — MIN is hard (never violated), MAX is soft (exceeded only
 # to respect MIN; logged as a soft exception by the scene planner).
