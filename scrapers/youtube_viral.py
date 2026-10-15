@@ -1714,13 +1714,15 @@ class YouTubeViralScraper(BaseScraper):
         _cookies = os.getenv("YTDLP_COOKIES_FILE", "")
         if _cookies and Path(_cookies).exists():
             cmd += ["--cookies", _cookies]
-        # Proxy de egreso OPCIONAL y desactivado por defecto (igual que reddit y
-        # atlas_obscura): EGRESS_PROXY1 no está operativo (responde HTTP 407
-        # Proxy Authentication Required) y aplicarlo aquí rompía la descarga de
-        # audio con un 407 enmascarando la causa real. Actívalo solo si tienes un
-        # proxy funcional con SCRAPER_USE_EGRESS_PROXY=true.
-        _proxy = ""
-        if os.getenv("SCRAPER_USE_EGRESS_PROXY", "false").lower() == "true":
+        # Proxy OPCIONAL y desactivado por defecto (igual que reddit y
+        # atlas_obscura). EGRESS_PROXY1 no está operativo (HTTP 407 Proxy
+        # Authentication Required) y aplicarlo aquí rompía SIEMPRE la descarga
+        # local de audio con un 407 que enmascaraba la causa real. La IP
+        # residencial la cubre la flota (autotube-ytdlp-audio). Para forzar un
+        # proxy: define YTDLP_PROXY=<url> (explícito) o, para reutilizar el de
+        # egreso, activa SCRAPER_USE_EGRESS_PROXY=true (usa EGRESS_PROXY1).
+        _proxy = os.getenv("YTDLP_PROXY", "")
+        if not _proxy and os.getenv("SCRAPER_USE_EGRESS_PROXY", "false").lower() == "true":
             _proxy = os.getenv("EGRESS_PROXY1", "") or os.getenv("PROXY_URL", "")
         if _proxy:
             cmd += ["--proxy", _proxy]
