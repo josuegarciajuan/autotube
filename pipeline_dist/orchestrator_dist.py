@@ -376,27 +376,54 @@ class DistributedOrchestrator(PipelineOrchestrator):
             raise ScenePlanError(
                 f"ai-image {summary.get('status')}: {summary.get('error')}"
             )
+        # Resiliencia: una imagen concreta inválida/vacía NO debe tumbar toda la
+        # pre-generación (all-or-nothing). Antes un solo `ScenePlanError: imagen
+        # 0078 inválida o vacía` abortaba el lote entero → TODAS las escenas IA
+        # caían a SD local (~320 s/imagen) y el vídeo tardaba horas (timeouts y
+        # falsos "generation_stalled", p. ej. #2651/#2652). Ahora se saltan las
+        # entradas inválidas y solo esas escenas resuelven en local; el resto usa
+        # la caché de la flota.
         entries = (summary.get("result") or {}).get("images") or []
         if len(entries) != n_expected:
-            raise ScenePlanError(
-                f"ai-image devolvió {len(entries)} imágenes, esperaba {n_expected}"
+            logger.warning(
+                "[%s] ai-image devolvió %d/%d imágenes — se cachean las válidas",
+                self.canal, len(entries), n_expected,
             )
 
         cache_by_hash: dict[str, str] = {}
+        skipped = 0
         for entry in entries:
             key = str(entry.get("key"))
             out_dir, fn = entry.get("outDir"), entry.get("filename")
             if not out_dir or not fn:
-                raise ScenePlanError(f"imagen {key} sin outDir/filename")
+                logger.warning("[%s] ai-image imagen %s sin outDir/filename — saltada", self.canal, key)
+                skipped += 1
+                continue
             src = os.path.join(str(out_dir), str(fn))
             if not os.path.exists(src) or os.path.getsize(src) < 1024:
-                raise ScenePlanError(f"imagen {key} inválida o vacía")
+                logger.warning(
+                    "[%s] ai-image imagen %s inválida/vacía — saltada (esa escena resolverá en local)",
+                    self.canal, key,
+                )
+                skipped += 1
+                continue
             digest = hashlib.md5(
                 (prompt_by_key.get(key) or "").encode("utf-8")
             ).hexdigest()[:10]
             dst = cache_root / f"dist_{video_id or 'x'}_{key}.jpg"
             shutil.copy2(src, dst)
             cache_by_hash[digest] = str(dst)
+
+        if not cache_by_hash:
+            # Ninguna imagen válida: la flota no sirvió → caer a local (comportamiento previo).
+            raise ScenePlanError(
+                f"ai-image: 0/{len(entries)} imágenes válidas (saltadas {skipped})"
+            )
+        if skipped:
+            logger.warning(
+                "[%s] ai-image: %d imagen(es) saltada(s); %d en caché (las saltadas resolverán en local)",
+                self.canal, skipped, len(cache_by_hash),
+            )
 
         # Instala la caché: `_try_ai_image_chain` la consulta por hash de prompt.
         mf._local_sd = CachedLocalSDProvider(mf._local_sd, cache_by_hash)
