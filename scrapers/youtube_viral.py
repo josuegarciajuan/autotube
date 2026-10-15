@@ -1714,7 +1714,11 @@ class YouTubeViralScraper(BaseScraper):
         _cookies = os.getenv("YTDLP_COOKIES_FILE", "")
         if _cookies and Path(_cookies).exists():
             cmd += ["--cookies", _cookies]
-        _proxy = os.getenv("EGRESS_PROXY1", "") or os.getenv("PROXY_URL", "")
+        # Proxy explícito y opt-in. NO reutilizar EGRESS_PROXY1: no está operativo
+        # (HTTP 407) y hacía fallar SIEMPRE la descarga local con "Tunnel
+        # connection failed: 407 Proxy Authentication Required" (oct 2026). La
+        # descarga con IP residencial la cubre la flota (autotube-ytdlp-audio).
+        _proxy = os.getenv("YTDLP_PROXY", "")
         if _proxy:
             cmd += ["--proxy", _proxy]
 

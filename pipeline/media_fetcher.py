@@ -1246,7 +1246,12 @@ class MediaFetcher:
         # with a premature "Media phase timeout".
         n_ai = n_scenes - min(len(video_scenes), MAX_ABSOLUTE_VIDEOS)
         _sd_steps = int(self._media_strategy.get("ai_local_sd_steps", 8) or 8)
-        _ai_scene_secs = max(180, 45 + _sd_steps * 25)  # 8 steps → 245s; 20 → 545s
+        # Budget por escena IA. Medido (oct 2026) en el host: local SD ≈ 283-311s
+        # por imagen a 8 steps (~35s/step + overhead), NO 245s. El presupuesto
+        # corto abortaba por falso "Media phase timeout" vídeos largos cuando la
+        # flota SD no estaba disponible y TODAS las escenas caían a local
+        # (video #2651: 112 escenas, 19342s > 19150s → abort).
+        _ai_scene_secs = max(240, 80 + _sd_steps * 30)  # 8 steps → 320s
         _cb_phase_timeout = max(3600, 600 + n_scenes * 30 + n_ai * _ai_scene_secs)
 
         # ── Reset video provider circuit breaker for this job ──
