@@ -220,3 +220,49 @@ def test_mark_altered_content_robust_backoff(monkeypatch):
     b2 = _FakeBrowser(["radio_disabled", "ok"])
     assert yb.mark_altered_content_robust(b2, "V", attempts=3, base_backoff=10) is False
     assert sleeps == []
+
+
+def test_robust_permanente_registra_error(monkeypatch, caplog):
+    """Un fallo permanente SÍ debe ser ERROR (accionable → alerta)."""
+    class _B:
+        last_mark_reason = ""
+
+        def mark_altered_content(self, vid):
+            self.last_mark_reason = "radio_disabled"
+            return False
+
+    monkeypatch.setattr(yb.time, "sleep", lambda *_: None)
+    with caplog.at_level("ERROR", logger=yb.logger.name):
+        assert yb.mark_altered_content_robust(_B(), "V", attempts=3) is False
+    assert any(r.levelname == "ERROR" for r in caplog.records)
+
+
+def test_robust_agotar_reintentos_registra_error(monkeypatch, caplog):
+    """Tras agotar los reintentos transitorios, el fallo es ERROR."""
+    class _B:
+        last_mark_reason = ""
+
+        def mark_altered_content(self, vid):
+            self.last_mark_reason = "radio_not_found"
+            return False
+
+    monkeypatch.setattr(yb.time, "sleep", lambda *_: None)
+    with caplog.at_level("ERROR", logger=yb.logger.name):
+        assert yb.mark_altered_content_robust(_B(), "V", attempts=2) is False
+    assert any(r.levelname == "ERROR" for r in caplog.records)
+
+
+def test_robust_exito_transitorio_no_registra_error(monkeypatch, caplog):
+    """Un radio_not_found transitorio que luego acierta NO debe crear ERROR."""
+    class _B:
+        last_mark_reason = ""
+        _seq = ["radio_not_found", "ok"]
+
+        def mark_altered_content(self, vid):
+            self.last_mark_reason = self._seq.pop(0)
+            return self.last_mark_reason in ("ok", "already")
+
+    monkeypatch.setattr(yb.time, "sleep", lambda *_: None)
+    with caplog.at_level("ERROR", logger=yb.logger.name):
+        assert yb.mark_altered_content_robust(_B(), "V", attempts=3) is True
+    assert not any(r.levelname == "ERROR" for r in caplog.records)

@@ -1273,7 +1273,13 @@ class YouTubeBrowser:
             try:
                 yes_radio = page.wait_for_selector(SEL_RADIO_YES, timeout=8000, state="visible")
             except PlaywrightTimeout:
-                logger.error("Radio not found for %s (¿vídeo eliminado o editor distinto?)", video_id)
+                # WARNING, no ERROR: es un fallo TRANSITORIO normal en subidas
+                # recientes (YouTube aún procesando) que `mark_altered_content_robust`
+                # reintenta. Un ERROR aquí generaba una alerta crítica
+                # `error_pipeline_youtube_browser` por cada intento fallido aunque el
+                # reintento posterior tuviera éxito. El fallo definitivo sí se
+                # registra como ERROR en el wrapper robusto.
+                logger.warning("Radio not found for %s (¿vídeo eliminado o editor distinto?)", video_id)
                 page.close()
                 return False, "radio_not_found"
             human_delay(0.5, 1.5, "find radio")
@@ -2555,11 +2561,16 @@ def mark_altered_content_robust(browser, video_id: str, attempts: int = 3,
             return True
         reason = getattr(browser, "last_mark_reason", "") or "unknown"
         if reason not in transient:
+            # Fallo permanente del ítem (no se arregla reintentando): SÍ es un
+            # ERROR accionable → debe generar alerta.
+            logger.error("Marcado IA falló definitivamente para %s (motivo=%s)", video_id, reason)
             return False
         if i < total:
             wait_s = base_backoff * i
             logger.info("Reintento marcado IA %s en %.0fs (motivo=%s)", video_id, wait_s, reason)
             time.sleep(wait_s)
+    # Se agotaron los reintentos: fallo real → ERROR (alerta).
+    logger.error("Marcado IA falló para %s tras %d intentos (motivo=%s)", video_id, total, reason)
     return False
 
 
