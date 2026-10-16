@@ -5,6 +5,7 @@ válidos y monótonos, CTA) y clasifica los fallos con `TTSDelegationError.code`
 """
 import json
 import os
+import time
 
 import pytest
 
@@ -57,6 +58,22 @@ def _patch_dirs(tmp_path, monkeypatch):
     monkeypatch.setattr(B, "SPOOL_DIR", str(tmp_path / "spool"))
     monkeypatch.setattr(B, "ACK_DIR", str(tmp_path / "spool" / "acks"))
     monkeypatch.setattr(B, "_escribir_ack", lambda *a, **k: None)
+    # Aísla la certificación (Fase 2): por defecto, sin registro → legacy.
+    monkeypatch.setenv("AUTOTUBE_TTS_CERT_FILE", str(tmp_path / "no_cert.json"))
+    monkeypatch.delenv("AUTOTUBE_TTS_ALLOWED_NODES", raising=False)
+    monkeypatch.delenv("AUTOTUBE_TTS_CERT_TTL_SEC", raising=False)
+
+
+def _write_cert(tmp_path, monkeypatch, nodes, *, ok=True, ttl_hours=24):
+    now = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+    record = {
+        "ts": now, "ttl_hours": ttl_hours, "image": "autotube-tts:1",
+        "nodes": {n: {"ok": ok, "ts": now, "error": None} for n in nodes},
+    }
+    p = tmp_path / "cert.json"
+    p.write_text(json.dumps(record))
+    monkeypatch.setenv("AUTOTUBE_TTS_CERT_FILE", str(p))
+    return p
 
 
 def _fake_buscar(tmp_path, *, cta=True, files_meta=True, ts=None, mp3_bytes=MP3_BYTES):
@@ -216,3 +233,63 @@ def test_resultado_antiguo_sin_files_se_acepta(tmp_path, monkeypatch):
     monkeypatch.setattr(B, "_buscar_estado", fake)
     res = B.delegar([{"texto": "x"}], {}, out_dir=str(tmp_path / "audio"))
     assert os.path.exists(res["audio_path"])
+
+
+# ── Fase 2: certificación funcional ────────────────────────────────
+
+def test_allowed_nodes_se_intersecta_con_certificacion(tmp_path, monkeypatch):
+    _patch_dirs(tmp_path, monkeypatch)
+    monkeypatch.setenv("AUTOTUBE_TTS_ALLOWED_NODES", "mail,oficina,dedi3133109")
+    _write_cert(tmp_path, monkeypatch, ["oficina", "mail"])
+    seen = {}
+
+    def fake(rid, timeout, poll):
+        seen["req"] = json.loads((tmp_path / "spool" / f"{rid}.json").read_text())
+        base = "narration_" + rid
+        rdir = tmp_path / "ret" / base
+        return "j", str(rdir), _preparar_resultado(rdir, rid, base)
+
+    monkeypatch.setattr(B, "_buscar_estado", fake)
+    B.delegar([{"texto": "x"}], {}, out_dir=str(tmp_path / "audio"))
+    # dedi3133109 no está certificado → excluido.
+    assert set(seen["req"]["allowedNodes"]) == {"mail", "oficina"}
+
+
+def test_sin_nodo_certificado_no_delega(tmp_path, monkeypatch):
+    _patch_dirs(tmp_path, monkeypatch)
+    monkeypatch.setenv("AUTOTUBE_TTS_ALLOWED_NODES", "dedi3133109")
+    _write_cert(tmp_path, monkeypatch, ["mail", "oficina"])
+    with pytest.raises(B.TTSDelegationError) as exc:
+        B.delegar([{"texto": "x"}], {}, out_dir=str(tmp_path / "audio"))
+    assert exc.value.code == "no_certified_node"
+    # No se llegó a escribir ninguna petición en el spool.
+    assert not list((tmp_path / "spool").glob("*.json"))
+
+
+def test_certificacion_expirada_no_certifica(tmp_path, monkeypatch):
+    _patch_dirs(tmp_path, monkeypatch)
+    monkeypatch.setenv("AUTOTUBE_TTS_ALLOWED_NODES", "mail")
+    monkeypatch.setenv("AUTOTUBE_TTS_CERT_TTL_SEC", "1")
+    old = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() - 3600))
+    p = tmp_path / "cert.json"
+    p.write_text(json.dumps({"ts": old, "ttl_hours": 24,
+                             "nodes": {"mail": {"ok": True, "ts": old}}}))
+    monkeypatch.setenv("AUTOTUBE_TTS_CERT_FILE", str(p))
+    with pytest.raises(B.TTSDelegationError) as exc:
+        B.delegar([{"texto": "x"}], {}, out_dir=str(tmp_path / "audio"))
+    assert exc.value.code == "no_certified_node"
+
+
+def test_sin_registro_certificacion_es_legacy(tmp_path, monkeypatch):
+    _patch_dirs(tmp_path, monkeypatch)
+    monkeypatch.setenv("AUTOTUBE_TTS_ALLOWED_NODES", "mail,oficina")
+    fake, _ = _fake_buscar(tmp_path)
+    seen = {}
+
+    def wrap(rid, timeout, poll):
+        seen["req"] = json.loads((tmp_path / "spool" / f"{rid}.json").read_text())
+        return fake(rid, timeout, poll)
+
+    monkeypatch.setattr(B, "_buscar_estado", wrap)
+    B.delegar([{"texto": "x"}], {}, out_dir=str(tmp_path / "audio"))
+    assert seen["req"]["allowedNodes"] == ["mail", "oficina"]

@@ -27,6 +27,7 @@ Fase 1 (observabilidad y contrato de resultado):
 """
 from __future__ import annotations
 
+import calendar
 import hashlib
 import json
 import logging
@@ -144,6 +145,65 @@ def _tts_allowed_nodes() -> list:
     """
     raw = os.environ.get("AUTOTUBE_TTS_ALLOWED_NODES", "")
     return [n.strip() for n in str(raw).split(",") if n.strip()]
+
+
+# ── Certificación funcional de nodos (Fase 2) ──────────────────────
+# El certificador de SuperServer (`scripts/certify-tts-nodes.js`) ejecuta una
+# síntesis REAL por nodo y escribe `AUTOTUBE_TTS_CERT_FILE` (default
+# `/var/lib/taildeck/tts_certification.json`). Aquí solo se CONSUME para
+# restringir `allowedNodes` a nodos certificados recientes: un tag `kokoro` sin
+# certificación vigente no basta.
+DEFAULT_CERT_FILE = "/var/lib/taildeck/tts_certification.json"
+
+
+def _read_certification() -> dict | None:
+    path = os.environ.get("AUTOTUBE_TTS_CERT_FILE", DEFAULT_CERT_FILE)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None  # sin certificación → comportamiento legacy
+
+
+def _certified_nodes(record: dict) -> set | None:
+    """Nodos certificados y vigentes. `None` si no hay registro utilizable."""
+    if not isinstance(record, dict):
+        return None
+    try:
+        ttl_sec = float(os.environ.get("AUTOTUBE_TTS_CERT_TTL_SEC", "")
+                        or (record.get("ttl_hours") or 24) * 3600)
+    except (TypeError, ValueError):
+        ttl_sec = 24 * 3600
+    now = time.time()
+    out: set = set()
+    for name, info in (record.get("nodes") or {}).items():
+        if not isinstance(info, dict) or not info.get("ok"):
+            continue
+        ts = str(info.get("ts") or record.get("ts") or "")
+        try:
+            epoch = calendar.timegm(time.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S"))
+        except (TypeError, ValueError):
+            continue
+        if 0 <= (now - epoch) <= ttl_sec:
+            out.add(name)
+    return out
+
+
+def _eligible_tts_nodes() -> tuple[list, set | None]:
+    """Nodos elegibles = allowlist configurada ∩ certificados vigentes.
+
+    Devuelve `(elegibles, certificados)`. `certificados is None` = sin registro
+    (legacy: solo aplica la allowlist configurada). Si hay registro pero la
+    intersección queda vacía, el llamante debe abstenerse de delegar.
+    """
+    configured = _tts_allowed_nodes()
+    certified = _certified_nodes(_read_certification())
+    if certified is None:
+        return configured, None
+    if configured:
+        return [n for n in configured if n in certified], certified
+    return sorted(certified), certified
 
 
 # ── Verificación de artefactos (Fase 1) ────────────────────────────
@@ -266,6 +326,18 @@ def delegar(bloques: list, voice_config: dict, video_id=None, out_dir: str = "."
         timeout = _default_timeout()
     if retries is None:
         retries = _default_retries()
+
+    # Fase 2: si hay certificación vigente y ningún nodo sano resulta elegible,
+    # NO se delega a ciegas — se falla con código propio para que el orquestador
+    # caiga inmediatamente a Kokoro local.
+    eligible, certified = _eligible_tts_nodes()
+    if certified is not None and not eligible:
+        raise TTSDelegationError(
+            "no_certified_node",
+            "certificación TTS vigente pero sin nodos sanos elegibles",
+            {"certified": sorted(certified), "configured": _tts_allowed_nodes()},
+        )
+
     job_id = result_dir = est = None
     last_code = "bridge_timeout"
     last_diag: dict = {}
@@ -296,9 +368,13 @@ def delegar(bloques: list, voice_config: dict, video_id=None, out_dir: str = "."
             "fingerprint": _fingerprint({"bloques": bloques, "voice_config": voice_config,
                                          "cta_text": cta_text or ""}),
         }
-        allowed_nodes = _tts_allowed_nodes()
-        if allowed_nodes:
-            request["allowedNodes"] = allowed_nodes
+        # Elegibilidad re-evaluada por intento: una cuarentena (Fase 3) o una
+        # certificación expirada surte efecto sin esperar al siguiente job.
+        eligible_now, certified_now = _eligible_tts_nodes()
+        if certified_now is not None:
+            request["allowedNodes"] = eligible_now
+        elif eligible_now:
+            request["allowedNodes"] = eligible_now
         _write_json_atomic(os.path.join(SPOOL_DIR, f"{rid}.json"), request)
 
         job_id, result_dir, est = _buscar_estado(rid, timeout, poll)
