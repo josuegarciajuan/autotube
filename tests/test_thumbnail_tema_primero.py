@@ -278,3 +278,29 @@ def test_defaults_thumbnail_diversity_settings():
     assert defaults.THUMBNAIL_ACCENT_HUE_DISTANCE_MIN >= 20
     assert defaults.THUMBNAIL_EMPHASIS_ENABLED is True
     assert defaults.THUMBNAIL_THEMATIC_OVERLAYS_ENABLED is False
+
+
+def test_compose_final_output_suffix_distinct(tmp_path):
+    """A/B variants must NOT collapse onto the same file (output_suffix)."""
+    base = tmp_path / "base.jpg"
+    Image.new("RGB", (640, 360), (30, 90, 160)).save(base)
+    m = _maker(tmp_path)
+    from pipeline.thumbnail_brainstorm import ThumbnailBrief
+
+    brief = ThumbnailBrief(text_gancho="1971 MADRID", text_complemento="Lo que ocultaron")
+    common = dict(
+        base_image=base, brief=brief, style={}, overlay_text="", title="Prueba",
+        canal_slug="test", video_id=7, text_gancho=brief.text_gancho,
+        text_complemento=brief.text_complemento, badge_text="ARCHIVO",
+        layout="topic_hero", color_plan={"accent": "#FF5C00", "text": "#FFFFFF"},
+    )
+    out1 = Path(m._compose_final(**common, output_suffix="_v1"))
+    out2 = Path(m._compose_final(**common, output_suffix="_v2"))
+
+    assert out1.exists() and out2.exists()
+    assert out1 != out2
+    assert out1.name == "thumb_7_v1.jpg"
+    assert out2.name == "thumb_7_v2.jpg"
+    # Sin sufijo conserva el nombre legacy (thumbnail único).
+    out0 = Path(m._compose_final(**common))
+    assert out0.name == "thumb_7.jpg"
