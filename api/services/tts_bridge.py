@@ -35,6 +35,8 @@ import os
 import shutil
 import time
 
+from api.services import tts_node_health as health
+
 logger = logging.getLogger("autotube.tts_bridge")
 
 MODE_FILE = os.environ.get("SS_MODE_FILE", "/var/lib/taildeck/projects/autotube.mode")
@@ -197,13 +199,18 @@ def _eligible_tts_nodes() -> tuple[list, set | None]:
     (legacy: solo aplica la allowlist configurada). Si hay registro pero la
     intersección queda vacía, el llamante debe abstenerse de delegar.
     """
-    configured = _tts_allowed_nodes()
+    # NOTA: la reconciliación con la certificación (reincorporar nodos) se hace
+    # UNA vez al inicio del job (en `delegar`), NO aquí: hacerlo por intento
+    # borraría los fallos acumulados durante el propio job.
     certified = _certified_nodes(_read_certification())
+    configured = _tts_allowed_nodes()
     if certified is None:
-        return configured, None
-    if configured:
-        return [n for n in configured if n in certified], certified
-    return sorted(certified), certified
+        base = configured
+    elif configured:
+        base = [n for n in configured if n in certified]
+    else:
+        base = sorted(certified)
+    return [n for n in base if health.is_available(n)], certified
 
 
 # ── Verificación de artefactos (Fase 1) ────────────────────────────
@@ -327,6 +334,10 @@ def delegar(bloques: list, voice_config: dict, video_id=None, out_dir: str = "."
     if retries is None:
         retries = _default_retries()
 
+    # Fase 3: reincorporar nodos en cuarentena que ahora pasan certificación,
+    # UNA sola vez por job (no por intento).
+    health.reconcile_with_certification(_certified_nodes(_read_certification()))
+
     # Fase 2: si hay certificación vigente y ningún nodo sano resulta elegible,
     # NO se delega a ciegas — se falla con código propio para que el orquestador
     # caiga inmediatamente a Kokoro local.
@@ -343,6 +354,9 @@ def delegar(bloques: list, voice_config: dict, video_id=None, out_dir: str = "."
     last_diag: dict = {}
     last_error = "sin resultado"
     rid = ""
+    # Fase 3: nodos que fallan en ESTE job se excluyen de sus siguientes intentos
+    # (aunque aún no lleguen a cuarentena por fallos acumulados).
+    failed_this_job: set = set()
     for attempt in range(retries + 1):
         rid = f"tts-{int(time.time())}-{os.getpid()}-{video_id or 'v'}"
         base_name = f"narration_{rid}"
@@ -371,27 +385,41 @@ def delegar(bloques: list, voice_config: dict, video_id=None, out_dir: str = "."
         # Elegibilidad re-evaluada por intento: una cuarentena (Fase 3) o una
         # certificación expirada surte efecto sin esperar al siguiente job.
         eligible_now, certified_now = _eligible_tts_nodes()
-        if certified_now is not None:
-            request["allowedNodes"] = eligible_now
-        elif eligible_now:
-            request["allowedNodes"] = eligible_now
+        if certified_now is None and not eligible_now:
+            pass  # legacy: sin allowlist ni certificación → sin restricción
+        else:
+            attempt_allowed = [n for n in eligible_now if n not in failed_this_job]
+            if not attempt_allowed:
+                raise TTSDelegationError(
+                    "all_nodes_failed",
+                    "sin nodos TTS disponibles (degradados/cuarentena/fallidos en este job)",
+                    {"eligible": eligible_now, "failed_this_job": sorted(failed_this_job)},
+                )
+            request["allowedNodes"] = attempt_allowed
         _write_json_atomic(os.path.join(SPOOL_DIR, f"{rid}.json"), request)
 
         job_id, result_dir, est = _buscar_estado(rid, timeout, poll)
         if est and est.get("ok"):
             try:
                 timestamps, cta_incident = _validate_result(est, result_dir, bool(cta_text))
+                health.record_success(str(est.get("node") or ""))
                 return _apply_result(
                     est, result_dir, out_dir, job_id, rid, timestamps, cta_incident
                 )
             except TTSDelegationError as exc:
                 last_code, last_diag, last_error = exc.code, exc.diagnostic, str(exc)
+                node = str(est.get("node") or "")
+                health.record_failure(node, exc.code, str(exc))
+                failed_this_job.add(node)
                 logger.error(
                     "TTS pool resultado INVÁLIDO (rid=%s, job=%s, node=%s): %s",
-                    rid, job_id, (est or {}).get("node"), exc,
+                    rid, job_id, node or "?", exc,
                 )
         elif est:
             last_code = str(est.get("error_code") or "worker_failed")
+            node = str(est.get("node") or "")
+            health.record_failure(node, last_code, str(est.get("error")))
+            failed_this_job.add(node)
             last_diag = {
                 "node": est.get("node"), "image": est.get("image"),
                 "error": est.get("error"),

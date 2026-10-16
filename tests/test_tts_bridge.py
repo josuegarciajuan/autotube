@@ -58,10 +58,12 @@ def _patch_dirs(tmp_path, monkeypatch):
     monkeypatch.setattr(B, "SPOOL_DIR", str(tmp_path / "spool"))
     monkeypatch.setattr(B, "ACK_DIR", str(tmp_path / "spool" / "acks"))
     monkeypatch.setattr(B, "_escribir_ack", lambda *a, **k: None)
-    # Aísla la certificación (Fase 2): por defecto, sin registro → legacy.
+    # Aísla la certificación (Fase 2) y la salud de nodos (Fase 3).
     monkeypatch.setenv("AUTOTUBE_TTS_CERT_FILE", str(tmp_path / "no_cert.json"))
+    monkeypatch.setenv("AUTOTUBE_TTS_HEALTH_FILE", str(tmp_path / "health.json"))
     monkeypatch.delenv("AUTOTUBE_TTS_ALLOWED_NODES", raising=False)
     monkeypatch.delenv("AUTOTUBE_TTS_CERT_TTL_SEC", raising=False)
+    monkeypatch.delenv("AUTOTUBE_TTS_QUARANTINE_AFTER", raising=False)
 
 
 def _write_cert(tmp_path, monkeypatch, nodes, *, ok=True, ttl_hours=24):
@@ -278,6 +280,64 @@ def test_certificacion_expirada_no_certifica(tmp_path, monkeypatch):
     with pytest.raises(B.TTSDelegationError) as exc:
         B.delegar([{"texto": "x"}], {}, out_dir=str(tmp_path / "audio"))
     assert exc.value.code == "no_certified_node"
+
+
+# ── Fase 3: salud y cuarentena ─────────────────────────────────────
+
+def test_nodo_fallido_se_excluye_del_siguiente_intento(tmp_path, monkeypatch):
+    _patch_dirs(tmp_path, monkeypatch)
+    monkeypatch.setenv("AUTOTUBE_TTS_ALLOWED_NODES", "mail,oficina")
+    _write_cert(tmp_path, monkeypatch, ["mail", "oficina"])
+    monkeypatch.setattr(B, "_default_retries", lambda: 1)
+    calls = {"n": 0}
+    seen = []
+
+    def fake(rid, timeout, poll):
+        calls["n"] += 1
+        req = json.loads((tmp_path / "spool" / f"{rid}.json").read_text())
+        seen.append(req.get("allowedNodes"))
+        base = "narration_" + rid
+        rdir = tmp_path / "ret" / base
+        if calls["n"] == 1:
+            return "j1", str(rdir), {"ok": False, "node": "mail",
+                                     "error_code": "container_start_failed", "error": "exit 125"}
+        return "j2", str(rdir), _preparar_resultado(rdir, rid, base)
+
+    monkeypatch.setattr(B, "_buscar_estado", fake)
+    res = B.delegar([{"texto": "x"}], {}, out_dir=str(tmp_path / "audio"))
+    assert res["audio_path"]
+    assert seen[0] == ["mail", "oficina"]         # 1er intento: ambos
+    assert seen[1] == ["oficina"]                 # 2º intento: mail excluido
+    from api.services import tts_node_health as H
+    assert H.state_of("mail") == H.DEGRADED
+
+
+def test_cuarentena_tras_dos_fallos(tmp_path, monkeypatch):
+    _patch_dirs(tmp_path, monkeypatch)
+    from api.services import tts_node_health as H
+    assert H.record_failure("mail", "container_start_failed") == H.DEGRADED
+    assert H.record_failure("mail", "container_start_failed") == H.QUARANTINED
+    assert H.is_available("mail") is False
+    # Un nodo en cuarentena no entra en la elegibilidad aunque esté certificado.
+    monkeypatch.setenv("AUTOTUBE_TTS_ALLOWED_NODES", "mail,oficina")
+    _write_cert(tmp_path, monkeypatch, ["mail", "oficina"])
+    eligible, _ = B._eligible_tts_nodes()
+    assert eligible == ["oficina"]
+
+
+def test_certificacion_reincorpora_nodo_en_cuarentena(tmp_path, monkeypatch):
+    _patch_dirs(tmp_path, monkeypatch)
+    from api.services import tts_node_health as H
+    H.record_failure("mail", "x")
+    H.record_failure("mail", "x")
+    assert H.state_of("mail") == H.QUARANTINED
+    monkeypatch.setenv("AUTOTUBE_TTS_ALLOWED_NODES", "mail")
+    _write_cert(tmp_path, monkeypatch, ["mail"])
+    # La reincorporación ocurre al inicio del job, no en la consulta de elegibles.
+    H.reconcile_with_certification({"mail"})
+    eligible, _ = B._eligible_tts_nodes()
+    assert eligible == ["mail"]
+    assert H.state_of("mail") == H.HEALTHY
 
 
 def test_sin_registro_certificacion_es_legacy(tmp_path, monkeypatch):
