@@ -1253,6 +1253,12 @@ class MediaFetcher:
         _ai_scene_secs = max(180, 45 + _sd_steps * 35)  # 8 steps → 325s; 20 → 745s
         _cb_phase_timeout = max(3600, 600 + n_scenes * 30 + n_ai * _ai_scene_secs)
 
+        # ── Fase 7: modo degradado de presupuesto (por job) ──
+        # Si el presupuesto de media se agota, NO se aborta tirando el trabajo:
+        # se terminan las escenas restantes sin tiers de IA (rápidos: stock),
+        # para no perder vídeos casi completos (p. ej. 97/98 escenas).
+        self._budget_degraded = False
+
         # ── Reset video provider circuit breaker for this job ──
         self._vp_hard_fail.clear()
         self._vp_soft_fail_scenes.clear()
@@ -1425,20 +1431,25 @@ class MediaFetcher:
             # negativo que tira horas de render (vídeo #2651: 112/112 escenas y
             # timeout a los 19342s sobre un límite de 19150s).
             elapsed = time.time() - _cb_phase_start
-            if elapsed > _cb_phase_timeout and i < n_scenes - 1:
-                error_msg = (
-                    f"CRITICAL: Media phase timeout after {elapsed:.0f}s "
-                    f"(limit={_cb_phase_timeout}s). Processed {i+1}/{n_scenes} scenes. "
-                    f"Aborting to prevent infinite retry loop."
-                )
-                logger.error(error_msg)
-                raise RuntimeError(error_msg)
             if elapsed > _cb_phase_timeout:
-                logger.warning(
-                    "Media phase exceeded budget (%.0fs > %ss) pero ya completó "
-                    "%d/%d escenas — se continúa (no se aborta).",
-                    elapsed, _cb_phase_timeout, i + 1, n_scenes,
-                )
+                if not getattr(self, "_budget_degraded", False):
+                    self._budget_degraded = True
+                    logger.warning(
+                        "Presupuesto de media excedido (%.0fs > %ss) en escena %d/%d — "
+                        "modo degradado: se omiten tiers de IA para TERMINAR el vídeo "
+                        "(en vez de abortar y perder el trabajo hecho).",
+                        elapsed, _cb_phase_timeout, i + 1, n_scenes,
+                    )
+                # Techo DURO: solo se aborta si ni el modo degradado avanza
+                # (evita un bucle infinito real).
+                if elapsed > _cb_phase_timeout * 2 and i < n_scenes - 1:
+                    error_msg = (
+                        f"CRITICAL: Media phase timeout after {elapsed:.0f}s "
+                        f"(hard limit={_cb_phase_timeout * 2}s). Processed {i+1}/{n_scenes} scenes. "
+                        f"Aborting to prevent infinite retry loop."
+                    )
+                    logger.error(error_msg)
+                    raise RuntimeError(error_msg)
 
             # Rate limiting
             if i < n_scenes - 1:
@@ -2483,7 +2494,11 @@ class MediaFetcher:
                     }
                     return asset, ai_used, quality_info
 
-            elif tier == "ai_image" and self._ai_image_primary:
+            elif (tier == "ai_image" and self._ai_image_primary
+                  and not getattr(self, "_budget_degraded", False)):
+                # Fase 7: en modo degradado se OMITE la IA (Local SD ~300s/imagen)
+                # para que las escenas restantes resuelvan con stock y el vídeo
+                # termine en tiempo acotado.
                 asset = self._try_ai_image_chain(scene, scene_idx, total_scenes)
                 if asset:
                     return asset, ai_used, quality_info
