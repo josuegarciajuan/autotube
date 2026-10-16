@@ -82,3 +82,29 @@ def test_tts_fallback_flag_off_variantes(monkeypatch):
             PipelineOrchestrator._tts_delegado(
                 _FakeSelf(), {"id": 1}, [{"texto": "x"}], 0.0,
             )
+
+
+def test_diagnostico_clasificado_se_captura_en_fallback(monkeypatch):
+    """Fase 4: el fallo del pool deja código+nodo para el error del worker."""
+    from api.services.tts_bridge import TTSDelegationError
+
+    monkeypatch.setattr(tts_bridge, "modo", lambda: "superserver")
+
+    def _boom(*a, **k):
+        raise TTSDelegationError(
+            "no_certified_node",
+            "certificación vigente sin nodos sanos",
+            {"certified": ["mail"], "configured": []},
+        )
+
+    monkeypatch.setattr(tts_bridge, "delegar", _boom)
+    monkeypatch.delenv("AUTOTUBE_TTS_LOCAL_FALLBACK", raising=False)
+    fake = _FakeSelf()
+
+    out = PipelineOrchestrator._tts_delegado(
+        fake, {"id": 1, "video_id": 9}, [{"texto": "hola"}], 0.0,
+    )
+    assert out is None  # cae a Kokoro local
+    diag = fake._last_tts_delegado_error
+    assert diag["error_code"] == "no_certified_node"
+    assert "certificación" in diag["detail"]
