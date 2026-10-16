@@ -17,15 +17,25 @@ Contrato:
     empuja ese dir a `push/in` y ejecuta `--request /work/push/in/<name>`.
   - Espera `returns/autotube/<jobId>/result/estado.json` con `rid` coincidente.
   - Copia los artefactos a `out_dir` (AUDIO_DIR) y escribe el ACK.
+
+Fase 1 (observabilidad y contrato de resultado):
+  - El estado remoto se **verifica** antes de aplicarse: existencia y tamaño de
+    mp3, JSON de timestamps válido y monótono, y (si el worker lo reporta)
+    `bytes`/`sha256` coincidentes.
+  - Todo fallo se **clasifica** con un `error_code` estructurado y se adjunta el
+    nodo ejecutor, para que el fallback local no dependa de adivinar la causa.
 """
 from __future__ import annotations
 
+import calendar
 import hashlib
 import json
 import logging
 import os
 import shutil
 import time
+
+from api.services import tts_node_health as health
 
 logger = logging.getLogger("autotube.tts_bridge")
 
@@ -34,6 +44,19 @@ SPOOL_DIR = os.environ.get("SS_SPOOL_DIR", "/var/lib/taildeck/spool")
 RETURNS_ROOT = os.environ.get("SS_RETURNS_DIR", "/var/lib/taildeck/returns")
 IN_DIR = os.environ.get("SS_AUTOTUBE_IN", "/var/lib/taildeck/autotube_in")
 ACK_DIR = os.path.join(SPOOL_DIR, "acks")
+
+# Mínimos de validación (los mismos que el worker remoto). Un artefacto por
+# debajo del umbral se considera inválido: nunca se aplica a medias.
+MIN_MP3_BYTES = 4096
+
+
+class TTSDelegationError(RuntimeError):
+    """Fallo clasificado de la delegación TTS (lleva `code` + diagnóstico)."""
+
+    def __init__(self, code: str, message: str, diagnostic: dict | None = None):
+        super().__init__(message)
+        self.code = code
+        self.diagnostic = diagnostic or {}
 
 
 def modo() -> str:
@@ -48,6 +71,14 @@ def modo() -> str:
 def _fingerprint(payload: dict) -> str:
     blob = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return hashlib.sha1(blob).hexdigest()
+
+
+def _sha256(path: str, chunk: int = 1 << 20) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(chunk), b""):
+            h.update(block)
+    return h.hexdigest()
 
 
 def _write_json_atomic(path: str, obj) -> None:
@@ -118,24 +149,214 @@ def _tts_allowed_nodes() -> list:
     return [n.strip() for n in str(raw).split(",") if n.strip()]
 
 
+# ── Certificación funcional de nodos (Fase 2) ──────────────────────
+# El certificador de SuperServer (`scripts/certify-tts-nodes.js`) ejecuta una
+# síntesis REAL por nodo y escribe `AUTOTUBE_TTS_CERT_FILE` (default
+# `/var/lib/taildeck/tts_certification.json`). Aquí solo se CONSUME para
+# restringir `allowedNodes` a nodos certificados recientes: un tag `kokoro` sin
+# certificación vigente no basta.
+DEFAULT_CERT_FILE = "/var/lib/taildeck/tts_certification.json"
+
+
+def _read_certification() -> dict | None:
+    path = os.environ.get("AUTOTUBE_TTS_CERT_FILE", DEFAULT_CERT_FILE)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None  # sin certificación → comportamiento legacy
+
+
+def _certified_nodes(record: dict) -> set | None:
+    """Nodos certificados y vigentes. `None` si no hay registro utilizable."""
+    if not isinstance(record, dict):
+        return None
+    try:
+        ttl_sec = float(os.environ.get("AUTOTUBE_TTS_CERT_TTL_SEC", "")
+                        or (record.get("ttl_hours") or 24) * 3600)
+    except (TypeError, ValueError):
+        ttl_sec = 24 * 3600
+    now = time.time()
+    out: set = set()
+    for name, info in (record.get("nodes") or {}).items():
+        if not isinstance(info, dict) or not info.get("ok"):
+            continue
+        ts = str(info.get("ts") or record.get("ts") or "")
+        try:
+            epoch = calendar.timegm(time.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S"))
+        except (TypeError, ValueError):
+            continue
+        if 0 <= (now - epoch) <= ttl_sec:
+            out.add(name)
+    return out
+
+
+def _eligible_tts_nodes() -> tuple[list, set | None]:
+    """Nodos elegibles = allowlist configurada ∩ certificados vigentes.
+
+    Devuelve `(elegibles, certificados)`. `certificados is None` = sin registro
+    (legacy: solo aplica la allowlist configurada). Si hay registro pero la
+    intersección queda vacía, el llamante debe abstenerse de delegar.
+    """
+    # NOTA: la reconciliación con la certificación (reincorporar nodos) se hace
+    # UNA vez al inicio del job (en `delegar`), NO aquí: hacerlo por intento
+    # borraría los fallos acumulados durante el propio job.
+    certified = _certified_nodes(_read_certification())
+    configured = _tts_allowed_nodes()
+    if certified is None:
+        base = configured
+    elif configured:
+        base = [n for n in configured if n in certified]
+    else:
+        base = sorted(certified)
+    return [n for n in base if health.is_available(n)], certified
+
+
+# ── Verificación de artefactos (Fase 1) ────────────────────────────
+
+def _expected_files(est: dict) -> dict:
+    files = est.get("files")
+    return files if isinstance(files, dict) else {}
+
+
+def _check_file(result_dir: str, name: str, role: str, est: dict, *, min_bytes: int) -> str:
+    """Verifica existencia/tamaño/sha256 de un artefacto. Devuelve su ruta."""
+    path = os.path.join(result_dir, name)
+    if not os.path.exists(path):
+        raise TTSDelegationError(
+            "artifact_missing", f"{role} no existe en el retorno: {name}",
+            {"role": role, "name": name},
+        )
+    size = os.path.getsize(path)
+    if size < min_bytes:
+        raise TTSDelegationError(
+            "artifact_invalid", f"{role} demasiado pequeño ({size} < {min_bytes})",
+            {"role": role, "name": name, "bytes": size},
+        )
+    meta = _expected_files(est).get(role)
+    if isinstance(meta, dict):
+        exp_bytes = meta.get("bytes")
+        if isinstance(exp_bytes, int) and exp_bytes != size:
+            raise TTSDelegationError(
+                "artifact_mismatch",
+                f"{role} bytes no coinciden ({size} != {exp_bytes})",
+                {"role": role, "name": name, "bytes": size, "expected_bytes": exp_bytes},
+            )
+        exp_sha = str(meta.get("sha256") or "")
+        if exp_sha:
+            actual = _sha256(path)
+            if actual != exp_sha:
+                raise TTSDelegationError(
+                    "artifact_mismatch",
+                    f"{role} sha256 no coincide ({actual[:12]} != {exp_sha[:12]})",
+                    {"role": role, "name": name, "sha256": actual, "expected_sha256": exp_sha},
+                )
+    return path
+
+
+def _load_timestamps(ts_path: str) -> list:
+    try:
+        with open(ts_path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise TTSDelegationError("artifact_invalid", f"timestamps ilegible: {exc}") from exc
+    if not isinstance(data, list) or not data:
+        raise TTSDelegationError("artifact_invalid", "timestamps vacío o no es lista")
+    last_end = -1.0
+    for i, ts in enumerate(data):
+        if not isinstance(ts, dict):
+            raise TTSDelegationError("artifact_invalid", f"timestamp[{i}] no es objeto")
+        try:
+            start = float(ts.get("start_ms"))
+            end = float(ts.get("end_ms"))
+        except (TypeError, ValueError):
+            raise TTSDelegationError("artifact_invalid", f"timestamp[{i}] no numérico")
+        if start < 0 or end < start:
+            raise TTSDelegationError(
+                "artifact_invalid", f"timestamp[{i}] inválido (start={start}, end={end})"
+            )
+        if end + 1.0 < last_end:
+            raise TTSDelegationError(
+                "artifact_invalid", f"timestamps no monótonos en [{i}] (end={end} < prev={last_end})"
+            )
+        last_end = max(last_end, end)
+    if last_end <= 0:
+        raise TTSDelegationError("artifact_invalid", "timestamps sin duración")
+    return data
+
+
+def _validate_result(est: dict, result_dir: str, cta_requested: bool) -> tuple[list, str | None]:
+    """Verifica el estado ok del worker. Devuelve (timestamps, incidencia_cta).
+
+    Lanza `TTSDelegationError` si el resultado no es aplicable. La incidencia de
+    CTA es NON-FATAL (paridad con la ruta local): se devuelve como texto.
+    """
+    art = est.get("artefactos")
+    if not isinstance(art, dict):
+        raise TTSDelegationError("artifact_invalid", "estado sin bloque 'artefactos'")
+    mp3 = art.get("mp3")
+    ts = art.get("timestamps")
+    if not mp3 or not ts:
+        raise TTSDelegationError("artifact_invalid", "faltan 'mp3'/'timestamps' en artefactos")
+    _check_file(result_dir, mp3, "mp3", est, min_bytes=MIN_MP3_BYTES)
+    ts_path = _check_file(result_dir, ts, "timestamps", est, min_bytes=1)
+    timestamps = _load_timestamps(ts_path)
+
+    cta = est.get("cta")
+    cta_incident = None
+    if cta_requested:
+        if not isinstance(cta, dict) or not cta.get("mp3"):
+            cta_incident = "cta_missing"
+        else:
+            _check_file(result_dir, cta["mp3"], "cta_mp3", est, min_bytes=MIN_MP3_BYTES)
+            if cta.get("timestamps"):
+                _check_file(result_dir, cta["timestamps"], "cta_timestamps", est, min_bytes=1)
+    return timestamps, cta_incident
+
+
 def delegar(bloques: list, voice_config: dict, video_id=None, out_dir: str = ".",
             cta_text: str | None = None, timeout: float | None = None,
             poll: float = 5.0, retries: int | None = None) -> dict:
-    """Delega la síntesis al pool y aplica el resultado. Devuelve el mismo
-    diccionario que la ruta local de `phase_tts`.
+    """Delega la síntesis al pool y aplica el resultado verificado. Devuelve el
+    mismo diccionario que la ruta local de `phase_tts` (más claves de diagnóstico).
 
-    (fix oct 2026) El timeout se elevó de 1200s a `TTS_POOL_TIMEOUT_SEC`
-    (default 3000s).  Los jobs reales del pool tardan 1600-2350s: con 1200s
-    SIEMPRE expiraban dos veces (2×1200s) antes de caer al fallback local,
-    gastando ~40 min por long-form Kokoro.  Sigue habiendo reintento
-    (`TTS_POOL_RETRIES`, default 1) para jobs realmente muertos, y el fallback
-    local de `orchestrator._tts_delegado` cubre el resto.
+    El timeout (`TTS_POOL_TIMEOUT_SEC`, default 3000s) cubre jobs reales del pool
+    (1600-2350s). Ante fallo de transporte se reintenta (`TTS_POOL_RETRIES`); el
+    fallback local de `orchestrator._tts_delegado` cubre el resto.
+
+    Fase 1: cada intento verifica el resultado antes de aplicarlo y clasifica el
+    error con `TTSDelegationError.code` (`bridge_timeout`, `worker_failed`,
+    `artifact_invalid`, `artifact_missing`, `artifact_mismatch`, …).
     """
     if timeout is None:
         timeout = _default_timeout()
     if retries is None:
         retries = _default_retries()
+
+    # Fase 3: reincorporar nodos en cuarentena que ahora pasan certificación,
+    # UNA sola vez por job (no por intento).
+    health.reconcile_with_certification(_certified_nodes(_read_certification()))
+
+    # Fase 2: si hay certificación vigente y ningún nodo sano resulta elegible,
+    # NO se delega a ciegas — se falla con código propio para que el orquestador
+    # caiga inmediatamente a Kokoro local.
+    eligible, certified = _eligible_tts_nodes()
+    if certified is not None and not eligible:
+        raise TTSDelegationError(
+            "no_certified_node",
+            "certificación TTS vigente pero sin nodos sanos elegibles",
+            {"certified": sorted(certified), "configured": _tts_allowed_nodes()},
+        )
+
     job_id = result_dir = est = None
+    last_code = "bridge_timeout"
+    last_diag: dict = {}
+    last_error = "sin resultado"
+    rid = ""
+    # Fase 3: nodos que fallan en ESTE job se excluyen de sus siguientes intentos
+    # (aunque aún no lleguen a cuarentena por fallos acumulados).
+    failed_this_job: set = set()
     for attempt in range(retries + 1):
         rid = f"tts-{int(time.time())}-{os.getpid()}-{video_id or 'v'}"
         base_name = f"narration_{rid}"
@@ -147,9 +368,7 @@ def delegar(bloques: list, voice_config: dict, video_id=None, out_dir: str = "."
             "cta_text": cta_text or "",
         }
         # Un DIRECTORIO por petición: el adaptador empuja ese dir a push/in y el
-        # worker lee el `request.json` que contiene. Un fichero plano hacía que el
-        # adaptador empujara TODO el IN_DIR y el worker buscara un request.json
-        # inexistente (bug de contrato, jobs mursepju-…/musahgfx-…/musfqiya-…).
+        # worker lee el `request.json` que contiene.
         req_dir = os.path.join(IN_DIR, rid)
         req_file = os.path.join(req_dir, "request.json")
         _write_json_atomic(req_file, payload)
@@ -163,39 +382,96 @@ def delegar(bloques: list, voice_config: dict, video_id=None, out_dir: str = "."
             "fingerprint": _fingerprint({"bloques": bloques, "voice_config": voice_config,
                                          "cta_text": cta_text or ""}),
         }
-        allowed_nodes = _tts_allowed_nodes()
-        if allowed_nodes:
-            request["allowedNodes"] = allowed_nodes
+        # Elegibilidad re-evaluada por intento: una cuarentena (Fase 3) o una
+        # certificación expirada surte efecto sin esperar al siguiente job.
+        eligible_now, certified_now = _eligible_tts_nodes()
+        if certified_now is None and not eligible_now:
+            pass  # legacy: sin allowlist ni certificación → sin restricción
+        else:
+            attempt_allowed = [n for n in eligible_now if n not in failed_this_job]
+            if not attempt_allowed:
+                raise TTSDelegationError(
+                    "all_nodes_failed",
+                    "sin nodos TTS disponibles (degradados/cuarentena/fallidos en este job)",
+                    {"eligible": eligible_now, "failed_this_job": sorted(failed_this_job)},
+                )
+            request["allowedNodes"] = attempt_allowed
         _write_json_atomic(os.path.join(SPOOL_DIR, f"{rid}.json"), request)
 
         job_id, result_dir, est = _buscar_estado(rid, timeout, poll)
         if est and est.get("ok"):
-            break
-        logger.warning(
-            "TTS pool sin resultado ok (intento %d/%d, rid=%s, job=%s): %s",
-            attempt + 1, retries + 1, rid, job_id, est,
-        )
-    if not est or not est.get("ok"):
-        raise RuntimeError(
-            f"TTS delegado sin resultado ok (rid={rid}, job={job_id}): {est}"
-        )
+            try:
+                timestamps, cta_incident = _validate_result(est, result_dir, bool(cta_text))
+                health.record_success(str(est.get("node") or ""))
+                return _apply_result(
+                    est, result_dir, out_dir, job_id, rid, timestamps, cta_incident
+                )
+            except TTSDelegationError as exc:
+                last_code, last_diag, last_error = exc.code, exc.diagnostic, str(exc)
+                node = str(est.get("node") or "")
+                health.record_failure(node, exc.code, str(exc))
+                failed_this_job.add(node)
+                logger.error(
+                    "TTS pool resultado INVÁLIDO (rid=%s, job=%s, node=%s): %s",
+                    rid, job_id, node or "?", exc,
+                )
+        elif est:
+            last_code = str(est.get("error_code") or "worker_failed")
+            node = str(est.get("node") or "")
+            health.record_failure(node, last_code, str(est.get("error")))
+            failed_this_job.add(node)
+            last_diag = {
+                "node": est.get("node"), "image": est.get("image"),
+                "error": est.get("error"),
+            }
+            last_error = f"worker falló ({last_code}): {est.get('error')}"
+            logger.warning(
+                "TTS pool sin resultado ok (intento %d/%d, rid=%s, job=%s, node=%s, code=%s): %s",
+                attempt + 1, retries + 1, rid, job_id, est.get("node"), last_code, est.get("error"),
+            )
+        else:
+            last_code, last_diag = "bridge_timeout", {"timeout_s": timeout}
+            last_error = f"sin estado.json tras {timeout}s (job={job_id})"
+            logger.warning(
+                "TTS pool sin resultado ok (intento %d/%d, rid=%s, job=%s): timeout %ss",
+                attempt + 1, retries + 1, rid, job_id, timeout,
+            )
+    raise TTSDelegationError(
+        last_code,
+        f"TTS delegado falló (rid={rid}, job={job_id}): {last_error}",
+        {"rid": rid, "job_id": job_id, **last_diag},
+    )
 
+
+def _apply_result(est: dict, result_dir: str, out_dir: str, job_id, rid: str,
+                  timestamps: list, cta_incident: str | None) -> dict:
+    """Copia los artefactos verificados a `out_dir` y devuelve el dict de fase."""
     os.makedirs(out_dir, exist_ok=True)
     art = est.get("artefactos") or {}
     audio_path = _copy(result_dir, out_dir, art["mp3"])
     ts_path = _copy(result_dir, out_dir, art["timestamps"])
     if art.get("srt"):
         _copy(result_dir, out_dir, art["srt"])
-    with open(ts_path, encoding="utf-8") as fh:
-        timestamps = json.load(fh)
 
     cta_audio_path = None
     cta = est.get("cta")
-    if cta:
+    if isinstance(cta, dict) and cta.get("mp3"):
         cta_audio_path = _copy(result_dir, out_dir, cta["mp3"])
-        _copy(result_dir, out_dir, cta["timestamps"])
+        if cta.get("timestamps"):
+            _copy(result_dir, out_dir, cta["timestamps"])
 
     if job_id:
         _escribir_ack(job_id)
-    return {"audio_path": audio_path, "timestamps_path": ts_path,
-            "timestamps": timestamps, "cta_audio_path": cta_audio_path, "rid": rid}
+    return {
+        "audio_path": audio_path,
+        "timestamps_path": ts_path,
+        "timestamps": timestamps,
+        "cta_audio_path": cta_audio_path,
+        "rid": rid,
+        # ── Fase 1: diagnóstico (aditivo; `phase_tts` lo ignora) ──
+        "node": est.get("node"),
+        "image": est.get("image"),
+        "elapsed_s": est.get("elapsed_s"),
+        "duration_s": est.get("duration_s"),
+        "cta_incident": cta_incident,
+    }

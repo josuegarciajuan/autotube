@@ -56,6 +56,31 @@ def _run_async_with_timeout(coro, timeout: float = 120.0):
         future.cancel()
         raise TimeoutError(f"TTS operation timed out after {timeout}s")
 
+class TTSEngineAbort(RuntimeError):
+    """Fallo del PROVEEDOR completo (no de un segmento): aborta la síntesis.
+
+    Un 401/403 de edge-tts (Microsoft rechaza el handshake) no se arregla
+    reintentando cada segmento: se propaga para que el orquestador cambie a
+    Kokoro local de inmediato, en vez de recorrer cientos de segmentos fallidos.
+    """
+
+
+# Marcadores de rechazo del proveedor edge-tts (no recuperables reintentando).
+_PROVIDER_REJECTION_MARKERS = (
+    "invalid response status",
+    "401",
+    "403",
+    "unauthorized",
+    "forbidden",
+    "sign in to confirm",
+)
+
+
+def _looks_like_provider_rejection(exc: BaseException | str) -> bool:
+    msg = str(exc).lower()
+    return any(m in msg for m in _PROVIDER_REJECTION_MARKERS)
+
+
 TICK_TO_MS = 10000  # 100-nanosecond ticks to milliseconds
 
 
@@ -131,13 +156,23 @@ class TTSEngine:
         volume: Optional[str],
         timeout: int,
     ) -> tuple[list[bytes], list[dict]]:
-        """Synthesize one segment, retrying once with default prosody."""
+        """Synthesize one segment, retrying once with default prosody.
+
+        Un rechazo del proveedor (401/403/handshake) NO se reintenta por segmento:
+        se propaga `TTSEngineAbort` para que el orquestador cambie de motor ya.
+        """
         try:
             return _run_async_with_timeout(
                 self._stream_sync(clean_text, rate=rate, pitch=pitch, volume=volume),
                 timeout=timeout,
             )
         except Exception as exc:
+            if _looks_like_provider_rejection(exc):
+                logger.error(
+                    "edge-tts rechazó el proveedor completo (%s) — abortando la "
+                    "síntesis para pasar a Kokoro local", exc,
+                )
+                raise TTSEngineAbort(str(exc)) from exc
             logger.error("Segment synthesis failed: %s — retrying with defaults", exc)
             try:
                 return _run_async_with_timeout(
@@ -145,6 +180,12 @@ class TTSEngine:
                     timeout=timeout,
                 )
             except Exception as exc2:
+                if _looks_like_provider_rejection(exc2):
+                    logger.error(
+                        "edge-tts rechazó el proveedor completo (%s) — abortando la "
+                        "síntesis para pasar a Kokoro local", exc2,
+                    )
+                    raise TTSEngineAbort(str(exc2)) from exc2
                 logger.error("Segment retry also failed: %s — skipping", exc2)
                 return [], []
 
