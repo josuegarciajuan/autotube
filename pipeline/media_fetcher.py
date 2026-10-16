@@ -1288,6 +1288,11 @@ class MediaFetcher:
             target_dur = scene.get("duration", 5)
             is_video_priority = i in video_scenes
             is_stock_image_priority = i in stock_image_scenes
+            # Clasificación ORIGINAL (antes de que el gobernador de RAM o el
+            # "dynamic video stop" la muten): gobierna el orden de tiers de
+            # imagen cuando se prohíbe vídeo.
+            _scene_tier = ("video" if is_video_priority
+                           else "stock" if is_stock_image_priority else "ai")
 
             # ── RAM safety: hard-cap video assets ────────────────
             _force_images = False
@@ -1334,6 +1339,7 @@ class MediaFetcher:
                 ai_enabled=ai_enabled,
                 force_images=_force_images,
                 is_stock_image_priority=is_stock_image_priority,
+                scene_tier=_scene_tier,
             )
 
             # ── Score video quality for dynamic control ───────────
@@ -2437,6 +2443,7 @@ class MediaFetcher:
         ai_enabled: bool,
         force_images: bool = False,
         is_stock_image_priority: bool = False,
+        scene_tier: str | None = None,
     ) -> tuple[dict | None, int, dict]:
         """Fetch a media asset for *scene* using the 5-tier chain.
 
@@ -2461,6 +2468,13 @@ class MediaFetcher:
           TIER 4 → Pollo AI (credits, last resort)
           TIER 5 → Placeholder
 
+        **``force_images``** (el gobernador de RAM alcanzó el cap de vídeo): NO
+        se usa ningún tier de vídeo, pero tampoco se pone IA primero por
+        defecto. ``scene_tier`` decide: las escenas que no eran AI-tier resuelven
+        con stock de imagen (segundos) y solo las AI-tier conservan IA primero.
+        Sin esto, ~110 escenas de stock se convertían en Stable Diffusion local
+        (minutos cada una) al agotarse el cap de vídeo.
+
         Returns (asset, ai_used_updated, quality_info).
 
         *quality_info* is a dict with ``score``, ``provider``, ``resolution``,
@@ -2473,9 +2487,20 @@ class MediaFetcher:
         query_attempt = 0
 
         # ── Choose tiers based on scene type ─────────────────
-        if is_video_priority and not force_images:
+        if force_images:
+            # El gobernador de RAM prohíbe más VÍDEO; NO implica "IA primero".
+            # Antes, toda escena con `force_images` caía al `else` → IA primero, y
+            # en el incidente oct 2026 eso convirtió ~110 escenas de stock en
+            # generaciones locales de Stable Diffusion (minutos por imagen),
+            # alargando el vídeo ~10 h. Las escenas que no eran AI-tier resuelven
+            # con stock de imagen en segundos.
+            if scene_tier == "ai":
+                tiers = ["ai_image", "stock_image", "pollo_ai", "placeholder"]
+            else:
+                tiers = ["stock_image", "ai_image", "pollo_ai", "placeholder"]
+        elif is_video_priority:
             tiers = ["stock_video", "ai_image", "stock_image", "pollo_ai", "placeholder"]
-        elif is_stock_image_priority and not force_images:
+        elif is_stock_image_priority:
             tiers = ["stock_image", "ai_image", "stock_video", "pollo_ai", "placeholder"]
         else:
             tiers = ["ai_image", "stock_image", "stock_video", "pollo_ai", "placeholder"]
