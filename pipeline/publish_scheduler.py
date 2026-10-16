@@ -1753,15 +1753,28 @@ def repack_channel_publish_times(
             slot = snapped if snapped > min_slot else min_slot
 
         # ── Idempotencia (ago 2026): preservar targets ya correctos ──
-        # Solo se preserva si el target existente es futuro, cae en el MISMO día
-        # local que el slot calculado, respeta el gap respecto al último slot y
-        # NO colisiona con ningún slot ya asignado en este walk. Si colisiona,
-        # se descarta la preservación y se usa el slot único calculado
-        # (requires_yt_update=True), para que el repack NUNCA congele una
-        # colisión de misma hora (fix ESR/canal4).
+        # Se preserva si el target existente es futuro, respeta el gap respecto
+        # al último slot asignado, NO colisiona con ningún slot ya asignado en
+        # este walk y NO excede el presupuesto diario de su día local. Si no,
+        # se usa el slot único calculado (`requires_yt_update=True`), para que el
+        # repack NUNCA congele una colisión de misma hora (fix ESR/canal4).
+        #
+        # Fix oct 2026 (oscilación publicar/posponer): antes se exigía que el
+        # target existente cayera en el MISMO día local que el slot calculado.
+        # Cuando `publish_coverage.remediate_today_public_deficit` adelantaba un
+        # vídeo a HOY (a una hora fuera de franja pico), el siguiente repack
+        # calculaba un slot para MAÑANA → días distintos → descartaba la
+        # preservación y devolvía el vídeo a mañana. Diez minutos después el
+        # catch-up lo volvía a adelantar: ~113 y 113 ciclos/día sin publicar
+        # jamás (el target huía siempre hacia delante). Ahora un target futuro
+        # válido se conserva con independencia del día que calcule el walk.
         preserved = False
-        if (old_dt is not None and old_dt > now_utc
-                and old_dt.astimezone(tz).date() == slot.astimezone(tz).date()):
+        if old_dt is not None and old_dt > now_utc and old_dt <= safety_limit:
+            _old_local_date = old_dt.astimezone(tz).date()
+            day_cap_ok = (
+                not counts_toward_cap
+                or day_used.get(_old_local_date, 0) < max_per_day
+            )
             min_public_ok = True
             if status in ("awaiting_upload", "ready") and up_raw:
                 up_dt2 = _parse_target_public_at(str(up_raw), tz_str)
@@ -1775,7 +1788,7 @@ def repack_channel_publish_times(
                 abs((old_dt - a).total_seconds()) >= gap_hours * 3600
                 for a in assigned_slots
             )
-            if min_public_ok and gap_ok and unique_ok:
+            if min_public_ok and gap_ok and unique_ok and day_cap_ok:
                 slot = old_dt
                 preserved = True
 
@@ -1811,6 +1824,10 @@ def repack_channel_publish_times(
                 slug, safety_ahead_hours, video_id,
             )
             slot = safety_limit
+            # El recorte invalida la preservación: si se dejara `preserved=True`
+            # el plan marcaría `requires_yt_update=False` con un target distinto
+            # al real de YouTube → DB y YouTube quedarían desincronizados.
+            preserved = False
 
         requires_yt = status in ("uploaded_private", "warming", "scheduled") and bool(yt_id)
 

@@ -154,3 +154,103 @@ def test_safety_reserve_pct_reduces_budget(monkeypatch):
 
     monkeypatch.setattr(s, "YT_PROJECT_SAFETY_RESERVE_PCT", 10.0)
     assert s.get_project_automatic_budget_units("p") == 8600
+
+
+# ── Atribución de cuota: nunca NULL en channel_slug (oct 2026) ──────
+#
+# Incidente: `YouTubeUploader(slug)` no rellenaba channel_slug, así que
+# `track_quota(None, ...)` insertaba NULL en `yt_quota_log.channel_slug`
+# (NOT NULL) → el INSERT del lote entero fallaba y se re-encolaba sin fin
+# ("NOT NULL constraint failed: yt_quota_log.channel_slug").
+
+import sqlite3  # noqa: E402
+
+
+class _QuotaDbStub:
+    """Stub mínimo de ExtendedDatabase que sirve una DB temporal."""
+
+    def __init__(self, path):
+        self.path = path
+
+    def _connect(self):
+        return sqlite3.connect(self.path)
+
+
+def _quota_temp_db(tmp_path):
+    db_path = tmp_path / "quota.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """CREATE TABLE yt_quota_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            channel_slug TEXT NOT NULL DEFAULT 'unknown',
+            operation TEXT NOT NULL,
+            units INTEGER NOT NULL DEFAULT 0,
+            yt_id TEXT DEFAULT '',
+            success INTEGER NOT NULL DEFAULT 1,
+            error TEXT DEFAULT '',
+            caller TEXT DEFAULT '')"""
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def _reset_quota_buffer(monkeypatch):
+    from api.services import quota_tracker as qt
+    import time as _time
+    qt._batch_buffer.clear()
+    qt._last_flush = _time.monotonic()  # evita auto-flush en track_quota
+    return qt
+
+
+def test_track_quota_with_none_slug_persists_as_unknown(tmp_path, monkeypatch):
+    db_path = _quota_temp_db(tmp_path)
+    qt = _reset_quota_buffer(monkeypatch)
+    monkeypatch.setattr(
+        "database.db_extended.ExtendedDatabase",
+        lambda *a, **k: _QuotaDbStub(str(db_path)),
+    )
+
+    qt.track_quota(None, "videos.update", 50, yt_id="abc", caller="set_publish_at")
+    qt.flush_quota_log()
+
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute("SELECT channel_slug, operation, units FROM yt_quota_log").fetchall()
+    conn.close()
+    assert rows == [("unknown", "videos.update", 50)], rows
+
+
+def test_flush_persists_valid_rows_when_a_row_is_invalid(tmp_path, monkeypatch):
+    """Una entrada corrupta en el buffer NO debe abortar el lote completo."""
+    db_path = _quota_temp_db(tmp_path)
+    qt = _reset_quota_buffer(monkeypatch)
+    monkeypatch.setattr(
+        "database.db_extended.ExtendedDatabase",
+        lambda *a, **k: _QuotaDbStub(str(db_path)),
+    )
+
+    with qt._batch_lock:
+        qt._batch_buffer.append((None, None, 50, "", 1, "", "legacy"))  # fila inválida
+        qt._batch_buffer.append(("canal5", "videos.update", 50, "yt1", 1, "", "ok"))
+
+    qt.flush_quota_log()
+
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute("SELECT channel_slug, units FROM yt_quota_log ORDER BY id").fetchall()
+    conn.close()
+    assert ("canal5", 50) in rows, f"la fila válida debe persistirse: {rows}"
+    assert all(slug for slug, _ in rows), f"ningún slug puede quedar NULL: {rows}"
+
+
+def test_uploader_quota_slug_falls_back_to_account_name():
+    """`YouTubeUploader(slug)` posicional → atribución de cuota = slug."""
+    u = YouTubeUploader("canal5")
+    assert u.channel_slug is None          # no se altera el comportamiento de auth
+    assert u.quota_slug == "canal5"
+
+    u2 = YouTubeUploader(account_name="canal3", channel_slug="canal3")
+    assert u2.quota_slug == "canal3"
+
+    u3 = YouTubeUploader()
+    assert u3.quota_slug == "default"

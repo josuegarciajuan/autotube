@@ -306,11 +306,32 @@ def remediate_today_public_deficit(db, slug: str, channel_id: int, tz,
             res = uploader.set_publish_at(yt_id, target_iso)
             if not res.get("updated"):
                 raise RuntimeError(f"respuesta inesperada: {res}")
+            # Sincronizar TODAS las representaciones del compromiso (fix oct
+            # 2026): el repack escribe videos.target_public_at,
+            # planned_slots.target_public_at y las acciones `go_public`; si el
+            # catch-up solo tocaba `videos`, la programación quedaba partida y
+            # el siguiente repack no veía coherencia → oscilación.
             with db._connect() as conn:
                 conn.execute(
                     "UPDATE videos SET target_public_at=? WHERE id=?",
                     (target_iso, vid),
                 )
+                try:
+                    conn.execute(
+                        "UPDATE planned_slots SET target_public_at=? WHERE video_id=?",
+                        (target_iso, vid),
+                    )
+                except Exception:
+                    pass
+                try:
+                    conn.execute(
+                        """UPDATE video_lifecycle_actions SET scheduled_for=?
+                           WHERE video_id=? AND action_type='go_public'
+                             AND status='pending'""",
+                        (target_iso, vid),
+                    )
+                except Exception:
+                    pass
                 conn.commit()
             out["forced"] += 1
             logger.info(
@@ -451,6 +472,26 @@ def ensure_daily_publish_coverage(db=None, horizon_days: int = 2,
             else:
                 _resolve_dry_alert(db, slug, channel_id=ch_id)
 
+            # ── Cumplimiento diario PRIMERO: forzar warming para cubrir HOY ──
+            # Orden corregido (oct 2026): el repack debe ejecutarse DESPUÉS del
+            # catch-up. Si corre antes, empuja el compromiso a mañana y el
+            # catch-up lo vuelve a traer a hoy; diez minutos después el repack
+            # lo empuja otra vez → ciclo infinito sin publicar nunca. Con el
+            # catch-up primero, el repack ve el target de HOY y lo PRESERVA.
+            today_info = {"published": 0, "committed": 0, "need": 0, "forced": 0,
+                          "reason": "skip"}
+            try:
+                today_info = remediate_today_public_deficit(
+                    db, slug, ch_id, tz, n,
+                )
+                if today_info.get("forced"):
+                    result["public_catchup_forced"] = (
+                        result.get("public_catchup_forced", 0)
+                        + int(today_info["forced"])
+                    )
+            except Exception as exc:
+                logger.debug("[%s] today public catch-up skipped: %s", slug, exc)
+
             # ── Enforcer de cobertura: alerta + repack con gate de cuota ──
             # Si un día próximo queda por debajo del cap configurado y hay cola
             # pendiente, se dispara el repack del canal (apply_publish_repack con
@@ -476,21 +517,6 @@ def ensure_daily_publish_coverage(db=None, horizon_days: int = 2,
                     reason += " — alerta generada"
             else:
                 _resolve_deficit_alert(db, slug, channel_id=ch_id)
-
-            # ── Cumplimiento diario: forzar warming para cubrir HOY ──
-            today_info = {"published": 0, "committed": 0, "need": 0, "forced": 0,
-                          "reason": "skip"}
-            try:
-                today_info = remediate_today_public_deficit(
-                    db, slug, ch_id, tz, n,
-                )
-                if today_info.get("forced"):
-                    result["public_catchup_forced"] = (
-                        result.get("public_catchup_forced", 0)
-                        + int(today_info["forced"])
-                    )
-            except Exception as exc:
-                logger.debug("[%s] today public catch-up skipped: %s", slug, exc)
 
             result["channels"][slug] = {
                 "pending": len(pending),
