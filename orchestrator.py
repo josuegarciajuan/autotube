@@ -1953,6 +1953,29 @@ class PipelineOrchestrator:
                 titulo_options = titulo_raw or ["Historia Impactante"]
             titulo_selected = titulo_options[0] if titulo_options else "Historia Impactante"
 
+            # ── Fase 6: prohibir el render sin sus dependencias ──
+            # Un guion por bloques NO debe caer nunca al ensamblador legacy
+            # (espera marcadores [ESCENA:] inexistentes). Si falta audio/media,
+            # se falla con causa explícita en vez de un error tardío y opaco.
+            if bloques and (not isinstance(audio_data, dict)
+                            or not audio_data.get("timestamps")
+                            or not audio_data.get("audio_path")):
+                logger.error(
+                    "[%s] Render abortado: guion por bloques sin audio/timestamps",
+                    self.canal,
+                )
+                _safe_log_error(self.db, self.canal, "video",
+                                "render_blocked_missing_audio")
+                return None
+            if bloques and not media_assets:
+                logger.error(
+                    "[%s] Render abortado: guion por bloques sin assets de media",
+                    self.canal,
+                )
+                _safe_log_error(self.db, self.canal, "video",
+                                "render_blocked_missing_media")
+                return None
+
             if bloques and media_assets:
                 # ── v2: block-based assembly ─────────────────
                 self._emit_progress(60, "video", f"Renderizando video con {len(bloques)} bloques (MoviePy)...")

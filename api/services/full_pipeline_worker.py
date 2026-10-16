@@ -856,6 +856,26 @@ def _load_checkpoint(video_id: int, db) -> tuple[dict, str, int]:
     return cp, last_phase, last_idx
 
 
+def _required_resume_idx(start_idx: int, *, has_audio: bool, has_media: bool,
+                         has_video: bool) -> int | None:
+    """Índice de fase mínima desde la que se puede reanudar con seguridad.
+
+    Cadena de dependencias: script → tts(audio) → media(assets) → video.
+    Devuelve el índice de la PRIMERA fase cuya dependencia falta (invalidando
+    todas las posteriores), o ``None`` si el checkpoint es coherente.
+
+    Evita el fallo clásico: reanudar en 'video' con el audio o los assets ya
+    borrados → render sin insumos → error tardío.
+    """
+    if _phase_index("tts") < start_idx and not has_audio:
+        return _phase_index("tts")
+    if _phase_index("media") < start_idx and not has_media:
+        return _phase_index("media")
+    if _phase_index("video") < start_idx and not has_video:
+        return _phase_index("video")
+    return None
+
+
 def _save_checkpoint(video_id: int, phase: str, data: dict, db) -> bool:
     """Save checkpoint data for a phase to the video record. Merges with existing."""
     v = db.get_video(video_id)
@@ -1129,6 +1149,30 @@ def run_job(
             video_data = None
     
     metadata = checkpoint.get("metadata")
+
+    # ── 9b. Validate the checkpoint dependency graph (Fase 6) ──
+    # Un checkpoint puede estar "marcado" hasta una fase cuyos insumos ya no
+    # existen (audio borrado, media purgada por una limpieza). Reanudar en esa
+    # fase produce un render sin insumos → fallo tardío y opaco. Aquí se retrocede
+    # a la PRIMERA fase cuya dependencia falta, invalidando las posteriores.
+    #
+    # Cadena de dependencias: script → tts(audio) → media(assets+scene_ranges) → video.
+    _required_idx = _required_resume_idx(
+        start_idx,
+        has_audio=audio_data is not None,
+        has_media=media_assets is not None,
+        has_video=video_data is not None,
+    )
+    if _required_idx is not None and _required_idx < start_idx:
+        logger.warning(
+            "Checkpoint inconsistente: dependencias ausentes — se retrocede de "
+            "'%s' (idx=%d) a '%s' (idx=%d)",
+            last_phase or start_phase, start_idx,
+            _PHASE_ORDER[_required_idx], _required_idx,
+        )
+        start_idx = _required_idx
+        start_phase = _PHASE_ORDER[start_idx]
+        db.update_video(video_id, progress_phase=f"resume_{start_phase}")
 
     # ── 10. Run the pipeline ──────────────────────────────────
     success = False
