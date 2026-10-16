@@ -1679,14 +1679,27 @@ class PipelineOrchestrator:
                 cta_text=cta_text or None,
             )
         except Exception as e:  # noqa: BLE001
+            # Fase 1: diagnóstico estructurado (código de error + nodo ejecutor)
+            # para que un fallo del pool no se confunda con un fallo local.
+            code = getattr(e, "code", "delegation_failed")
+            diag = getattr(e, "diagnostic", {}) or {}
+            self._last_tts_delegado_error = {
+                "error_code": code,
+                "node": diag.get("node"),
+                "image": diag.get("image"),
+                "rid": diag.get("rid"),
+                "detail": str(e)[:300],
+            }
             logger.warning(
-                "[%s] TTS delegado al pool falló (%s: %s)",
-                self.canal, type(e).__name__, e,
+                "[%s] TTS delegado al pool falló (%s: %s) [code=%s, node=%s]",
+                self.canal, type(e).__name__, e, code, diag.get("node") or "?",
             )
             if _tts_local_fallback_enabled():
                 # El puente no aplicó artefactos (solo lo hace con estado.json
                 # ok) → generar en local no duplica audio. Devolver None deja que
-                # phase_tts siga por la ruta local Kokoro.
+                # phase_tts siga por la ruta local Kokoro. El camino de fallback
+                # NO toca la DB: si el TTS local también falla, el worker registra
+                # el error (ya enriquecido con este diagnóstico) al marcar el job.
                 logger.warning(
                     "[%s] TTS delegado no disponible; generando en local",
                     self.canal,
@@ -1695,7 +1708,10 @@ class PipelineOrchestrator:
                     31, "tts", "TTS delegado no disponible; generando en local"
                 )
                 return None
-            _safe_log_error(self.db, self.canal, "tts", f"pool: {e}")
+            _safe_log_error(
+                self.db, self.canal, "tts",
+                f"pool: code={code} node={diag.get('node') or '?'} rid={diag.get('rid') or '?'} :: {e}",
+            )
             raise
 
         timestamps = res.get("timestamps") or []

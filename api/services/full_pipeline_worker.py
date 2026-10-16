@@ -1366,6 +1366,14 @@ def run_job(
             audio_data = orch.phase_tts(script, job_id=job_id)
             if not audio_data:
                 error_msg = "Fallo la generacion de voz (TTS)"
+                # Fase 1: adjuntar el diagnóstico del pool si la delegación falló
+                # antes de caer a la ruta local (código de error + nodo ejecutor).
+                _tts_diag = getattr(orch, "_last_tts_delegado_error", None)
+                if _tts_diag:
+                    error_msg = (
+                        f"{error_msg} [pool {_tts_diag.get('error_code')}"
+                        f" node={_tts_diag.get('node') or '?'}] {_tts_diag.get('detail') or ''}"
+                    )[:500]
                 logger.error(error_msg)
                 db.update_job(job_id, status="failed", error_msg=error_msg[:500])
                 db.update_video(video_id, status="error", progress_phase="tts",
