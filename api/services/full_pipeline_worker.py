@@ -1157,22 +1157,25 @@ def run_job(
     # a la PRIMERA fase cuya dependencia falta, invalidando las posteriores.
     #
     # Cadena de dependencias: script → tts(audio) → media(assets+scene_ranges) → video.
-    _required_idx = _required_resume_idx(
-        start_idx,
-        has_audio=audio_data is not None,
-        has_media=media_assets is not None,
-        has_video=video_data is not None,
-    )
-    if _required_idx is not None and _required_idx < start_idx:
-        logger.warning(
-            "Checkpoint inconsistente: dependencias ausentes — se retrocede de "
-            "'%s' (idx=%d) a '%s' (idx=%d)",
-            last_phase or start_phase, start_idx,
-            _PHASE_ORDER[_required_idx], _required_idx,
+    # `upload_only` salta TODA la generación a propósito (el vídeo ya existe):
+    # nunca debe retroceder a tts/media aunque el checkpoint no traiga esos datos.
+    if action != "upload_only":
+        _required_idx = _required_resume_idx(
+            start_idx,
+            has_audio=audio_data is not None,
+            has_media=media_assets is not None,
+            has_video=video_data is not None,
         )
-        start_idx = _required_idx
-        start_phase = _PHASE_ORDER[start_idx]
-        db.update_video(video_id, progress_phase=f"resume_{start_phase}")
+        if _required_idx is not None and _required_idx < start_idx:
+            logger.warning(
+                "Checkpoint inconsistente: dependencias ausentes — se retrocede de "
+                "'%s' (idx=%d) a '%s' (idx=%d)",
+                last_phase or start_phase, start_idx,
+                _PHASE_ORDER[_required_idx], _required_idx,
+            )
+            start_idx = _required_idx
+            start_phase = _PHASE_ORDER[start_idx]
+            db.update_video(video_id, progress_phase=f"resume_{start_phase}")
 
     # ── 10. Run the pipeline ──────────────────────────────────
     success = False
