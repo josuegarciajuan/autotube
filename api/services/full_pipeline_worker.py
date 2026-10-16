@@ -2069,7 +2069,13 @@ def run_job(
                 logger.info("[%s] Persisting yt_video_id=%s for video #%d (status=%s)",
                              canal, yt_video_id, video_id, worker_status)
                 try:
-                    db.mark_video_uploaded(video_id, yt_video_id, yt_url, status=worker_status)
+                    db.mark_video_uploaded(
+                        video_id, yt_video_id, yt_url, status=worker_status,
+                        thumbnail_verified=(
+                            0 if getattr(orch, "last_thumbnail_applied", None) is None
+                            else int(bool(orch.last_thumbnail_applied))
+                        ),
+                    )
                     try:
                         from api.services.editorial_reviews import schedule_video_reviews
                         schedule_video_reviews(db, video_id)

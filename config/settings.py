@@ -617,7 +617,12 @@ AB_TEST_MIN_IMPRESSIONS_POST_CHANGE = int(os.getenv("AB_TEST_MIN_IMPRESSIONS_POS
 # ── Quota-consuming background services (ago 2026) ─────────────
 # Desactivados por defecto: solo subidas + playlist + stats manual
 # consumen quota de YouTube Data API. Reversibles desde .env.
-THUMBNAIL_VERIFY_ENABLED = os.getenv("THUMBNAIL_VERIFY_ENABLED", "false").lower() == "true"
+#
+# THUMBNAIL_VERIFY_ENABLED: ON por defecto (oct 2026). La verificación es
+# 0-cuota cuando la miniatura ya está aplicada (descarga el maxres y compara);
+# solo gasta 50 uds cuando realmente falta. Antes estaba OFF porque el chequeo
+# viejo (thumbnails().list(), inexistente) re-subía siempre → quemaba cuota.
+THUMBNAIL_VERIFY_ENABLED = os.getenv("THUMBNAIL_VERIFY_ENABLED", "true").lower() == "true"
 UPLOAD_HEALTH_CHECKER_ENABLED = os.getenv("UPLOAD_HEALTH_CHECKER_ENABLED", "false").lower() == "true"
 
 # ── Logging ────────────────────────────────────────────────────

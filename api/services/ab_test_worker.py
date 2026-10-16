@@ -762,16 +762,25 @@ class ABTestWorker:
                 strategy = ""
                 if variant_strategies and 1 <= new_variant <= len(variant_strategies):
                     strategy = str(variant_strategies[new_variant - 1] or "")
-                if strategy and video_id:
+                # Keep the DB's active thumbnail in sync so the panel, download
+                # endpoint and the thumbnail verifier all point at the live image.
+                if video_id:
                     try:
                         conn = self._get_db_conn()
-                        conn.execute(
-                            "UPDATE videos SET thumbnail_variant_strategy = ? WHERE id = ?",
-                            (strategy, video_id),
-                        )
+                        if strategy:
+                            conn.execute(
+                                "UPDATE videos SET thumbnail_path = ?, "
+                                "thumbnail_variant_strategy = ? WHERE id = ?",
+                                (str(new_path), strategy, video_id),
+                            )
+                        else:
+                            conn.execute(
+                                "UPDATE videos SET thumbnail_path = ? WHERE id = ?",
+                                (str(new_path), video_id),
+                            )
                         conn.commit()
                     except Exception as up_exc:
-                        logger.debug("[AB] could not update variant strategy: %s", up_exc)
+                        logger.debug("[AB] could not update active thumbnail: %s", up_exc)
             else:
                 logger.error("[AB] YT auth failed for channel %s — cannot swap thumbnail", channel_slug)
                 if video_id and channel_id:

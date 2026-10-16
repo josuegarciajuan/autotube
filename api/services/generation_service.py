@@ -2145,7 +2145,13 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
                 yt_url = f"https://youtube.com/watch?v={video_yt_id}"
                 pub_mode = get_channel_config(canal).PUBLISH_MODE
                 upload_status = "uploaded_private" if pub_mode == "scheduled" else "uploaded"
-                db.mark_video_uploaded(video_id, video_yt_id, yt_url, status=upload_status)
+                db.mark_video_uploaded(
+                    video_id, video_yt_id, yt_url, status=upload_status,
+                    thumbnail_verified=(
+                        0 if getattr(orch, "last_thumbnail_applied", None) is None
+                        else int(bool(orch.last_thumbnail_applied))
+                    ),
+                )
                 try:
                     from api.services.editorial_reviews import schedule_video_reviews
                     schedule_video_reviews(db, video_id)
@@ -2475,7 +2481,13 @@ async def start_upload_job(job_id: int, video_id: int, force_immediate: bool = F
             if force_immediate:
                 # ── Manual immediate PUBLIC upload: mark published NOW ──
                 # No scheduling: clear target/peak, force public + immediate.
-                db.mark_video_uploaded(video_id, video_yt_id, url, status="published")
+                db.mark_video_uploaded(
+                    video_id, video_yt_id, url, status="published",
+                    thumbnail_verified=(
+                        0 if getattr(orch, "last_thumbnail_applied", None) is None
+                        else int(bool(orch.last_thumbnail_applied))
+                    ),
+                )
                 try:
                     with db._connect() as conn:
                         conn.execute(
@@ -2495,7 +2507,13 @@ async def start_upload_job(job_id: int, video_id: int, force_immediate: bool = F
             else:
                 pub_mode = get_channel_config(canal).PUBLISH_MODE
                 upload_status = "uploaded_private" if pub_mode == "scheduled" else "uploaded"
-                db.mark_video_uploaded(video_id, video_yt_id, url, status=upload_status)
+                db.mark_video_uploaded(
+                    video_id, video_yt_id, url, status=upload_status,
+                    thumbnail_verified=(
+                        0 if getattr(orch, "last_thumbnail_applied", None) is None
+                        else int(bool(orch.last_thumbnail_applied))
+                    ),
+                )
                 db.update_video(video_id, progress=100)
             try:
                 from api.services.editorial_reviews import schedule_video_reviews
@@ -2697,7 +2715,13 @@ async def start_upload_job_from_scheduler(job_id: int, video_id: int, channel_id
 
         if yt_video_id:
             yt_url = f"https://youtube.com/watch?v={yt_video_id}"
-            db.mark_video_uploaded(video_id, yt_video_id, yt_url)
+            db.mark_video_uploaded(
+                video_id, yt_video_id, yt_url,
+                thumbnail_verified=(
+                    0 if getattr(orch, "last_thumbnail_applied", None) is None
+                    else int(bool(orch.last_thumbnail_applied))
+                ),
+            )
             # v26: Check PUBLISH_MODE — immediate channels upload as public,
             # so status should be "uploaded" not "uploaded_private".
             pub_mode = get_channel_config(canal).PUBLISH_MODE

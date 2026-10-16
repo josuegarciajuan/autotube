@@ -46,6 +46,13 @@ RETRY_BASE_DELAY = 2  # seconds
 POST_UPLOAD_VERIFY_RETRIES = 4
 POST_UPLOAD_VERIFY_DELAY = 10  # seconds — YouTube processing may take a few secs
 
+# ── Custom-thumbnail verification (anti "200 but not applied") ──
+# `thumbnails().set()` may return 200 while YouTube keeps its auto frame.
+# After setting we download the served maxres thumbnail (0 quota) and compare.
+THUMBNAIL_VERIFY_ATTEMPTS = int(os.getenv("THUMBNAIL_VERIFY_ATTEMPTS", "3"))
+THUMBNAIL_VERIFY_DELAY = int(os.getenv("THUMBNAIL_VERIFY_DELAY", "30"))  # secs between checks
+THUMBNAIL_MATCH_THRESHOLD = float(os.getenv("THUMBNAIL_MATCH_THRESHOLD", "8"))
+
 # Anti-churn de set_publish_at: no volver a llamar videos().update (50 ud) para
 # el MISMO vídeo al MISMO publishAt dentro de esta ventana. El repack/coverage
 # recalcula desde `now` en cada pasada y podía reprogramar una y otra vez el
@@ -1192,12 +1199,39 @@ class YouTubeUploader:
                 "reason": "Añadir a playlist manualmente en YouTube Studio o vía playlistItems().insert().",
                 "ready": False,
             })
+            # ── Custom thumbnail: set + confirm ──────────────────
+            # `thumbnails().set()` can return 200 while YouTube keeps its auto
+            # frame, so we confirm the served image matches before declaring OK.
+            # `thumbnail_applied`: True / False, or None when not determined
+            # (private video, still indexing, or no thumbnail attempted).
+            thumbnail_applied = None
             if thumbnail_path and Path(thumbnail_path).exists() and not _egress_agent_uploaded:
-                if not self._set_thumbnail(service, video_id, Path(thumbnail_path)):
+                _tpath = Path(thumbnail_path)
+                confirmed = False
+                known_failure = False
+                for _attempt in (1, 2):
+                    if not self._set_thumbnail(service, video_id, _tpath):
+                        known_failure = True
+                    else:
+                        check = self._verify_thumbnail_applied(video_id, _tpath)
+                        if check is True:
+                            confirmed = True
+                            break
+                        if check is None:
+                            # Cannot determine yet (private / not indexed).
+                            break
+                        # check is False → accepted but not served; retry once.
+                        known_failure = True
+                    if _attempt == 1:
+                        time.sleep(THUMBNAIL_VERIFY_DELAY)
+                if confirmed:
+                    thumbnail_applied = True
+                elif known_failure:
+                    thumbnail_applied = False
                     warnings.append({
                         "type": "thumbnail",
                         "field": "thumbnail",
-                        "reason": "Thumbnail upload failed or could not be verified",
+                        "reason": "Thumbnail set accepted but not confirmed on YouTube",
                         "ready": False,
                         "retry_needed": True,
                     })
@@ -1205,7 +1239,12 @@ class YouTubeUploader:
             if self.db is not None:
                 self._log_to_db(video_path, title, video_id, youtube_url)
 
-            return {"video_id": video_id, "url": youtube_url, "warnings": warnings}
+            return {
+                "video_id": video_id,
+                "url": youtube_url,
+                "warnings": warnings,
+                "thumbnail_applied": thumbnail_applied,
+            }
 
         finally:
             if (
@@ -1477,15 +1516,18 @@ class YouTubeUploader:
     def _set_thumbnail(
         self, service: Any, video_id: str, thumbnail_path: Path
     ) -> bool:
-        """Set custom thumbnail for a YouTube video. Returns True on success.
+        """Set custom thumbnail for a YouTube video. Returns True if the API
+        accepted the request.
 
         Note: YouTube Data API v3 has NO `thumbnails().list()` method — only
         `thumbnails().set()`. A previous revision tried to call the non-existent
         `list()`, which raised `AttributeError: 'Resource' object has no
         attribute 'list'` AFTER the upload succeeded, aborting the whole upload
-        and causing endless re-upload loops (duplicate videos). `set()` returns
-        204 No Content on success and raises HttpError on real failures, so no
-        extra verification is needed.
+        and causing endless re-upload loops (duplicate videos).
+
+        IMPORTANT: a 200 response does NOT guarantee YouTube applied the image
+        (it can silently keep the auto frame). Callers that need certainty must
+        follow up with :meth:`_verify_thumbnail_applied`.
         """
         try:
             service.thumbnails().set(
@@ -1521,6 +1563,43 @@ class YouTubeUploader:
             else:
                 logger.warning("Thumbnail upload failed for %s: %s", video_id, exc)
             return False
+
+    def _verify_thumbnail_applied(
+        self, video_id: str, thumbnail_path: Path,
+        attempts: int = None, delay: int = None,
+    ):
+        """Confirm the custom thumbnail is actually served by YouTube.
+
+        Downloads ``i.ytimg.com/vi/<id>/maxresdefault.jpg`` (0 API quota) and
+        compares it perceptually with the local file.
+
+        Returns:
+            True  → served image matches the local thumbnail.
+            False → served image differs (custom not applied).
+            None  → could not determine (video private/not yet indexed/404).
+        """
+        from pipeline.thumbnail_compare import thumbnails_match
+
+        attempts = attempts or THUMBNAIL_VERIFY_ATTEMPTS
+        delay = delay if delay is not None else THUMBNAIL_VERIFY_DELAY
+        last = None
+        for i in range(1, attempts + 1):
+            last = thumbnails_match(
+                thumbnail_path, video_id,
+                threshold=THUMBNAIL_MATCH_THRESHOLD,
+            )
+            logger.info(
+                "Thumbnail verify %s: attempt %d/%d → %s",
+                video_id, i, attempts, {True: "match", False: "mismatch", None: "unknown"}[last],
+            )
+            if last is True:
+                return True
+            if last is None:
+                # Cannot fetch (private / still indexing). Do not penalise.
+                return None
+            if i < attempts:
+                time.sleep(delay)
+        return last
 
     # ── Upload validation ───────────────────────────────────────
 

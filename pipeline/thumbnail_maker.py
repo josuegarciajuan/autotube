@@ -861,6 +861,9 @@ class ThumbnailMaker:
                     else face_chip_path
                 ),
                 emphasis_word=spec.emphasis,
+                # One distinct file per variant — otherwise all variants
+                # collapse onto thumb_{id}.jpg and the A/B test is a no-op.
+                output_suffix=f"_v{i + 1}",
             )
             variant_paths.append(thumb_path)
             logger.info(
@@ -1426,6 +1429,7 @@ class ThumbnailMaker:
         color_plan: dict | None = None,
         face_chip_path: Path | None = None,
         emphasis_word: str = "",
+        output_suffix: str = "",
     ) -> Path:
         """Apply channel-style mosaic composition to the base image.
 
@@ -1660,7 +1664,9 @@ class ThumbnailMaker:
         # ── Save ─────────────────────────────────────────────
         if video_id and canal_slug:
             out_dir = self.output_dir / canal_slug
-            out_path = out_dir / f"thumb_{video_id}.jpg"
+            # A/B variants must NOT overwrite each other: each gets its own
+            # suffix (e.g. _v1/_v2/_v3). The single-thumbnail path uses "".
+            out_path = out_dir / f"thumb_{video_id}{output_suffix}.jpg"
         else:
             # Fallback: legacy naming for callers that don't pass video_id
             out_dir = self.output_dir
