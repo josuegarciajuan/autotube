@@ -53,7 +53,7 @@ class _WorkerDB:
     def is_quota_exhausted_for_channel(self, canal):
         return self.quota
 
-    def mark_video_uploaded(self, video_id, yt_video_id, yt_url, status):
+    def mark_video_uploaded(self, video_id, yt_video_id, yt_url, status, thumbnail_verified=None):
         self.update_video(video_id, yt_video_id=yt_video_id, yt_url=yt_url, status=status)
 
 

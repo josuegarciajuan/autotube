@@ -4780,20 +4780,32 @@ class ExtendedDatabase(Database):
         return {"cancelled": len(cancelled), "cancelled_slot_ids": cancelled,
                 "groups": len(groups)}
     
-    def mark_video_uploaded(self, video_id, yt_video_id, yt_url, status: str = 'uploaded'):
+    def mark_video_uploaded(self, video_id, yt_video_id, yt_url, status: str = 'uploaded',
+                            thumbnail_verified: int | None = None):
         """Mark a video as uploaded to YouTube. Supports scheduled mode statuses.
 
-        Fase 1.5 (ago 2026): marca thumbnail_verified=1 — la miniatura se aplica
-        durante la subida (youtube_uploader._set_thumbnail). Antes quedaba en 0
-        para siempre, disparando re-subidas manuales de miniaturas. El
-        thumbnail_verification_service sigue como red de seguridad.
+        Custom-thumbnail truth (oct 2026): do NOT assume the thumbnail was
+        applied. ``thumbnails().set()`` can return 200 while YouTube keeps its
+        auto-generated frame, so callers pass the *real* outcome via
+        ``thumbnail_verified`` (1 = confirmed applied, 0 = failed/unknown).
+
+        When ``thumbnail_verified`` is omitted the column is left untouched
+        (historical callers). Any video left at 0 is repaired by
+        ``thumbnail_verification_service`` on a later cycle.
         """
         with self._connect() as conn:
-            conn.execute(
-                "UPDATE videos SET yt_video_id=?, yt_url=?, uploaded_at=CURRENT_TIMESTAMP, "
-                "status=?, thumbnail_verified=1 WHERE id=?",
-                (yt_video_id, yt_url, status, video_id),
-            )
+            if thumbnail_verified is None:
+                conn.execute(
+                    "UPDATE videos SET yt_video_id=?, yt_url=?, uploaded_at=CURRENT_TIMESTAMP, "
+                    "status=? WHERE id=?",
+                    (yt_video_id, yt_url, status, video_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE videos SET yt_video_id=?, yt_url=?, uploaded_at=CURRENT_TIMESTAMP, "
+                    "status=?, thumbnail_verified=? WHERE id=?",
+                    (yt_video_id, yt_url, status, int(thumbnail_verified), video_id),
+                )
             conn.commit()
     
     def delete_video(self, video_id: int) -> bool:

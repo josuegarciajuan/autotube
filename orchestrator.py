@@ -3059,6 +3059,11 @@ class PipelineOrchestrator:
 
             video_id = result.get("video_id")
             url = result.get("url", "")
+            # Custom-thumbnail truth (oct 2026): True/False/None. Expose it so
+            # the worker/generation layer can persist the real value instead of
+            # the old optimistic thumbnail_verified=1.
+            thumb_applied = result.get("thumbnail_applied")
+            self.last_thumbnail_applied = thumb_applied
 
             # ── Determine upload status based on publish mode ──
             if publish_mode == "scheduled":
@@ -3094,6 +3099,10 @@ class PipelineOrchestrator:
                         # Manual public upload: clear any stale scheduled target.
                         update_kwargs["target_public_at"] = None
                         update_kwargs["peak_source"] = None
+                    # Persist the real thumbnail outcome only when known
+                    # (None = undetermined → leave column for the verifier).
+                    if thumb_applied is not None:
+                        update_kwargs["thumbnail_verified"] = int(bool(thumb_applied))
                     self.db.update_video(self.db_video_id, **update_kwargs)
                     # Note: mark_video_uploaded is called by the API layer (generation_service)
                     # to ensure the tracked record gets yt_video_id/yt_url
@@ -3114,7 +3123,10 @@ class PipelineOrchestrator:
                         title_options=titles_json_str,
                     )
                     if db_video_id:
-                        self.db.mark_video_uploaded(db_video_id, video_id, url, status=upload_status)
+                        self.db.mark_video_uploaded(
+                            db_video_id, video_id, url, status=upload_status,
+                            thumbnail_verified=(0 if thumb_applied is None else int(bool(thumb_applied))),
+                        )
                         # ── Store scheduled publishing info ──
                         if publish_schedule_info:
                             self.db.update_video(

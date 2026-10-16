@@ -117,7 +117,7 @@ def _regenerate_thumbnail(db_video_id: int, db: ExtendedDatabase) -> Path | None
 
 
 def _upload_thumbnail(service, yt_video_id: str, thumb_path: Path) -> bool:
-    """Upload a thumbnail to YouTube. Returns True on success."""
+    """Upload a thumbnail to YouTube and confirm it is served. Returns True on success."""
     try:
         from googleapiclient.http import MediaFileUpload
         service.thumbnails().set(
@@ -125,14 +125,22 @@ def _upload_thumbnail(service, yt_video_id: str, thumb_path: Path) -> bool:
             media_body=MediaFileUpload(str(thumb_path), mimetype="image/jpeg"),
         ).execute()
 
-        # Verify
-        resp = service.thumbnails().list(videoId=yt_video_id).execute()
-        if resp.get("items"):
-            logger.info("  ✅ Thumbnail uploaded + verified for %s", yt_video_id)
+        # Confirm by comparing the image YouTube serves (0 quota).
+        # NOTE: `thumbnails().list()` does NOT exist in the YouTube Data API —
+        # calling it raised AttributeError and always forced a re-upload.
+        from pipeline.thumbnail_compare import thumbnails_match
+        applied = thumbnails_match(thumb_path, yt_video_id)
+        if applied is True:
+            logger.info("  ✅ Thumbnail uploaded + confirmed for %s", yt_video_id)
             return True
-        else:
-            logger.warning("  ⚠️  Upload OK but verification empty for %s", yt_video_id)
-            return False  # uncertain
+        if applied is None:
+            logger.warning("  ⚠️  Upload accepted but could not verify for %s", yt_video_id)
+            return True
+        logger.warning(
+            "  ⚠️  Upload accepted but YouTube still serves a different image for %s",
+            yt_video_id,
+        )
+        return False
     except HttpError as exc:
         logger.warning("  ❌ Thumbnail upload failed for %s: %s",
                        yt_video_id, str(exc)[:150])
