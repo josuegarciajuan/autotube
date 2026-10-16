@@ -174,6 +174,20 @@ class YouTubeUploader:
     # ── Client secret per channel ─────────────────────────────
 
     @property
+    def quota_slug(self) -> str:
+        """Identidad para la contabilidad de cuota (`yt_quota_log`).
+
+        Fix oct 2026: los llamadores posicionales (p.ej.
+        ``YouTubeUploader("canal5")``) no pasan ``channel_slug``; usarlo
+        directamente en ``track_quota`` insertaba NULL en la columna NOT NULL
+        ``channel_slug`` y hacía fallar TODO el lote de contabilidad, que se
+        re-encolaba sin fin. Se deriva del slug o, en su defecto, del nombre de
+        cuenta. NO modifica ``channel_slug`` (que gobierna el client_secret y
+        la carga de config).
+        """
+        return self.channel_slug or self.account_name or "unknown"
+
+    @property
     def _client_secret_path(self) -> Path:
         """Get the client secret file path for this channel.
         
@@ -1170,7 +1184,7 @@ class YouTubeUploader:
                 _account_reservation_consumed = True
 
             # ── Track quota (diagnostic) ──────────────────────────
-            track_quota(self.channel_slug, "videos.insert", 1600,
+            track_quota(self.quota_slug, "videos.insert", 1600,
                         yt_id=video_id, caller="YouTubeUploader.upload")
             youtube_url = f"https://www.youtube.com/watch?v={video_id}"
             logger.info("Upload complete: %s", youtube_url)
@@ -1319,7 +1333,7 @@ class YouTubeUploader:
             raise
 
         # ── Track quota (diagnostic) ──────────────────────────────
-        track_quota(self.channel_slug, "videos.list", 1,
+        track_quota(self.quota_slug, "videos.list", 1,
                     yt_id=video_id, caller="update_description.fetch_title")
 
         items = list_response.get("items", [])
@@ -1352,7 +1366,7 @@ class YouTubeUploader:
             raise
 
         # ── Track quota (diagnostic) ──────────────────────────────
-        track_quota(self.channel_slug, "videos.update", 50,
+        track_quota(self.quota_slug, "videos.update", 50,
                     yt_id=video_id, caller="update_description")
 
         logger.info("[%s] Description updated for video %s", self.channel_slug, video_id)
@@ -1391,7 +1405,7 @@ class YouTubeUploader:
             raise
 
         # ── Track quota (diagnostic) ──────────────────────────────
-        track_quota(self.channel_slug, "videos.update", 50,
+        track_quota(self.quota_slug, "videos.update", 50,
                     yt_id=video_id, caller="set_privacy")
 
         logger.info("[%s] Privacy set to %s for video %s", self.channel_slug, privacy, video_id)
@@ -1447,7 +1461,7 @@ class YouTubeUploader:
             raise
 
         # ── Track quota (diagnostic) ──────────────────────────────
-        track_quota(self.channel_slug, "videos.update", 50,
+        track_quota(self.quota_slug, "videos.update", 50,
                     yt_id=video_id, caller="set_publish_at")
         self._stamp_publish_at(video_id, publish_at)
 
@@ -1540,7 +1554,7 @@ class YouTubeUploader:
             logger.info("Thumbnail uploaded for video %s", video_id)
 
             # ── Track quota (diagnostic) ──────────────────────────
-            track_quota(self.channel_slug, "thumbnails.set", 50,
+            track_quota(self.quota_slug, "thumbnails.set", 50,
                         yt_id=video_id, caller="_set_thumbnail")
 
             # set() succeeded without raising — thumbnail is applied.
@@ -1772,7 +1786,7 @@ class YouTubeUploader:
                     raise
 
                 # ── Track quota (diagnostic) ──────────────────────────
-                track_quota(self.channel_slug, "videos.list", 1,
+                track_quota(self.quota_slug, "videos.list", 1,
                             yt_id=video_id, caller="_verify_upload_exists")
 
                 items = resp.get("items", [])

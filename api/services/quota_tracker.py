@@ -117,14 +117,22 @@ def track_quota(
     if units <= 0:
         return
 
+    # Normalizar la identidad (fix oct 2026): NUNCA encolar NULL/'' en
+    # `channel_slug` (columna NOT NULL). Un llamador que olvide el slug no debe
+    # hacer fallar TODO el lote — antes la fila inválida abortaba el INSERT
+    # completo y el buffer se re-encolaba sin fin
+    # ("NOT NULL constraint failed: yt_quota_log.channel_slug").
+    _slug = str(channel_slug or "").strip()[:64] or "unknown"
+    _op = str(operation or "").strip()[:64] or "unknown"
+
     _batch_buffer.append((
-        channel_slug,
-        operation,
-        units,
-        yt_id or "",
+        _slug,
+        _op,
+        int(units),
+        str(yt_id or "")[:64],
         1 if success else 0,
-        (error or "")[:500],
-        (caller or "")[:200],
+        str(error or "")[:500],
+        str(caller or "")[:200],
     ))
 
     # Flush every THROTTLE_SEC or when buffer grows beyond 200 entries
@@ -184,6 +192,25 @@ def _flush() -> None:
         _requeue(batch)
         return
 
+    # Saneado defensivo: entradas encoladas por versiones anteriores (o por
+    # rutas que no pasan por `track_quota`) pueden traer NULL/''. Una sola fila
+    # inválida abortaba el INSERT completo y dejaba el buffer atascado para
+    # siempre; se normaliza aquí para que el lote entero se persista.
+    safe_batch = []
+    for row in batch:
+        try:
+            safe_batch.append((
+                str(row[0] or "").strip()[:64] or "unknown",
+                str(row[1] or "").strip()[:64] or "unknown",
+                int(row[2] or 0),
+                str(row[3] or "")[:64],
+                1 if row[4] else 0,
+                str(row[5] or "")[:500],
+                str(row[6] or "")[:200],
+            ))
+        except Exception:
+            continue
+
     for attempt in range(1, _FLUSH_RETRIES + 1):
         try:
             with db._connect() as conn:
@@ -191,7 +218,7 @@ def _flush() -> None:
                     """INSERT INTO yt_quota_log
                        (timestamp, channel_slug, operation, units, yt_id, success, error, caller)
                        VALUES (datetime('now','localtime'), ?, ?, ?, ?, ?, ?, ?)""",
-                    batch,
+                    safe_batch,
                 )
                 conn.commit()
             return  # éxito — batch persistida
