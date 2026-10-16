@@ -208,6 +208,71 @@ class TestRepackPreservesValidTarget:
         )
 
 
+# ── 2a. Regresión oct 2026: el repack no deshace el catch-up de HOY ──
+
+class TestRepackDoesNotUndoTodayCatchup:
+    """Cuando `publish_coverage.remediate_today_public_deficit` adelanta un
+    vídeo a HOY (fuera de franja pico) para cumplir el cap diario, el siguiente
+    repack NO debe devolverlo a mañana.
+
+    Antes (bug de oscilación): la preservación exigía que el target existente
+    cayera en el MISMO día local que el slot calculado. Un target de hoy 22:45
+    (adelantado por el catch-up) no coincidía con el slot de mañana → se
+    descartaba y se reprogramaba a mañana. Diez minutos después el catch-up
+    volvía a adelantarlo → ~113+113 ciclos/día sin publicar jamás.
+    """
+
+    def test_today_catchup_target_is_preserved(self, frozen_now):
+        # 22:31 CEST del 24/08 (20:31 UTC): el pico de hoy (21:00) ya pasó, así
+        # que el walk calcularía el primer slot para MAÑANA 21:00. El target
+        # existente es HOY 22:45 CEST (20:45 UTC), puesto por el catch-up.
+        frozen_now("2026-08-24T20:31:00+00:00")
+
+        db = RepackDB(
+            videos=[
+                (1, 3, "uploaded_private", "YT1", "2026-08-24 22:45:00",
+                 None, "2026-08-24 09:00:00", "2026-08-20 08:00:00", "scheduled"),
+            ],
+            channel_cfg=CANAL2_CFG,
+        )
+        from pipeline.publish_scheduler import repack_channel_publish_times
+
+        plan = repack_channel_publish_times(db, 3, "canal2", timezone_str="Europe/Madrid")
+
+        assert plan, "debe haber plan"
+        assert plan[0]["preserved"] is True, (
+            f"el target de HOY no debe empujarse a mañana: {plan[0]}"
+        )
+        assert plan[0]["requires_yt_update"] is False, (
+            "un target preservado no debe re-escribir publishAt en YouTube"
+        )
+        # 20:45 UTC = 22:45 CEST (mismo instante del catch-up).
+        assert plan[0]["new_target"].startswith("2026-08-24T20:45"), plan[0]["new_target"]
+
+    def test_preservation_respects_daily_cap(self, frozen_now):
+        """Preservar no puede saltarse el cap diario: con max 1/día, un segundo
+        target del mismo día NO se preserva (se re-espacia)."""
+        frozen_now("2026-08-24T20:31:00+00:00")
+
+        db = RepackDB(
+            videos=[
+                (1, 3, "uploaded_private", "YT1", "2026-08-24 22:45:00",
+                 None, "2026-08-24 09:00:00", "2026-08-20 08:00:00", "scheduled"),
+                (2, 3, "uploaded_private", "YT2", "2026-08-24 23:30:00",
+                 None, "2026-08-24 09:05:00", "2026-08-21 08:00:00", "scheduled"),
+            ],
+            channel_cfg=CANAL2_CFG,
+        )
+        from pipeline.publish_scheduler import repack_channel_publish_times
+
+        plan = repack_channel_publish_times(db, 3, "canal2", timezone_str="Europe/Madrid")
+
+        assert plan[0]["preserved"] is True, plan[0]
+        assert plan[1]["preserved"] is False, (
+            f"el 2º target del mismo día excede el cap 1/día: {plan[1]}"
+        )
+
+
 # ── 2b. Regla dura 48h: warming demasiado antiguo se recorta ───
 
 class TestWarmingBeyond48hClamped:
