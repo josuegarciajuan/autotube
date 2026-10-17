@@ -3,10 +3,14 @@
 Calculates optimal time slots per channel per content type
 once per day, using:
 
-  1. YouTube Analytics API — viewer activity by hour (dimensions=hour)
-  2. YouTube Analytics API — audience country split (ES vs LATAM)
-  3. Local DB — historical video performance by publish hour
-  4. Niche heuristics — fallback when no real data available
+  1. YouTube Analytics API — audience country split (ES vs LATAM)
+  2. Local DB — historical performance by REAL publish hour
+     (``actual_published_at`` / ``published_at``, en la zona del canal)
+  3. Niche heuristics — fallback when no real data available
+
+La dimensión horaria de YouTube Analytics no está disponible para informes de
+canal (``dimensions=hour`` no es compatible), así que ``api_activity`` queda
+desactivado y se refleja explícitamente en ``data_sources``.
 
 Scoring formula:
   score[h] = 0.5 * norm_activity[h] + 0.3 * norm_historical[h] + 0.2 * norm_watchtime[h]
@@ -21,7 +25,7 @@ import json
 import logging
 import random
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Any
 
 from database.db_extended import ExtendedDatabase
@@ -193,9 +197,14 @@ class OptimalSlotsCalculator:
         if api_ok:
             country_split = fetcher.get_audience_country_split(days=90)
 
-        # Source C: DB historical publish-hour performance
-        historical_long = self._get_historical_by_publish_hour(channel_id, "long")
-        historical_short = self._get_historical_by_publish_hour(channel_id, "short")
+        # Source C: DB historical publish-hour performance (hora REAL de
+        # publicación, convertida a la zona horaria del canal)
+        historical_long = self._get_historical_by_publish_hour(
+            channel_id, "long", timezone,
+        )
+        historical_short = self._get_historical_by_publish_hour(
+            channel_id, "short", timezone,
+        )
 
         # Source D: Niche heuristic (fallback seed)
         niche = self._detect_niche(keywords)
@@ -216,6 +225,15 @@ class OptimalSlotsCalculator:
         short_scores, short_sources = self._compute_hourly_scores(
             short_hourly or hourly_data, historical_short, niche, WEIGHTS_SHORT
         )
+
+        # Dejar explícitas las fuentes reales: la dimensión horaria de Analytics
+        # no está disponible para informes de canal, así que el histórico se
+        # calcula con la hora real de publicación y la heurística es el respaldo.
+        for _sources in (long_sources, short_sources):
+            _sources["historical_basis"] = "published_at_local"
+            _sources["historical_timezone"] = timezone
+            _sources["analytics_hour_available"] = False
+            _sources["audience_country_available"] = bool(country_split)
 
         # 4. Find top peaks for each (v12: per-channel long peaks, global short peaks)
         long_slots = self._find_top_peaks(long_scores, timezone, country_split, "long",
@@ -368,41 +386,71 @@ class OptimalSlotsCalculator:
         # Fallback to general entertainment
         return NICHO_PEAK_HOURS.get("entretenimiento_general")
 
-    def _get_historical_by_publish_hour(self, channel_id: int, content_type: str) -> dict[int, float]:
-        """Get average views by publish hour from local DB history.
+    def _get_historical_by_publish_hour(
+        self,
+        channel_id: int,
+        content_type: str,
+        timezone: str = "Europe/Madrid",
+    ) -> dict[int, float]:
+        """Get average views by REAL publish hour (canal timezone).
 
-        Groups videos by their upload/publication hour (in local timezone)
-        and returns average views per hour bucket, weighted by recency.
+        Agrupa por ``actual_published_at`` → ``published_at`` (longs) o
+        ``actual_published_at`` → ``publish_at`` → ``published_at`` (shorts), no
+        por ``created_at``: la hora de generación no dice nada del rendimiento
+        de publicación. Las timestamps naive se asumen UTC (convención de la
+        DB); después se convierten a la zona horaria del canal.
 
         Returns dict {hour: avg_views}.
         """
         try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(timezone or "Europe/Madrid")
+        except Exception:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo("UTC")
+
+        lookback = f"-{HISTORICAL_LOOKBACK_DAYS} days"
+        try:
             with self._db._connect() as conn:
                 if content_type == "long":
+                    # actual_published_at (verdad externa) manda; published_at
+                    # es la hora de publicación registrada por el uploader.
                     rows = conn.execute(
-                        """SELECT v.created_at, vsh.views
+                        """SELECT COALESCE(v.actual_published_at, v.published_at) AS pub_at,
+                                  vsh.views AS views
                            FROM videos v
                            JOIN video_stats_history vsh ON vsh.video_id = v.id
                            WHERE v.channel_id = ?
                              AND v.yt_video_id IS NOT NULL
                              AND v.yt_video_id != ''
-                             AND v.created_at >= datetime('now', ?)
+                             AND COALESCE(v.actual_published_at, v.published_at) IS NOT NULL
+                             AND datetime(COALESCE(v.actual_published_at, v.published_at))
+                                 >= datetime('now', ?)
                              AND vsh.views > 0
                            ORDER BY vsh.fetched_at DESC""",
-                        (channel_id, f"-{HISTORICAL_LOOKBACK_DAYS} days"),
+                        (channel_id, lookback),
                     ).fetchall()
                 else:
+                    # published_at de un short es la hora de SUBIDA; publish_at
+                    # es el publishAt programado y actual_published_at la
+                    # confirmación de que ya es público.
                     rows = conn.execute(
-                        """SELECT s.created_at, ss.views
+                        """SELECT COALESCE(s.actual_published_at, s.publish_at,
+                                           s.published_at) AS pub_at,
+                                  ss.views AS views
                            FROM shorts s
                            JOIN short_stats ss ON ss.short_id = s.id
                            WHERE s.channel_id = ?
                              AND s.youtube_id IS NOT NULL
                              AND s.youtube_id != ''
-                             AND s.created_at >= datetime('now', ?)
+                             AND COALESCE(s.actual_published_at, s.publish_at,
+                                          s.published_at) IS NOT NULL
+                             AND datetime(COALESCE(s.actual_published_at, s.publish_at,
+                                                   s.published_at))
+                                 >= datetime('now', ?)
                              AND ss.views > 0
                            ORDER BY ss.fetched_at DESC""",
-                        (channel_id, f"-{HISTORICAL_LOOKBACK_DAYS} days"),
+                        (channel_id, lookback),
                     ).fetchall()
         except Exception as exc:
             logger.debug("Historical publish-hour query failed for ch%d: %s", channel_id, exc)
@@ -412,22 +460,26 @@ class OptimalSlotsCalculator:
             return {}
 
         hourly_views: dict[int, list[dict]] = {}
-        now = datetime.now()
+        now_utc = datetime.now(tz=dt_timezone.utc)
 
         for row in rows:
-            created_str = row["created_at"] or row.get("created_at")
+            pub_raw = row["pub_at"]
             views = row["views"]
-            if not created_str or views is None:
+            if not pub_raw or views is None:
                 continue
             try:
-                # Parse datetime — SQLite stores in local time
-                if isinstance(created_str, str):
-                    created = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                if isinstance(pub_raw, str):
+                    published = datetime.fromisoformat(
+                        pub_raw.replace("Z", "+00:00").replace(" ", "T")
+                    )
                 else:
-                    created = created_str
-                publish_hour = created.hour
+                    published = pub_raw
+                if published.tzinfo is None:
+                    published = published.replace(tzinfo=dt_timezone.utc)
+                published_local = published.astimezone(tz)
+                publish_hour = published_local.hour
                 # Recency weight: 1.0 for last 30 days, decaying to 0.3 for 90 days
-                days_ago = (now - created.replace(tzinfo=None)).days
+                days_ago = max(0, (now_utc - published).days)
                 weight = max(0.3, 1.0 - 0.7 * (days_ago / HISTORICAL_LOOKBACK_DAYS))
                 if publish_hour not in hourly_views:
                     hourly_views[publish_hour] = []

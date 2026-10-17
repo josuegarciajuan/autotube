@@ -186,10 +186,6 @@ def test_optimize_franjas_replan_respects_daily_cap(monkeypatch):
 # ── Fase 2: histórico por publicación real ─────────────────────
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Fase 2: el histórico agrupa por created_at (generación), no por publicación",
-)
 def test_historical_performance_uses_publication_time(tmp_path):
     """Un vídeo creado a las 02:00 y publicado a las 20:10 debe contar a las 20."""
     from api.services.optimal_slots_calculator import OptimalSlotsCalculator
@@ -212,11 +208,46 @@ def test_historical_performance_uses_publication_time(tmp_path):
         )
         conn.commit()
 
-    hist = OptimalSlotsCalculator(db)._get_historical_by_publish_hour(1, "long")
+    hist = OptimalSlotsCalculator(db)._get_historical_by_publish_hour(
+        1, "long", "Europe/Madrid",
+    )
 
     # 18:10 UTC en octubre = 20:10 Europe/Madrid.
     assert 20 in hist, hist
     assert 2 not in hist, hist
+
+
+def test_historical_performance_uses_short_publish_at_not_upload_time(tmp_path):
+    """Para shorts manda publish_at/actual_published_at, no la hora de subida."""
+    from api.services.optimal_slots_calculator import OptimalSlotsCalculator
+
+    db = _full_db(tmp_path, "history-shorts.db")
+    with db._connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO shorts
+               (channel_id, type, status, youtube_id, created_at,
+                published_at, publish_at)
+               VALUES (1, 'native', 'published', 'yt-s1',
+                       '2026-10-10 02:00:00', '2026-10-10 03:00:00',
+                       '2026-10-10 17:30:00')"""
+        )
+        short_id = cur.lastrowid
+        conn.execute(
+            """INSERT INTO short_stats
+               (short_id, yt_video_id, views, fetched_at)
+               VALUES (?, 'yt-s1', 3000, '2026-10-11 00:00:00')""",
+            (short_id,),
+        )
+        conn.commit()
+
+    hist = OptimalSlotsCalculator(db)._get_historical_by_publish_hour(
+        1, "short", "Europe/Madrid",
+    )
+
+    # 17:30 UTC = 19:30 Madrid; ni la creación (02:00) ni la subida (03:00).
+    assert 19 in hist, hist
+    assert 2 not in hist, hist
+    assert 3 not in hist, hist
 
 
 # ── Fase 3: shorts por ranking de franja ───────────────────────
