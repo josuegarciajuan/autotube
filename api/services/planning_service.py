@@ -1663,7 +1663,14 @@ def _horizon_scheduled_allocations(
             tz = ZoneInfo(tz_name)
         except Exception:
             tz = ZoneInfo("Europe/Madrid")
-        earliest = datetime.combine(today, datetime.min.time(), tzinfo=tz)
+        # Para HOY, la publicación debe quedar al menos warmup+buffer por delante
+        # de "ahora": así la subida puede moverse antes sin empujar la
+        # publicación (y sin romper el gap que garantiza el asignador).
+        warmup_head = int(ch.get("publish_warmup_min", 120) or 120) + 60
+        earliest = max(
+            datetime.combine(today, datetime.min.time(), tzinfo=tz),
+            datetime.now(tz) + timedelta(minutes=warmup_head),
+        )
         times = allocate_publish_times(
             franjas,
             day_counts,
@@ -1795,8 +1802,9 @@ def compute_horizon_slots(
 
                 # ── v12: Enforce target_upload_at < target_public_at ──
                 # Upload MUST happen before publication (with warmup buffer).
-                # If the upload window falls after the peak publish time,
-                # push the publication time forward to after upload+warmup.
+                # Preferimos mover la SUBIDA antes (la publicación conserva su
+                # franja y el gap del asignador). Solo si no hay margen temporal
+                # se empuja la publicación, y entonces se recalcula desde "ahora".
                 if is_scheduled:
                     warmup_minutes = ch.get("publish_warmup_min", 120)
                     # Add 60min safety buffer so the gap is clearly visible even
@@ -1806,16 +1814,30 @@ def compute_horizon_slots(
                     public_dt_chk = _dt.strptime(target_public_at, "%Y-%m-%d %H:%M:%S")
                     min_public_dt = upload_dt_chk + _td(minutes=effective_warmup)
                     if public_dt_chk < min_public_dt:
-                        new_public = min_public_dt
-                        old_public_at = target_public_at
-                        target_public_at = new_public.strftime("%Y-%m-%d %H:%M:%S")
-                        logger.warning(
-                            "compute_horizon_slots: [%s] target_public_at pushed: "
-                            "%s → %s (upload at %s + %dmin warmup+%dmin buffer)",
-                            ch.get("slug", "?"),
-                            old_public_at[11:16], target_public_at[11:16],
-                            target_upload_at[11:16], warmup_minutes, 60,
-                        )
+                        new_upload_dt = public_dt_chk - _td(minutes=effective_warmup)
+                        if new_upload_dt >= now + _td(minutes=5):
+                            old_upload_at = target_upload_at
+                            target_upload_at = new_upload_dt.strftime("%Y-%m-%d %H:%M:%S")
+                            logger.info(
+                                "compute_horizon_slots: [%s] upload moved earlier: "
+                                "%s → %s (publish %s unchanged, %dmin warmup+%dmin buffer)",
+                                ch.get("slug", "?"),
+                                old_upload_at[11:16], target_upload_at[11:16],
+                                target_public_at[11:16], warmup_minutes, 60,
+                            )
+                        else:
+                            new_public = max(
+                                min_public_dt,
+                                now + _td(minutes=effective_warmup),
+                            )
+                            old_public_at = target_public_at
+                            target_public_at = new_public.strftime("%Y-%m-%d %H:%M:%S")
+                            logger.warning(
+                                "compute_horizon_slots: [%s] target_public_at pushed: "
+                                "%s → %s (no room to move upload earlier)",
+                                ch.get("slug", "?"),
+                                old_public_at[11:16], target_public_at[11:16],
+                            )
                 
                 all_raw_slots.append({
                     "channel_id": ch_id,
