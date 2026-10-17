@@ -253,10 +253,6 @@ def test_historical_performance_uses_short_publish_at_not_upload_time(tmp_path):
 # ── Fase 3: shorts por ranking de franja ───────────────────────
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Fase 3: los shorts se ordenan por reloj y eligen la franja más temprana",
-)
 def test_short_uses_best_ranked_franja_not_earliest(monkeypatch):
     """Con rank 1 a las 19:00 y rank 3 a las 03:00, el short debe ir a las 19:00."""
     import database.db_extended as db_ext
@@ -337,3 +333,61 @@ def test_persist_shorts_does_not_delete_other_channels(tmp_path):
             (date_key,),
         ).fetchone()[0]
     assert ch2 == 1
+
+
+def test_three_shorts_use_all_ranked_franjas_and_spread(monkeypatch):
+    """3 shorts/día: usa las 3 franjas rankeadas y las reparte en el día."""
+    import database.db_extended as db_ext
+    import api.services.shorts_scheduler as ss
+
+    class _FakeDB:
+        def get_optimal_slots(self, channel_id, content_type):
+            return [
+                {"slot_rank": 1, "target_hour": 19, "target_minute": 0},
+                {"slot_rank": 2, "target_hour": 13, "target_minute": 0},
+                {"slot_rank": 3, "target_hour": 3, "target_minute": 0},
+            ]
+
+        def record_slot_usage(self, *a, **k):
+            return True
+
+    monkeypatch.setattr(db_ext, "ExtendedDatabase", lambda *a, **k: _FakeDB())
+
+    def _no_config(*_a, **_k):
+        raise RuntimeError("sin config para el test")
+
+    monkeypatch.setattr("config.config_bridge.get_channel_config", _no_config)
+
+    channel = {"id": 1, "slug": "one", "name": "One"}
+    slots, _pos = ss._build_shorts_slots_for_channel(
+        channel, "2026-10-18", native_count=3,
+        clips_per_long=0, long_video_count=0,
+        long_target_hours=[], global_start_pos=0,
+    )
+
+    # Orden cronológico: 03:00, 13:00, 19:00 Madrid (CEST) → UTC 01/11/17.
+    assert [s["target_upload_at"] for s in slots] == [
+        "2026-10-18 01:00:00",
+        "2026-10-18 11:00:00",
+        "2026-10-18 17:00:00",
+    ]
+    # El rank viaja con cada slot (no se pierde al ordenar por reloj).
+    assert [s["slot_rank"] for s in slots] == [3, 2, 1]
+
+
+def test_load_shorts_franjas_keeps_rank_order():
+    """El loader no debe reordenar por hora: el rank manda."""
+    from api.services import shorts_scheduler as ss
+
+    class _FakeDB:
+        def get_optimal_slots(self, channel_id, content_type):
+            return [
+                {"slot_rank": 1, "target_hour": 19, "target_minute": 7},
+                {"slot_rank": 2, "target_hour": 9, "target_minute": 43},
+                {"slot_rank": 3, "target_hour": 2, "target_minute": 7},
+            ]
+
+    franjas = ss._load_shorts_franjas(_FakeDB(), 1)
+    assert [(f.hour, f.minute, f.rank) for f in franjas] == [
+        (19, 7, 1), (9, 43, 2), (2, 7, 3),
+    ]
