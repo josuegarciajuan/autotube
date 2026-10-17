@@ -99,3 +99,45 @@ def test_earliest_drops_past_candidates_and_carries():
         daily_cap=2,
     )
     assert times == [_dt("2026-10-18", 20), _dt("2026-10-19", 6)]
+
+
+def test_busy_target_forces_next_franja_same_day():
+    """Si la franja rank1 está ocupada, usa la siguiente franja del día."""
+    franjas = [Franja(9, 0, rank=1), Franja(15, 0, rank=2)]
+    times = allocate_publish_times(
+        franjas,
+        [(date(2026, 10, 18), 1)],
+        tz=TZ,
+        min_gap_minutes=6 * 60,
+        daily_cap=2,
+        busy=[_dt("2026-10-18", 9)],
+    )
+    assert times == [_dt("2026-10-18", 15)]
+
+
+def test_busy_target_within_gap_forces_next_slot():
+    """Un target a menos del gap también bloquea la franja."""
+    franjas = [Franja(9, 0, rank=1), Franja(15, 0, rank=2)]
+    times = allocate_publish_times(
+        franjas,
+        [(date(2026, 10, 18), 1)],
+        tz=TZ,
+        min_gap_minutes=6 * 60,
+        daily_cap=2,
+        busy=[_dt("2026-10-18", 8)],
+    )
+    assert times == [_dt("2026-10-18", 15)]
+
+
+def test_existing_day_usage_counts_toward_daily_cap():
+    """Un día ya lleno por vídeos existentes pasa al día siguiente."""
+    franjas = [Franja(9, 0, rank=1), Franja(15, 0, rank=2)]
+    times = allocate_publish_times(
+        franjas,
+        [(date(2026, 10, 18), 1)],
+        tz=TZ,
+        min_gap_minutes=6 * 60,
+        daily_cap=2,
+        day_usage={date(2026, 10, 18): 2},
+    )
+    assert times == [_dt("2026-10-19", 9)]

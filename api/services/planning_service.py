@@ -1617,6 +1617,59 @@ def _pick_upload_minute(day_seed: int, channel_id: int, slot_pos: int,
     return (total_min // 60, total_min % 60, window_start, window_end)
 
 
+def _occupied_publish_targets(
+    db,
+    channel_id: int,
+    tz,
+) -> tuple[list[datetime], dict[date, int]]:
+    """Targets de publicación ya comprometidos (vídeos + slots running).
+
+    El horizonte debe repartir sus slots ALREDEDOR de ellos: si no, un vídeo
+    awaiting/warming y un slot nuevo podían quedar a menos del gap o superar el
+    cap diario (detectado en la verificación de la Fase 6).
+    """
+    busy: list[datetime] = []
+    usage: dict[date, int] = {}
+    if db is None:
+        return busy, usage
+
+    rows = []
+    try:
+        with db._connect() as conn:
+            rows.extend(conn.execute(
+                """SELECT target_public_at FROM videos
+                   WHERE channel_id = ? AND target_public_at IS NOT NULL
+                     AND status IN ('awaiting_upload', 'ready', 'uploaded_private',
+                                    'warming', 'scheduled')""",
+                (channel_id,),
+            ).fetchall())
+            rows.extend(conn.execute(
+                """SELECT target_public_at FROM planned_slots
+                   WHERE channel_id = ? AND status = 'running'
+                     AND target_public_at IS NOT NULL""",
+                (channel_id,),
+            ).fetchall())
+    except Exception:
+        return busy, usage
+
+    for row in rows:
+        raw = row["target_public_at"]
+        if not raw:
+            continue
+        try:
+            value = datetime.fromisoformat(
+                str(raw).replace("Z", "+00:00").replace(" ", "T")
+            )
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=UTC)
+            local = value.astimezone(tz)
+        except Exception:
+            continue
+        busy.append(local)
+        usage[local.date()] = usage.get(local.date(), 0) + 1
+    return busy, usage
+
+
 def _horizon_scheduled_allocations(
     channel_configs: list[dict],
     today: date,
@@ -1671,6 +1724,7 @@ def _horizon_scheduled_allocations(
             datetime.combine(today, datetime.min.time(), tzinfo=tz),
             datetime.now(tz) + timedelta(minutes=warmup_head),
         )
+        busy, day_usage = _occupied_publish_targets(db, ch_id, tz)
         times = allocate_publish_times(
             franjas,
             day_counts,
@@ -1678,6 +1732,8 @@ def _horizon_scheduled_allocations(
             earliest=earliest,
             min_gap_minutes=_publish_gap_minutes(ch_id, db=db, config=ch),
             daily_cap=_publish_cap_per_day(db, ch_id, ch),
+            busy=busy,
+            day_usage=day_usage,
         )
 
         by_day: dict[str, list[datetime]] = {}
