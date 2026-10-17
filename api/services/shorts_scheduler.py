@@ -1916,24 +1916,36 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
 
 
 def persist_daily_shorts_slots(date_str: str, slots: list[dict], db=None) -> int:
-    """Store computed shorts slots in shorts_planned_slots table.
-    Deletes existing pending slots for this date first.
+    """Store computed shorts slots, reemplazando solo los canales incluidos.
+
+    La persistencia es por ``(channel_id, date_key)``: replanificar/regenerar
+    un canal NO borra los pendientes de otros canales del mismo día. Si
+    ``slots`` está vacío no se borra nada (no-op).
+
     Returns count of stored slots.
     """
     if db is None:
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
 
-    # Delete existing PENDING slots for this date (keep completed/running)
-    with db._connect() as conn:
-        conn.execute(
-            "DELETE FROM shorts_planned_slots WHERE date_key = ? AND status = 'pending'",
-            (date_str,),
-        )
-        conn.commit()
-
     if not slots:
         return 0
+
+    channel_ids = sorted({
+        int(s["channel_id"])
+        for s in slots
+        if s.get("channel_id") is not None
+    })
+    if channel_ids:
+        placeholders = ",".join("?" for _ in channel_ids)
+        with db._connect() as conn:
+            conn.execute(
+                f"""DELETE FROM shorts_planned_slots
+                    WHERE date_key = ? AND status = 'pending'
+                      AND channel_id IN ({placeholders})""",
+                (date_str, *channel_ids),
+            )
+            conn.commit()
 
     count = db.create_shorts_planned_slots_batch(slots)
     logger.info("Persisted %d shorts slots for %s", count, date_str)
@@ -2039,20 +2051,14 @@ def generate_upcoming_shorts(days: int = 7, db=None) -> dict:
     for day_offset in range(days):
         day_str = (today + timedelta(days=day_offset)).isoformat()
         try:
-            # Skip if date already has PENDING slots — avoids double-generation
-            # on server restart. Running/completed/cancelled slots don't block
-            # planning: they represent work in-progress or already finished.
+            # La idempotencia es POR CANAL dentro de compute_daily_shorts_slots:
+            # un canal ya cubierto se salta, y uno deficitario se regenera sin
+            # tocar los pendientes de los demás. Antes, cualquier pendiente de
+            # cualquier canal bloqueaba el día entero y dejaba horarios viejos.
             existing_pending = db.get_shorts_planned_slots(date_key=day_str, status="pending")
-            if existing_pending and len(existing_pending) > 0:
-                # ── v25: One-day native compensation (2026-07-31 only) ──
-                # All clip shorts for today were cancelled (pre-render switch).
-                # Inject 2 extra native short slots per channel for today,
-                # distributed across remaining future windows.
-                if day_str == '2026-07-31':
-                    _inject_compensation_native_slots(day_str, db)
-                results[day_str] = f"{len(existing_pending)} slots (pending, skipped)"
-                logger.debug("Shorts slots for %s: %d pending — skipping regeneration", day_str, len(existing_pending))
-                continue
+            if existing_pending and day_str == '2026-07-31':
+                # ── v25: One-day native compensation (solo 2026-07-31) ──
+                _inject_compensation_native_slots(day_str, db)
 
             slots = compute_daily_shorts_slots(day_str, db)
 
