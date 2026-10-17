@@ -19,6 +19,7 @@ a su hora original. Nunca se fuerza una publicación manual.
 
 import json
 import logging
+from datetime import timedelta
 
 from pipeline.publish_scheduler import MAX_PUBLISH_AHEAD_SAFETY_HOURS
 
@@ -44,6 +45,88 @@ def _channel_cfg(db, channel_id: int) -> dict:
     except Exception:
         pass
     return {}
+
+
+def _validate_repack_plan(
+    plan: list[dict],
+    *,
+    gap_hours: int,
+    max_per_day: int,
+    max_warmup_hours: int,
+    warmup_min: int,
+    timezone_str: str,
+) -> list[str]:
+    """Valida el plan COMPLETO antes de tocar YouTube o la DB.
+
+    Reglas: sin duplicados ni gaps < ``gap_hours``, cap diario respetado,
+    publicación después de subida+calentamiento y ventana de calentando
+    ≤ ``max_warmup_hours``. Devuelve la lista de errores (vacía = válido).
+    """
+    from api.time_utils import parse_utc
+    from pipeline.publish_scheduler import _parse_target_public_at
+    import pytz
+
+    errors: list[str] = []
+    parsed: list[tuple] = []
+    for item in plan or []:
+        new_dt = _parse_target_public_at(str(item.get("new_target") or ""), timezone_str)
+        if new_dt is None:
+            errors.append(f"#{item.get('video_id')}: target inválido")
+            continue
+        parsed.append((new_dt, item))
+
+    if len(parsed) != len(plan or []):
+        return errors
+
+    parsed.sort(key=lambda pair: pair[0])
+
+    # 1. Gap entre publicaciones consecutivas.
+    for (prev_dt, prev), (cur_dt, cur) in zip(parsed, parsed[1:]):
+        delta_h = (cur_dt - prev_dt).total_seconds() / 3600.0
+        if delta_h < gap_hours:
+            errors.append(
+                f"#{prev.get('video_id')}→#{cur.get('video_id')}: "
+                f"gap {delta_h:.1f}h < {gap_hours}h"
+            )
+
+    # 2. Cap diario en la zona del canal.
+    try:
+        tz = pytz.timezone(timezone_str)
+    except pytz.UnknownTimeZoneError:
+        tz = pytz.UTC
+    per_day: dict = {}
+    for new_dt, item in parsed:
+        if item.get("is_marathon"):
+            continue
+        day = new_dt.astimezone(tz).date()
+        per_day[day] = per_day.get(day, 0) + 1
+    for day, count in per_day.items():
+        if max_per_day > 0 and count > max_per_day:
+            errors.append(f"{day}: {count} publicaciones > cap {max_per_day}")
+
+    # 3. Orden subida + calentamiento → publicación, y ventana ≤48h.
+    max_warm = max(1, int(max_warmup_hours)) * 3600
+    for new_dt, item in parsed:
+        status = item.get("status")
+        upload_raw = None
+        if status in ("awaiting_upload", "ready"):
+            upload_raw = item.get("adjusted_upload_at") or item.get("scheduled_upload_at")
+        elif status in ("uploaded_private", "warming"):
+            upload_raw = item.get("uploaded_at")
+        upload_dt = parse_utc(upload_raw) if upload_raw else None
+        if upload_dt is None:
+            continue
+        if new_dt < upload_dt + timedelta(minutes=max(0, int(warmup_min))):
+            errors.append(
+                f"#{item.get('video_id')}: publica antes de subida+calentamiento"
+            )
+        if (new_dt - upload_dt).total_seconds() > max_warm:
+            errors.append(
+                f"#{item.get('video_id')}: warmup "
+                f"{(new_dt - upload_dt).total_seconds() / 3600:.0f}h > {max_warmup_hours}h"
+            )
+
+    return errors
 
 
 def apply_publish_repack(
@@ -189,6 +272,36 @@ def apply_publish_repack(
         "yt_failed": 0, "quota_skipped": 0,
         "details": [dict(c) for c in changes],
     }
+
+    # ── Validar el plan COMPLETO antes de tocar YouTube/DB ──────────
+    try:
+        policy = _policy(db, channel_id)
+    except Exception:
+        policy = {}
+    gap_eff = int(
+        gap_hours if gap_hours is not None
+        else (policy.get("same_channel_publish_gap_h") or 3)
+    )
+    cap_eff = int(policy.get("longform_publish_cap", 1) or 0)
+    warmup_cap = int(policy.get("max_warmup_hours", 48) or 48)
+    validation_errors = _validate_repack_plan(
+        changes,
+        gap_hours=gap_eff,
+        max_per_day=cap_eff,
+        max_warmup_hours=warmup_cap,
+        warmup_min=warmup,
+        timezone_str=tz_str,
+    )
+    result["plan_valid"] = not validation_errors
+    result["validation_errors"] = validation_errors
+    if validation_errors:
+        logger.warning(
+            "[%s] repack ABORTADO: plan inválido (%d error(es)) — no se toca "
+            "YouTube ni la DB: %s",
+            slug, len(validation_errors), "; ".join(validation_errors[:5]),
+        )
+        if not dry_run:
+            return result
 
     if dry_run:
         logger.info("[%s] repack DRY-RUN: %d cambios propuestos (%d sin cambio)",

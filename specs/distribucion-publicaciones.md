@@ -48,4 +48,4 @@
 | 2 — histórico por publicación real | ✅ |
 | 3 — shorts por ranking de franja | ✅ |
 | 4 — replan por canal | ✅ |
-| 5 — Reprogramar Ahora completo | pendiente |
+| 5 — Reprogramar Ahora completo | ✅ |

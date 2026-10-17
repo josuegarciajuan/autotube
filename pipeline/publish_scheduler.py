@@ -1600,6 +1600,17 @@ def repack_channel_publish_times(
     if max_per_day == 0:
         logger.info("[%s] repack: publicación long-form desactivada (cap=0)", slug)
         return []
+
+    # Ventana máxima de calentamiento (regla dura, sep 2026): un vídeo no debe
+    # esperar más de `max_warmup_hours` entre subida y publicación.
+    try:
+        from api.services.channel_policy import policy_value as _pvmw
+        max_warmup_h = int(_pvmw(
+            channel_id, "max_warmup_hours", db=db, default=48,
+        ) or 48)
+    except Exception:
+        max_warmup_h = 48
+    max_warmup_h = max(1, max_warmup_h)
     # Con 2+/día, recorrer las franjas en orden CRONOLÓGICO: el cursor debe
     # empezar en la franja más temprana del día para poder colocar la segunda
     # (p. ej. canal5 [19,5,10] → [5,10,19] → 5:00 y 19:00, 14h ≥ gap 6h). Con el
@@ -1728,20 +1739,30 @@ def repack_channel_publish_times(
         # del día están ocupados o en el pasado, se rueda al siguiente día.
         slot = _snap_next_free_rank(cursor_local_now)
 
-        # awaiting_upload/ready: publish despues de upload + warmup + buffer 60min
+        # awaiting_upload/ready: la subida debe caber ANTES de la publicación
+        # (upload + warmup + buffer) y dentro de la ventana máxima de calentando.
+        # Antes solo se adelantaba la subida si la existente era más tardía, lo
+        # que dejaba vídeos subidos con días de antelación (>48 h de warmup).
         adjusted_upload_at = None
         up_raw = row["scheduled_upload_at"]
-        if status in ("awaiting_upload", "ready") and up_raw:
-            up_dt = _parse_target_public_at(str(up_raw), tz_str)
-            if up_dt is not None:
-                min_public = up_dt + _td(minutes=warmup + 60)
-                if slot < min_public:
-                    slot = min_public
-            # La subida debe caber: ajustar scheduled_upload_at si se pasa
-            if slot > now_utc + _td(minutes=warmup):
-                candidate_up = slot - _td(minutes=warmup + 60)
-                if candidate_up > now_utc and (up_dt is None or candidate_up < up_dt):
-                    adjusted_upload_at = candidate_up.strftime("%Y-%m-%d %H:%M:%S")
+        up_dt = _parse_target_public_at(str(up_raw), tz_str) if up_raw else None
+        if status in ("awaiting_upload", "ready"):
+            # No se puede publicar antes de subir + calentar.
+            earliest_public = now_utc + _td(minutes=warmup + 60)
+            if slot < earliest_public:
+                slot = earliest_public
+            desired_up = slot - _td(minutes=warmup + 60)
+            # Nunca en el pasado, nunca antes de la ventana de 48 h.
+            earliest_up = slot - _td(hours=max_warmup_h)
+            if desired_up < earliest_up:
+                desired_up = earliest_up
+            if desired_up < now_utc + _td(minutes=5):
+                desired_up = now_utc + _td(minutes=5)
+            latest_up = slot - _td(minutes=warmup)
+            if desired_up > latest_up:
+                desired_up = latest_up
+            if up_dt is None or abs((desired_up - up_dt).total_seconds()) >= 60:
+                adjusted_upload_at = desired_up.strftime("%Y-%m-%d %H:%M:%S")
 
         # ── Espaciado mínimo (fix ago 2026): TODO vídeo (maratón incluida) debe
         # quedar >= gap_hours después del último slot asignado en este walk. Sin
@@ -1839,6 +1860,9 @@ def repack_channel_publish_times(
             "new_target": slot.isoformat(),
             "requires_yt_update": requires_yt and not preserved,
             "adjusted_upload_at": adjusted_upload_at,
+            "uploaded_at": row["uploaded_at"],
+            "scheduled_upload_at": row["scheduled_upload_at"],
+            "is_marathon": bool(is_marathon),
             "preserved": preserved,
         })
         assigned_slots.append(slot)
