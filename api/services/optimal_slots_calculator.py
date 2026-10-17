@@ -25,11 +25,13 @@ import json
 import logging
 import random
 import time
-from datetime import datetime, timedelta, timezone as dt_timezone
+from datetime import date, datetime, timedelta, timezone as dt_timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from database.db_extended import ExtendedDatabase
 from pipeline.youtube_stats import YouTubeStatsFetcher
+from api.services.publish_allocator import Franja, allocate_publish_times
 
 logger = logging.getLogger("autotube.optimal_slots")
 
@@ -729,28 +731,81 @@ class OptimalSlotsCalculator:
         return result
 
     def _replan_long_form(self, channel_id: int) -> int:
-        """Update target_public_at for pending long-form planned_slots.
+        """Reparte los slots long-form pendientes con el asignador común.
 
-        Reassigns each pending slot to one of the new optimal slots (round-robin)
-        and recalculates target_public_at. Does NOT touch running/completed slots.
+        Aplica el ranking de franjas, el cap diario y el gap del canal, y mueve
+        al día siguiente lo que no cabe (antes se recortaba a 23:xx o se
+        desplazaba +1 min). No toca slots ``running``/``completed``.
+
+        Escribe ``target_public_at`` en ISO-8601 UTC, que es el formato que usa
+        ``planned_slots`` en producción.
         """
-        # Get new optimal slots
         long_slots = self._db.get_optimal_slots(channel_id, "long")
         if not long_slots:
             logger.debug("No long slots for replan ch%d", channel_id)
             return 0
 
-        target_hours = sorted([s["target_hour"] for s in long_slots])
+        franjas = [
+            Franja(
+                int(s.get("target_hour", 0) or 0),
+                int(s.get("target_minute", 0) or 0),
+                int(s.get("slot_rank", i + 1) or (i + 1)),
+            )
+            for i, s in enumerate(long_slots)
+        ]
 
-        # Get pending planned_slots for this channel
+        tz_name = long_slots[0].get("timezone") or "Europe/Madrid"
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = ZoneInfo("Europe/Madrid")
+
+        # Política efectiva del canal (cap + gap). Si no se puede resolver,
+        # se usan los valores conservadores de seguridad.
+        try:
+            from api.services.channel_policy import resolve_channel_policy_values
+            policy = resolve_channel_policy_values(channel_id, db=self._db)
+            daily_cap = int(policy.get("longform_publish_cap", 1) or 1)
+            min_gap = int(policy.get("same_channel_publish_gap_h", 24) or 24) * 60
+        except Exception:
+            daily_cap = 1
+            min_gap = 24 * 60
+        if daily_cap <= 0:
+            logger.info("Long-form replan ch%d: cap=0 — no se reprograma", channel_id)
+            return 0
+
         try:
             with self._db._connect() as conn:
                 pending = conn.execute(
                     """SELECT * FROM planned_slots
                        WHERE channel_id = ? AND status = 'pending'
-                       ORDER BY scheduled_at ASC""",
+                       ORDER BY date_key ASC, scheduled_at ASC""",
                     (channel_id,),
                 ).fetchall()
+                # Targets ya ocupados por generaciones en curso o vídeos.
+                occupied: set[str] = set()
+                try:
+                    for row in conn.execute(
+                        """SELECT target_public_at FROM planned_slots
+                           WHERE channel_id = ? AND status = 'running'
+                             AND target_public_at IS NOT NULL""",
+                        (channel_id,),
+                    ).fetchall():
+                        if row["target_public_at"]:
+                            occupied.add(str(row["target_public_at"]))
+                except Exception:
+                    pass
+                try:
+                    for row in conn.execute(
+                        """SELECT target_public_at FROM videos
+                           WHERE channel_id = ? AND target_public_at IS NOT NULL
+                             AND status NOT IN ('error', 'cancelled')""",
+                        (channel_id,),
+                    ).fetchall():
+                        if row["target_public_at"]:
+                            occupied.add(str(row["target_public_at"]))
+                except Exception:
+                    pass
         except Exception as exc:
             logger.debug("Pending slots query failed for ch%d: %s", channel_id, exc)
             return 0
@@ -758,69 +813,55 @@ class OptimalSlotsCalculator:
         if not pending:
             return 0
 
-        # Round-robin assignment across optimal slots.
-        # `planned_slots` tiene UNIQUE(channel_id, target_public_at): con jitter
-        # aleatorio dos slots podían colisionar en el mismo minuto y el UPDATE
-        # abortaba el replan completo ("UNIQUE constraint failed", canal4 oct-2026).
-        # Reservamos el minuto: si ya está tomado (por otro slot pendiente o por
-        # una fila existente del canal), desplazamos +1 min hasta hallar hueco.
-        reserved: set[str] = set()
-
-        def _slot_exists(conn, channel_id: int, ts: str, slot_id: int) -> bool:
+        today = datetime.now(tz).date()
+        pending_days = []
+        for row in pending:
             try:
-                row = conn.execute(
-                    """SELECT 1 FROM planned_slots
-                       WHERE channel_id = ? AND target_public_at = ? AND id != ?
-                       LIMIT 1""",
-                    (channel_id, ts, slot_id),
-                ).fetchone()
-                return row is not None
+                pending_days.append(date.fromisoformat(str(row["date_key"])[:10]))
             except Exception:
-                return False
+                continue
+        start_day = max(today, min(pending_days)) if pending_days else today
+        earliest = (
+            datetime.now(tz)
+            if start_day == today
+            else datetime.combine(start_day, datetime.min.time(), tzinfo=tz)
+        )
+
+        allocated = allocate_publish_times(
+            franjas,
+            [(start_day, len(pending))],
+            tz=tz,
+            earliest=earliest,
+            min_gap_minutes=min_gap,
+            daily_cap=daily_cap,
+        )
 
         updated = 0
-        for i, slot in enumerate(pending):
-            optimal_slot = target_hours[i % len(target_hours)]
-            jitter = random.randint(-20, 20)
-
-            # Calculate next occurrence of target hour
-            from datetime import datetime
-            import pytz
-            try:
-                tz = pytz.timezone(long_slots[0]["timezone"])
-            except Exception:
-                tz = pytz.timezone("Europe/Madrid")
-
-            now_utc = datetime.now(pytz.UTC)
-            now_local = now_utc.astimezone(tz)
-
-            target_local = now_local.replace(
-                hour=optimal_slot, minute=jitter % 60, second=0, microsecond=0
-            )
-            if target_local <= now_local:
-                target_local += timedelta(days=1)
-
-            with self._db._connect() as conn:
-                # Buscar un minuto libre (máx 24h de margen) que respete el UNIQUE.
-                for _ in range(1440):
-                    target_local_str = target_local.strftime("%Y-%m-%d %H:%M:%S")
-                    if target_local_str not in reserved and not _slot_exists(
-                        conn, channel_id, target_local_str, slot["id"]
-                    ):
+        last_dt = None
+        with self._db._connect() as conn:
+            for row, target_dt in zip(pending, allocated):
+                # Evitar chocar con un target ya ocupado (running/vídeo): pasa
+                # al mismo horario del día siguiente, conservando el gap.
+                while True:
+                    iso = target_dt.astimezone(dt_timezone.utc).isoformat()
+                    gap_ok = last_dt is None or (
+                        (target_dt - last_dt).total_seconds() / 60 >= min_gap
+                    )
+                    if iso not in occupied and gap_ok:
                         break
-                    target_local += timedelta(minutes=1)
-                else:
-                    target_local_str = target_local.strftime("%Y-%m-%d %H:%M:%S")
+                    target_dt += timedelta(days=1)
 
-                reserved.add(target_local_str)
+                iso = target_dt.astimezone(dt_timezone.utc).isoformat()
                 conn.execute(
                     """UPDATE planned_slots
                        SET target_public_at = ?
-                       WHERE id = ?""",
-                    (target_local_str, slot["id"]),
+                       WHERE id = ? AND status = 'pending'""",
+                    (iso, row["id"]),
                 )
-                conn.commit()
-            updated += 1
+                occupied.add(iso)
+                last_dt = target_dt
+                updated += 1
+            conn.commit()
 
         logger.info("Long-form replan ch%d: %d pending slots updated", channel_id, updated)
         return updated

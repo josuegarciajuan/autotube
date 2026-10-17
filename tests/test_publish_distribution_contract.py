@@ -92,10 +92,6 @@ def test_longform_overflow_rolls_to_next_day(monkeypatch):
     assert second.date() > first.date()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Fase 4: _replan_long_form ignora el gap por canal y apila slots el mismo día",
-)
 def test_optimize_franjas_replan_respects_daily_cap(monkeypatch):
     """'Optimizar franjas' no puede meter 2 long-forms el mismo día (cap=1)."""
     import random
@@ -292,10 +288,6 @@ def test_short_uses_best_ranked_franja_not_earliest(monkeypatch):
 # ── Fase 4: replan acotado por canal ───────────────────────────
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Fase 4: persist_daily_shorts_slots borra los pendientes de TODOS los canales",
-)
 def test_persist_shorts_does_not_delete_other_channels(tmp_path):
     """Persistir el canal 1 no debe borrar los slots pendientes del canal 2."""
     from api.services.shorts_scheduler import persist_daily_shorts_slots
@@ -391,3 +383,40 @@ def test_load_shorts_franjas_keeps_rank_order():
     assert [(f.hour, f.minute, f.rank) for f in franjas] == [
         (19, 7, 1), (9, 43, 2), (2, 7, 3),
     ]
+
+
+def test_generate_upcoming_shorts_does_not_skip_whole_day(monkeypatch):
+    """Un pendiente del canal 1 no debe impedir regenerar el canal 2."""
+    from api.services import shorts_scheduler as ss
+
+    class _DB:
+        def get_shorts_planned_slots(self, date_key=None, status=None):
+            return [{"channel_id": 1, "status": "pending"}]
+
+    generated = {
+        "channel_id": 2,
+        "date_key": "2026-10-18",
+        "scheduled_at": "2099-01-01 00:00:00",
+        "target_upload_at": "2099-01-01 00:10:00",
+        "short_type": "native",
+        "slot_position": 1,
+        "slot_rank": 1,
+    }
+    calls = {"compute": 0, "persisted": []}
+
+    def _compute(date_key, db=None):
+        calls["compute"] += 1
+        return [dict(generated, date_key=date_key)]
+
+    def _persist(date_key, slots, db=None):
+        calls["persisted"].extend(slots)
+        return len(slots)
+
+    monkeypatch.setattr(ss, "compute_daily_shorts_slots", _compute)
+    monkeypatch.setattr(ss, "persist_daily_shorts_slots", _persist)
+
+    result = ss.generate_upcoming_shorts(days=1, db=_DB())
+
+    assert calls["compute"] == 1
+    assert [s["channel_id"] for s in calls["persisted"]] == [2]
+    assert list(result.values())[0] == "1 slots"
