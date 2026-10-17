@@ -80,6 +80,8 @@ def allocate_publish_times(
     earliest: datetime | None = None,
     min_gap_minutes: int = 0,
     daily_cap: int = 0,
+    busy: Sequence[datetime] | None = None,
+    day_usage: dict[date, int] | None = None,
     max_extra_days: int = 366,
 ) -> list[datetime]:
     """Reparte ``day_counts`` publicaciones respetando cap, gap y ranking.
@@ -92,6 +94,9 @@ def allocate_publish_times(
             su hueco se arrastra al día siguiente.
         min_gap_minutes: separación mínima entre publicaciones consecutivas.
         daily_cap: máximo de publicaciones por día (0 = sin tope).
+        busy: publicaciones ya comprometidas (vídeos/slots running). El
+            asignador no las mueve; simplemente las esquiva respetando el gap.
+        day_usage: ocupación inicial por día local (para el cap diario).
         max_extra_days: tope de días extra para vaciar el arrastre.
 
     Returns:
@@ -100,7 +105,10 @@ def allocate_publish_times(
     if not franjas or not day_counts:
         return []
 
-    gap = timedelta(minutes=max(0, int(min_gap_minutes)))
+    gap_seconds = max(0, int(min_gap_minutes)) * 60
+    gap = timedelta(seconds=gap_seconds)
+    busy_list = sorted(busy or [])
+    used = dict(day_usage or {})
     out: list[datetime] = []
     last: datetime | None = None
     carry = 0
@@ -126,21 +134,42 @@ def allocate_publish_times(
             continue
 
         cap = int(daily_cap) if int(daily_cap) > 0 else want
-        take = min(want, cap)
-        selected = select_daily_franjas(franjas, take)
-        if not selected:
+        take = min(want, max(0, cap - used.get(day, 0)))
+        if take <= 0:
+            carry = want
+            continue
+
+        # Primary: las `take` mejores franjas. Fallback: el resto de franjas
+        # usables, solo si una primaria está bloqueada por un target ocupado.
+        primary = select_daily_franjas(franjas, take)
+        fallback = select_daily_franjas(
+            franjas, min(len(_unique_franjas(franjas)), max(take, cap)),
+        )
+        candidates = primary + [f for f in fallback if f not in primary]
+        if not candidates:
             carry = want
             continue
 
         placed = 0
-        for franja in selected:
+        for franja in candidates:
+            if placed >= take:
+                break
             candidate = _combine(day, franja, tz)
             if earliest is not None and candidate < earliest:
                 continue
             if last is not None and candidate < last + gap:
                 continue
+            blocked = any(
+                candidate == b
+                or (gap_seconds > 0
+                    and abs((candidate - b).total_seconds()) < gap_seconds)
+                for b in busy_list
+            )
+            if blocked:
+                continue
             out.append(candidate)
             last = candidate
+            used[day] = used.get(day, 0) + 1
             placed += 1
 
         carry = want - placed
