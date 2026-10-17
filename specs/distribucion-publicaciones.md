@@ -38,3 +38,14 @@
   regresiones.
 - Las fases 1-5 del plan de implementación van desmarcando los `xfail` a medida
   que cada regla queda implementada.
+
+## Estado de implementación
+
+| Fase | Estado |
+|---|---|
+| 0 — contrato + regresiones | ✅ |
+| 1 — asignador único (`api/services/publish_allocator.py`) | ✅ |
+| 2 — histórico por publicación real | pendiente |
+| 3 — shorts por ranking de franja | pendiente |
+| 4 — replan por canal | pendiente |
+| 5 — Reprogramar Ahora completo | pendiente |

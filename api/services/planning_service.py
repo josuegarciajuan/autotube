@@ -21,8 +21,14 @@ import functools
 import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 import pytz
 from api.time_utils import local_to_utc, sqlite_utc, MADRID, UTC
+from api.services.publish_allocator import (
+    Franja,
+    allocate_publish_times,
+    group_by_day,
+)
 from config.settings import effective_max_concurrent_longform_jobs
 
 logger = logging.getLogger("autotube.planning")
@@ -530,7 +536,14 @@ def _publish_cap_per_day(db=None, channel_id=None, config=None) -> int:
     """
     import time as _t
     _now = _t.time()
+    # La caché DEBE ser por (DB, canal): un único valor global hacía que el
+    # primer canal consultado fijara el cap de todos los demás durante 5 min.
+    db_key = str(getattr(db, "db_path", "")) if db is not None else "default"
+    key = (db_key, int(channel_id or 0))
     if _now - _PUBLISH_CAP_CACHE["ts"] > 300:
+        _PUBLISH_CAP_CACHE["values"].clear()
+        _PUBLISH_CAP_CACHE["ts"] = _now
+    if key not in _PUBLISH_CAP_CACHE["values"]:
         try:
             from api.services.channel_policy import policy_value
             if db is not None:
@@ -545,11 +558,11 @@ def _publish_cap_per_day(db=None, channel_id=None, config=None) -> int:
                 ) or 1)
         except Exception:
             _value = 1
-        _PUBLISH_CAP_CACHE.update(ts=_now, value=max(1, _value))
-    return max(1, _PUBLISH_CAP_CACHE["value"])
+        _PUBLISH_CAP_CACHE["values"][key] = max(1, _value)
+    return _PUBLISH_CAP_CACHE["values"][key]
 
 
-_PUBLISH_CAP_CACHE: dict = {"ts": 0.0, "value": 1}
+_PUBLISH_CAP_CACHE: dict = {"ts": 0.0, "values": {}}
 
 
 def _resolve_videos_per_day(ch: dict, date_str: str, db=None) -> int:
@@ -1093,6 +1106,77 @@ def _optimal_slot_windows(db, channel_id: int) -> list[tuple]:
     return windows
 
 
+def _franjas_for_channel(
+    ch: dict,
+    db,
+    date_str: str,
+    is_scheduled: bool,
+    videos_per_day: int,
+) -> list[Franja]:
+    """Franjas candidatas del canal, ordenadas por prioridad (rank 1 = mejor).
+
+    Scheduled: usa los slots óptimos exactos de la DB; si no existen, cae a las
+    ventanas de pico del nicho. Immediate: rota las ventanas genéricas para
+    conservar la variación diaria histórica.
+    """
+    channel_id = int(ch.get("channel_id") or 0)
+    ch_seed = _channel_seed(_day_seed(date_str), channel_id)
+
+    if is_scheduled:
+        exact: list[dict] = []
+        if db is not None:
+            try:
+                exact = db.get_optimal_slots(channel_id, "long") or []
+            except Exception:
+                exact = []
+        if exact:
+            franjas = [
+                Franja(
+                    int(s.get("target_hour", 0) or 0),
+                    int(s.get("target_minute", 0) or 0),
+                    int(s.get("slot_rank", i + 1) or (i + 1)),
+                )
+                for i, s in enumerate(exact)
+            ]
+            return sorted(franjas, key=lambda f: (f.rank, f.hour * 60 + f.minute))
+
+        windows: list[tuple] = []
+        try:
+            windows = _optimal_slot_windows(db, channel_id)
+        except Exception:
+            windows = []
+        if not windows:
+            try:
+                from pipeline.publish_scheduler import get_peak_windows
+                windows = get_peak_windows(ch, n=max(videos_per_day, 3)) or []
+            except Exception as exc:
+                logger.debug("Failed to load peak windows, falling back to generic: %s", exc)
+        if not windows:
+            windows = list(SPAIN_UPLOAD_WINDOWS)
+        return [
+            Franja(*_pick_time_in_window(w, ch_seed ^ (i * 0x1111)), rank=i + 1)
+            for i, w in enumerate(windows)
+        ]
+
+    # Immediate: rotate the generic windows by day (human-like variation).
+    windows = list(SPAIN_UPLOAD_WINDOWS)
+    offset = _day_seed(date_str) % len(windows)
+    rotated = windows[offset:] + windows[:offset]
+    franjas: list[Franja] = []
+    for i, w in enumerate(rotated):
+        h, m = _pick_time_in_window(w, ch_seed ^ (i * 0x1111))
+        franjas.append(Franja(h, m, rank=i + 1))
+    # 4+/day: rellena con la ventana de overflow para no cambiar de día.
+    j = 0
+    while len(franjas) < videos_per_day:
+        h, m = _pick_time_in_window(
+            SPAIN_FALLBACK_WINDOW, ch_seed ^ (0xFFFF + j * 0x3333),
+        )
+        franjas.append(Franja(h, m, rank=len(franjas) + 1))
+        j += 1
+    return franjas
+
+
 def _distribute_slots(
     videos_per_day: int,
     day_seed: int,
@@ -1100,129 +1184,51 @@ def _distribute_slots(
     is_scheduled: bool = False,
     scheduled_cfg: dict = None,
     db=None,
-) -> list[tuple]:
-    """Distribute N video slots across time windows for one channel.
+    date_str: str = None,
+) -> list[datetime]:
+    """Distribuye N publicaciones del canal respetando cap, gap y ranking.
 
-    For scheduled channels, prefers data-driven optimal_publish_slots (real
-    audience peak hours); falls back to niche-specific peak windows (publish_scheduler).
-    For immediate channels, uses generic SPAIN_UPLOAD_WINDOWS.
-
-    Returns list of (hour, minute) tuples — TARGET UPLOAD times (public for scheduled).
-
-    Logic:
-      1/dia → best window
-      2/dia → best window + second best (spread)
-      3/dia → three best windows
-      4+/day → distribute across all 3 windows evenly, overflow to fallback
+    Returns datetimes locales *aware* (Europe/Madrid por defecto). Si el día
+    solicitado no admite todos los slots, los sobrantes pasan al día siguiente
+    en vez de recortarse a las 23:xx.
     """
-    windows = list(SPAIN_UPLOAD_WINDOWS)
-    fallback = SPAIN_FALLBACK_WINDOW
-    ch_seed = _channel_seed(day_seed, channel_id)
-
-    # ── Scheduled mode: prefer data-driven optimal slots over niche heuristic ──
-    if is_scheduled and scheduled_cfg:
-        optimal_wins = _optimal_slot_windows(db, channel_id)
-        if optimal_wins:
-            windows = optimal_wins
-            fallback = windows[-1] if len(windows) > 2 else windows[0]
-        else:
-            try:
-                from pipeline.publish_scheduler import get_peak_windows
-                peak_wins = get_peak_windows(scheduled_cfg, n=max(videos_per_day, 3))
-                if peak_wins:
-                    windows = peak_wins
-                    fallback = windows[-1] if len(windows) > 2 else windows[0]
-            except Exception as exc:
-                logger.debug("Failed to load peak windows, falling back to generic: %s", exc)
-    
     if videos_per_day <= 0:
         return []
-    
-    # For scheduled channels: the primary peak (highest-weight window) MUST
-    # always be one of the assigned slots. Only secondary peaks rotate by day.
-    if is_scheduled and len(windows) > 1:
-        primary = windows[0]
-        secondary_wins = windows[1:]
-        day_window_offset = day_seed % len(secondary_wins)
-        rotated = [primary] + (secondary_wins[day_window_offset:] + secondary_wins[:day_window_offset])
+    if not date_str:
+        date_str = datetime.now(MADRID).date().isoformat()
+
+    cfg = scheduled_cfg or {}
+    tz_name = cfg.get("publish_timezone") or "Europe/Madrid"
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = ZoneInfo("Europe/Madrid")
+
+    franjas = _franjas_for_channel(
+        {"channel_id": channel_id, **cfg}, db, date_str,
+        is_scheduled=is_scheduled, videos_per_day=videos_per_day,
+    )
+    if not franjas:
+        return []
+
+    if is_scheduled:
+        daily_cap = _publish_cap_per_day(db, channel_id, cfg)
+        min_gap = _publish_gap_minutes(channel_id, db=db, config=cfg)
     else:
-        day_window_offset = day_seed % len(windows)
-        rotated = windows[day_window_offset:] + windows[:day_window_offset]
-    
-    slots = []
-    
-    if videos_per_day == 1:
-        # Single slot: use the first rotated window
-        h, m = _pick_time_in_window(rotated[0], ch_seed)
-        slots.append((h, m))
-    
-    elif videos_per_day == 2:
-        # Two slots: best window + second best (spread out)
-        h1, m1 = _pick_time_in_window(rotated[0], ch_seed)
-        h2, m2 = _pick_time_in_window(rotated[1], ch_seed ^ 0xABCD)
-        slots = [(h1, m1), (h2, m2)]
-    
-    elif videos_per_day == 3:
-        # All three windows, one per window
-        for i, w in enumerate(rotated[:3]):
-            h, m = _pick_time_in_window(w, ch_seed ^ (i * 0x1111))
-            slots.append((h, m))
-    
-    else:
-        # 4+: distribute across windows, overflow goes to fallback
-        per_window, remainder = divmod(videos_per_day, len(rotated[:3]))
-        for i, w in enumerate(rotated[:3]):
-            count = per_window + (1 if i < remainder else 0)
-            for j in range(count):
-                sub_seed = ch_seed ^ (i * 0x1111 + j * 0x2222)
-                h, m = _pick_time_in_window(w, sub_seed)
-                slots.append((h, m))
-        
-        # If remainder didn't fit, add fallback slots
-        planned = len(slots)
-        remaining = videos_per_day - planned
-        for j in range(remaining):
-            sub_seed = ch_seed ^ (0xFFFF + j * 0x3333)
-            h, m = _pick_time_in_window(fallback, sub_seed)
-            slots.append((h, m))
-    
-    # Sort slots by time within this channel
-    slots.sort(key=lambda x: x[0] * 60 + x[1])
-    
-    # ── v10.1: Enforce minimum spread between same-channel publish times ──
-    # After sorting, ensure no two adjacent slots are closer than 
-    # MIN_SAME_CHANNEL_PUBLISH_GAP_HOURS. Push later slots forward if needed.
-    # La generación puede producir más de un vídeo, pero no debe saltarse el
-    # gap efectivo de publicación. El mismo valor debe gobernar planning,
-    # repack y publish scheduler.
-    if len(slots) >= 2:
-        min_gap_minutes = _publish_gap_minutes(channel_id, db=db, config=scheduled_cfg)
-        spread_slots = [slots[0]]
-        for i in range(1, len(slots)):
-            prev_minutes = spread_slots[-1][0] * 60 + spread_slots[-1][1]
-            curr_minutes = slots[i][0] * 60 + slots[i][1]
-            if curr_minutes - prev_minutes < min_gap_minutes:
-                # Push this slot forward to maintain minimum gap
-                new_minutes = prev_minutes + min_gap_minutes
-                new_h = min(new_minutes // 60, 23)
-                new_m = new_minutes % 60
-                if new_h >= 23 and new_m > 50:
-                    # Overflow: wrap to next day (caller handles this)
-                    new_h = min(new_h, 23)
-                    new_m = min(new_m, 59)
-                spread_slots.append((new_h, new_m))
-                logger.debug("_distribute_slots: pushed slot %d from %02d:%02d → %02d:%02d "
-                             "(gap was %d min < %d min)",
-                             i + 1,
-                             slots[i][0], slots[i][1],
-                             new_h, new_m,
-                             curr_minutes - prev_minutes,
-                             min_gap_minutes)
-            else:
-                spread_slots.append(slots[i])
-        slots = spread_slots
-    
-    return slots
+        # Immediate: no publication cap/gap beyond the requested count.
+        daily_cap = videos_per_day
+        min_gap = 0
+
+    start_day = date.fromisoformat(date_str)
+    earliest = datetime.combine(start_day, datetime.min.time(), tzinfo=tz)
+    return allocate_publish_times(
+        franjas,
+        [(start_day, videos_per_day)],
+        tz=tz,
+        earliest=earliest,
+        min_gap_minutes=min_gap,
+        daily_cap=daily_cap,
+    )
 
 
 def compute_daily_slots(
@@ -1276,36 +1282,43 @@ def compute_daily_slots(
         # ── Build source_mode sequence for this channel's daily slots ──
         mode_sequence = _build_source_mode_sequence(n, ch, date_str) if n > 0 else []
         
-        # _distribute_slots returns (h, m) = TARGET_UPLOAD (public for scheduled)
-        raw_slots = _distribute_slots(n, day_seed, ch["channel_id"],
-                                       is_scheduled=is_scheduled,
-                                       scheduled_cfg=ch if is_scheduled else None,
-                                       db=db)
-        
-        for pos, (target_h, target_m) in enumerate(raw_slots, 1):
+        # _distribute_slots returns local aware datetimes. For a single-day
+        # planner only today's slots are stored; overflow (cap/gap) is produced
+        # by the allocator for the horizon planner, not double-booked here.
+        raw_slots = _distribute_slots(
+            n, day_seed, ch["channel_id"],
+            is_scheduled=is_scheduled,
+            scheduled_cfg=ch if is_scheduled else None,
+            db=db,
+            date_str=date_str,
+        )
+        raw_slots = [
+            dt for dt in raw_slots
+            if dt.date().isoformat() == date_str
+        ]
+        if not raw_slots:
+            continue
+
+        for pos, target_dt in enumerate(raw_slots, 1):
             # target_upload_at: for scheduled = public peak time; for immediate = upload time
-            target_str = f"{date_str} {target_h:02d}:{target_m:02d}:00"
-            
+            target_str = target_dt.strftime("%Y-%m-%d %H:%M:%S")
+
             # ── Generation START: work backwards from target ──
             if is_scheduled:
                 # Back out: pipeline + warmup (no extra buffer — collision resolution handles gaps)
                 reverse_min = ESTIMATED_PIPELINE_MINUTES + warmup_min
             else:
                 reverse_min = ESTIMATED_PIPELINE_MINUTES
-            
-            total_min = target_h * 60 + target_m - reverse_min
-            if total_min < 0:
-                total_min = 0  # clamp to midnight
-            sched_h = total_min // 60
-            sched_m = total_min % 60
-            sched_str = f"{date_str} {sched_h:02d}:{sched_m:02d}:00"
-            
+
+            sched_dt = target_dt - timedelta(minutes=reverse_min)
+            sched_str = sched_dt.strftime("%Y-%m-%d %H:%M:%S")
+
             # Assign source_mode from the pre-built alternating sequence (0-indexed)
             slot_mode = mode_sequence[pos - 1] if (pos - 1) < len(mode_sequence) else "original"
-            
+
             all_slots.append({
                 "channel_id": ch["channel_id"],
-                "date_key": date_str,
+                "date_key": target_dt.date().isoformat(),
                 "scheduled_at": sched_str,
                 "target_upload_at": target_str,
                 "target_public_at": target_str if is_scheduled else None,
@@ -1322,94 +1335,36 @@ def compute_daily_slots(
     
     # Sort all slots chronologically by generation START time
     all_slots.sort(key=lambda s: s["scheduled_at"])
-    
-    # ── Collision resolution on scheduled_at ──────────────────
+
+    # ── Collision resolution on scheduled_at (global generation serialization) ──
+    # Se conserva la fecha completa: si un push cruza medianoche, cae en el día
+    # siguiente en vez de recortarse a las 23:59.
     resolved = []
+    _fmt = "%Y-%m-%d %H:%M:%S"
+    gen_gap = _generation_gap_minutes()
     for slot in all_slots:
         if resolved:
-            last = resolved[-1]
-            last_h, last_m = map(int, last["scheduled_at"][11:16].split(":"))
-            this_h, this_m = map(int, slot["scheduled_at"][11:16].split(":"))
-            
-            last_total = last_h * 60 + last_m
-            this_total = this_h * 60 + this_m
-            
-            diff = this_total - last_total
-            if diff < _generation_gap_minutes():
-                # Push this slot's generation START forward
-                new_total = last_total + _generation_gap_minutes()
-                nh = new_total // 60
-                nm = new_total % 60
-                nh = min(nh, 23)
-                nm = min(nm, 59)
-                slot["scheduled_at"] = f"{date_str} {nh:02d}:{nm:02d}:00"
-        
+            last_dt = datetime.strptime(resolved[-1]["scheduled_at"], _fmt)
+            this_dt = datetime.strptime(slot["scheduled_at"], _fmt)
+            if (this_dt - last_dt).total_seconds() / 60 < gen_gap:
+                slot["scheduled_at"] = (
+                    last_dt + timedelta(minutes=gen_gap)
+                ).strftime(_fmt)
+
         resolved.append(slot)
-    
-    # Recalculate target_upload_at from scheduled_at after collision resolution
-    # ── v10.1: Also enforce same-channel publish spread for scheduled channels ──
-    # Group slots by channel to check intra-channel target_upload_at collisions
-    channel_slots = {}
+
+    # El gap y el cap de publicación por canal ya los ha aplicado el asignador
+    # (``_distribute_slots``). No se re-desplazan slots aquí: hacerlo era la
+    # causa de los saltos de un minuto y del clamp a 23:xx.
+
     for s in resolved:
-        ch_id = s["channel_id"]
-        if ch_id not in channel_slots:
-            channel_slots[ch_id] = []
-        channel_slots[ch_id].append(s)
-    
-    for ch_id, ch_slots in channel_slots.items():
-        # Sort by target_upload_at for this channel
-        ch_slots.sort(key=lambda s: s["target_upload_at"])
-        min_gap = _publish_gap_minutes(ch_id, db=db)
-        
-        for i in range(1, len(ch_slots)):
-            prev = ch_slots[i - 1]
-            curr = ch_slots[i]
-            
-            prev_h, prev_m = map(int, prev["target_upload_at"][11:16].split(":"))
-            curr_h, curr_m = map(int, curr["target_upload_at"][11:16].split(":"))
-            gap = (curr_h * 60 + curr_m) - (prev_h * 60 + prev_m)
-            
-            if gap < min_gap and curr.get("publish_mode") == "scheduled":
-                new_total = prev_h * 60 + prev_m + min_gap
-                nh = min(new_total // 60, 23)
-                nm = new_total % 60
-                push_delta = new_total - (curr_h * 60 + curr_m)
-                curr["target_upload_at"] = f"{curr['date_key']} {nh:02d}:{nm:02d}:00"
-                # ── v (Aug 2026): keep target_public_at >= target_upload_at ──
-                # Pushing the upload forward without touching the publish time
-                # could leave target_upload_at > target_public_at (publish before
-                # upload). Push target_public_at by the same delta so ordering holds.
-                tpa = curr.get("target_public_at")
-                if tpa:
-                    try:
-                        from datetime import datetime as _dtp, timedelta as _tdp
-                        _tpa_dt = _dtp.strptime(str(tpa)[:19], "%Y-%m-%d %H:%M:%S")
-                        _tpa_dt = _tpa_dt + _tdp(minutes=push_delta)
-                        curr["target_public_at"] = _tpa_dt.strftime("%Y-%m-%d %H:%M:%S")
-                    except (ValueError, TypeError):
-                        # target_public_at may already be ISO/UTC — leave as-is
-                        pass
-                logger.info(
-                    "compute_daily_slots: [%s] pushed slot #%d target from %02d:%02d → %02d:%02d "
-                    "(gap was %d min < %d min)",
-                    curr.get("channel_slug", "?"), curr["slot_position"],
-                    curr_h, curr_m, nh, nm, gap, min_gap,
-                )
-    
-    for s in resolved:
-        sched_h, sched_m = map(int, s["scheduled_at"][11:16].split(":"))
-        up_total = sched_h * 60 + sched_m + ESTIMATED_PIPELINE_MINUTES
-        # Collision shifts must not create an accidental dawn publication.
-        # Keep immediate deliveries inside the configured daytime envelope;
-        # scheduled deliveries retain their explicit publication target.
-        if s.get("publish_mode") != "scheduled" and up_total < 10 * 60:
-            up_total = 10 * 60
-        uh = min(up_total // 60, 23)
-        um = min(up_total % 60, 59)
-        # For scheduled channels, target_upload_at stays as original peak time
-        # (don't recalculate — the generation start was already backed out from peak)
         if s.get("publish_mode") != "scheduled":
-            s["target_upload_at"] = f"{date_str} {uh:02d}:{um:02d}:00"
+            sched_dt = datetime.strptime(s["scheduled_at"], _fmt)
+            up_dt = sched_dt + timedelta(minutes=ESTIMATED_PIPELINE_MINUTES)
+            # Collision shifts must not create an accidental dawn publication.
+            if up_dt.hour < 10:
+                up_dt = up_dt.replace(hour=10, minute=7, second=0, microsecond=0)
+            s["target_upload_at"] = up_dt.strftime(_fmt)
     
     # Update slot positions after collision resolution
     for pos, s in enumerate(resolved, 1):
@@ -1441,7 +1396,9 @@ def compute_daily_slots(
         if s.get("publish_mode") != "scheduled" and int(s["target_upload_at"][11:13]) < 10:
             # Stored scheduling timestamps are UTC; avoid an accidental early
             # morning dispatch after local→UTC conversion.
-            target = datetime.strptime(f"{date_str} 10:07:00", "%Y-%m-%d %H:%M:%S")
+            target = datetime.strptime(
+                f"{s['date_key']} 10:07:00", "%Y-%m-%d %H:%M:%S",
+            )
             s["target_upload_at"] = target.strftime("%Y-%m-%d %H:%M:%S")
             s["scheduled_at"] = (target - timedelta(minutes=ESTIMATED_PIPELINE_MINUTES)).strftime("%Y-%m-%d %H:%M:%S")
     
@@ -1660,6 +1617,72 @@ def _pick_upload_minute(day_seed: int, channel_id: int, slot_pos: int,
     return (total_min // 60, total_min % 60, window_start, window_end)
 
 
+def _horizon_scheduled_allocations(
+    channel_configs: list[dict],
+    today: date,
+    horizon_days: int,
+    db=None,
+) -> dict[int, dict[str, list[datetime]]]:
+    """Reparte TODO el horizonte por canal antes de construir los slots.
+
+    Planificar cada día por separado y luego "empujar" el segundo slot al día
+    siguiente duplicaba horarios (el día siguiente ya tenía su propio plan).
+    Aquí se hace una sola asignación por canal con cap y gap reales; los slots
+    que no caben en el horizonte se descartan (se replanificarán más adelante).
+    """
+    end_day = today + timedelta(days=max(0, horizon_days - 1))
+    result: dict[int, dict[str, list[datetime]]] = {}
+
+    for ch in channel_configs:
+        if ch.get("publish_mode") != "scheduled":
+            continue
+        if not ch.get("planning_enabled", True):
+            continue
+        ch_id = int(ch.get("channel_id") or 0)
+        if not ch_id:
+            continue
+
+        day_counts: list[tuple[date, int]] = []
+        for offset in range(horizon_days):
+            d = today + timedelta(days=offset)
+            n = _resolve_generation_per_day(ch, d.isoformat(), db=db)
+            if n > 0:
+                day_counts.append((d, n))
+        if not day_counts:
+            continue
+
+        franjas = _franjas_for_channel(
+            ch, db, today.isoformat(), is_scheduled=True,
+            videos_per_day=max(n for _, n in day_counts),
+        )
+        if not franjas:
+            continue
+
+        tz_name = ch.get("publish_timezone") or "Europe/Madrid"
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = ZoneInfo("Europe/Madrid")
+        earliest = datetime.combine(today, datetime.min.time(), tzinfo=tz)
+        times = allocate_publish_times(
+            franjas,
+            day_counts,
+            tz=tz,
+            earliest=earliest,
+            min_gap_minutes=_publish_gap_minutes(ch_id, db=db, config=ch),
+            daily_cap=_publish_cap_per_day(db, ch_id, ch),
+        )
+
+        by_day: dict[str, list[datetime]] = {}
+        for d, values in group_by_day(times).items():
+            if d < today or d > end_day:
+                continue
+            by_day[d.isoformat()] = values
+        result[ch_id] = by_day
+
+    return result
+
+
 def compute_horizon_slots(
     channel_configs: list[dict],
     horizon_days: int = DEFAULT_HORIZON_DAYS,
@@ -1690,6 +1713,11 @@ def compute_horizon_slots(
     today = now_utc.astimezone(MADRID).date()
     now = now_utc.astimezone(MADRID).replace(tzinfo=None)
     all_raw_slots = []
+
+    # Asignación única por canal para todo el horizonte (cap + gap reales).
+    scheduled_allocations = _horizon_scheduled_allocations(
+        channel_configs, today, horizon_days, db=db,
+    )
     
     # ── 1. Collect all raw slots across the horizon ──────────────
     for day_offset in range(horizon_days):
@@ -1717,17 +1745,33 @@ def compute_horizon_slots(
             ch_id = ch["channel_id"]
             
             # ── A. Compute target_public_at (peak publish time) ──
-            raw_peaks = _distribute_slots(
-                n, _day_seed(date_str), ch_id,
-                is_scheduled=is_scheduled,
-                scheduled_cfg=ch if is_scheduled else None,
+            if is_scheduled:
+                raw_peaks = scheduled_allocations.get(ch_id, {}).get(date_str, [])
+            else:
+                raw_peaks = [
+                    dt for dt in _distribute_slots(
+                        n, _day_seed(date_str), ch_id,
+                        is_scheduled=False,
+                        scheduled_cfg=None,
+                        db=db,
+                        date_str=date_str,
+                    )
+                    if dt.date().isoformat() == date_str
+                ]
+            if not raw_peaks:
+                continue
+
+            # ── B. Build source_mode sequence ──
+            daily_n = len(raw_peaks)
+            mode_sequence = (
+                _build_source_mode_sequence(max(n, daily_n), ch, date_str)
+                if n > 0 else ["original"] * daily_n
             )
             
-            # ── B. Build source_mode sequence ──
-            mode_sequence = _build_source_mode_sequence(n, ch, date_str) if n > 0 else ["original"] * n
-            
-            for pos, (peak_h, peak_m) in enumerate(raw_peaks, 1):
-                target_public_at = f"{date_str} {peak_h:02d}:{peak_m:02d}:00"
+            for pos, peak_dt in enumerate(raw_peaks, 1):
+                peak_h, peak_m = peak_dt.hour, peak_dt.minute
+                pub_day = peak_dt.date().isoformat()
+                target_public_at = peak_dt.strftime("%Y-%m-%d %H:%M:%S")
                 
                 # ── C. Compute target_upload_at (within upload window on pub day) ──
                 upload_windows = ch.get("upload_windows")
@@ -1741,13 +1785,13 @@ def compute_horizon_slots(
                 else:
                     warmup_minutes = ch.get("publish_warmup_min", 120)
                     up_h, up_m, ws_start, ws_end = _pick_upload_minute(
-                        _day_seed(date_str), ch_id, pos,
+                        _day_seed(pub_day), ch_id, pos,
                         window_start=win_start, window_end=win_end,
-                        videos_per_day=n, windows=upload_windows,
+                        videos_per_day=daily_n, windows=upload_windows,
                         public_hour=peak_h if is_scheduled else None,
                         warmup_min=warmup_minutes,
                     )
-                target_upload_at = f"{date_str} {up_h:02d}:{up_m:02d}:00"
+                target_upload_at = f"{pub_day} {up_h:02d}:{up_m:02d}:00"
 
                 # ── v12: Enforce target_upload_at < target_public_at ──
                 # Upload MUST happen before publication (with warmup buffer).
@@ -1775,7 +1819,7 @@ def compute_horizon_slots(
                 
                 all_raw_slots.append({
                     "channel_id": ch_id,
-                    "date_key": date_str,           # Publication day
+                    "date_key": pub_day,            # Publication day
                     "target_public_at": target_public_at,
                     "target_upload_at": target_upload_at,
                     "slot_position": pos,
