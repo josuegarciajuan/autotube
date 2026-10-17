@@ -56,15 +56,12 @@ def _local_date(value: str) -> dt.date:
 # ── Fase 1/2: asignador único y rollover ────────────────────────
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Fase 1: _distribute_slots recorta a 23:xx en vez de pasar al día siguiente",
-)
 def test_longform_overflow_rolls_to_next_day(monkeypatch):
     """Con un gap de 24 h y dos slots, el segundo debe caer en otro día.
 
     Las ventanas se fuerzan al final del día para provocar el overflow. El
-    código actual lo "resuelve" clampeando a 23:xx, dejando <24 h entre ambos.
+    asignador debe mover el segundo slot al día siguiente (antes se recortaba
+    a las 23:xx, dejando <24 h entre ambos).
     """
     import api.services.planning_service as ps
 
@@ -76,6 +73,7 @@ def test_longform_overflow_rolls_to_next_day(monkeypatch):
         ],
     )
     monkeypatch.setattr(ps, "_publish_gap_minutes", lambda *a, **k: 24 * 60)
+    monkeypatch.setattr(ps, "_publish_cap_per_day", lambda *a, **k: 1)
 
     slots = ps._distribute_slots(
         2,
@@ -84,19 +82,19 @@ def test_longform_overflow_rolls_to_next_day(monkeypatch):
         is_scheduled=True,
         scheduled_cfg={"publish_mode": "scheduled"},
         db=None,
+        date_str="2026-10-18",
     )
 
     assert len(slots) == 2
-    first = slots[0][0] * 60 + slots[0][1]
-    second = slots[1][0] * 60 + slots[1][1]
-    if second < first:
-        second += 24 * 60
-    assert second - first >= 24 * 60
+    first, second = slots
+    assert second > first
+    assert (second - first) >= dt.timedelta(hours=24)
+    assert second.date() > first.date()
 
 
 @pytest.mark.xfail(
     strict=True,
-    reason="Fase 1: _replan_long_form ignora el gap por canal y apila slots el mismo día",
+    reason="Fase 4: _replan_long_form ignora el gap por canal y apila slots el mismo día",
 )
 def test_optimize_franjas_replan_respects_daily_cap(monkeypatch):
     """'Optimizar franjas' no puede meter 2 long-forms el mismo día (cap=1)."""
