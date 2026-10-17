@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 from api.time_utils import madrid_day_range, MADRID, UTC, parse_utc
+from api.services.publish_allocator import Franja, allocate_publish_times
 
 logger = logging.getLogger("autotube.shorts_scheduler")
 
@@ -1229,6 +1230,53 @@ def _snap_to_optimal_shorts_window(
     return anchor_utc + timedelta(minutes=min_delay_min)
 
 
+def _resolve_channel_tz(db, channel_id: int, slug: str) -> ZoneInfo:
+    """Zona horaria de publicación del canal (DB → config → Madrid)."""
+    tz_str = None
+    if db is not None:
+        try:
+            cfg = db.get_channel_planning_config(channel_id) or {}
+            tz_str = cfg.get("publish_timezone")
+        except Exception:
+            tz_str = None
+    if not tz_str:
+        try:
+            from config.config_bridge import get_channel_config
+            tz_str = getattr(get_channel_config(slug), "PUBLISH_TIMEZONE", None)
+        except Exception:
+            tz_str = None
+    try:
+        return ZoneInfo(tz_str) if tz_str else DEFAULT_TIMEZONE
+    except Exception:
+        return DEFAULT_TIMEZONE
+
+
+def _load_shorts_franjas(db, channel_id: int) -> list[Franja]:
+    """Franjas rankeadas de shorts (rank 1 = mejor).
+
+    Usa ``optimal_publish_slots`` si existen; si no, las ventanas nativas de
+    respaldo. El orden del reloj NO decide la prioridad: eso lo hace el rank.
+    """
+    if db is not None:
+        try:
+            slots = db.get_optimal_slots(channel_id, "short") or []
+        except Exception:
+            slots = []
+        if slots:
+            return [
+                Franja(
+                    int(s.get("target_hour", 0) or 0),
+                    int(s.get("target_minute", 0) or 0),
+                    int(s.get("slot_rank", i + 1) or (i + 1)),
+                )
+                for i, s in enumerate(slots)
+            ]
+    return [
+        Franja(int(w[0]), int(w[1]), rank=i + 1)
+        for i, w in enumerate(NATIVE_WINDOWS)
+    ]
+
+
 def _build_shorts_slots_for_channel(
     ch: dict,
     date_str: str,
@@ -1237,22 +1285,23 @@ def _build_shorts_slots_for_channel(
     long_video_count: int,
     long_target_hours: list[int],
     global_start_pos: int,
+    db=None,
 ) -> tuple[list[dict], int]:
-    """Generate shorts slots for ONE channel for a given date.
+    """Generate native shorts slots for ONE channel for a given date.
 
-    v14: Uses optimal publish slots (epsilon-greedy) for native shorts,
-    per-channel timezone (PUBLISH_TIMEZONE), asymmetric jitter,
-    and records slot usage for performance feedback.
-    Clips also prefer optimal short slots within their anchor windows.
+    Fase 3: las franjas se eligen por ``slot_rank`` (no por orden del reloj) y
+    se reparten cronológicamente con el asignador común, aplicando el gap
+    native↔native. La zona horaria es la del canal, no la del servidor.
 
     Args:
         ch: channel dict with at least id, slug, name
         date_str: YYYY-MM-DD
         native_count: how many native shorts today
-        clips_per_long: multiplier (default 3)
+        clips_per_long: multiplier (clips ya no se pre-planifican)
         long_video_count: how many long videos published yesterday
         long_target_hours: target publish hours for those long videos (local tz)
         global_start_pos: starting slot_position for this channel
+        db: ExtendedDatabase (se usa el mismo que el planificador)
 
     Returns (slots_list, next_global_pos).
     """
@@ -1261,70 +1310,43 @@ def _build_shorts_slots_for_channel(
     all_slots = []
     pos = global_start_pos
 
-    clip_count = clips_per_long * long_video_count
-
-    # ── Load channel timezone from config ──
-    tz = DEFAULT_TIMEZONE
-    try:
-        from config.config_bridge import get_channel_config
-        ch_config = get_channel_config(slug)
-        tz_str = getattr(ch_config, "PUBLISH_TIMEZONE", None)
-        if tz_str:
-            tz = ZoneInfo(tz_str)
-    except Exception:
-        pass
-
-    # ── Load optimal publish slots for shorts from DB ──
-    optimal_franjas = []  # list of (hour, minute, slot_rank)
-    try:
+    _db = db
+    if _db is None:
         from database.db_extended import ExtendedDatabase
         _db = ExtendedDatabase()
-        optimal_slots = _db.get_optimal_slots(channel_id, "short")
-        if optimal_slots and len(optimal_slots) >= 1:
-            for s in optimal_slots:
-                optimal_franjas.append((
-                    s["target_hour"],
-                    s.get("target_minute", 0),
-                    s["slot_rank"],
-                ))
-            optimal_franjas.sort(key=lambda x: (x[0], x[1]))
-            logger.debug("Using %d optimal short slots for %s: %s",
-                         len(optimal_franjas), slug,
-                         [f"{h:02d}:{m:02d}" for h, m, _ in optimal_franjas])
-    except Exception as exc:
-        logger.debug("Optimal shorts slots lookup skipped for %s: %s", slug, exc)
 
-    # ── Fallback franjas if no optimal slots ──
-    if not optimal_franjas:
-        optimal_franjas = [(int(w[0]), int(w[1]), 0)
-                           for w in NATIVE_WINDOWS[:3]]
-        logger.debug("[%s] Using fallback native windows: %s", slug,
-                     [f"{h:02d}:{m:02d}" for h, m, _ in optimal_franjas])
+    tz = _resolve_channel_tz(_db, channel_id, slug)
+    franjas = _load_shorts_franjas(_db, channel_id)
+    rank_by_time = {(f.hour, f.minute): f.rank for f in franjas}
 
-    # ── 1. Native slots: one per optimal franja (epsilon-greedy picks the slot) ──
-    for i in range(native_count):
-        # Pick a franja: round-robin through available ones
-        franja_h, franja_m, slot_rank = optimal_franjas[i % len(optimal_franjas)]
-        base_min = franja_h * 60 + franja_m
-        jitter = _jitter_minutes(date_str, slug, i)
-        total_min = base_min + jitter
-        total_min = max(DAY_START_MINUTES, min(total_min, 24 * 60 - 1))
-        total_min = int(total_min)
-        all_slots.append((total_min, "native", None, slot_rank))
-
-        # Record slot usage for epsilon-greedy feedback
-        try:
-            _db.record_slot_usage(channel_id, "short", slot_rank)
-        except Exception:
-            pass
-
-    # ── 2. Clip slots: NO LONGER PRE-PLANNED ─────────────────────────
-    # v26: Clip shorts are generated ad-hoc right after long video generation
-    # (before cleanup), and go directly to "Pendiente subida" column with
-    # scheduled upload times. They do NOT appear in "Planificado".
-    # The old pre-planning logic (lines below) is removed.
-    # clip_count is kept at 0 — only native slots are pre-planned.
-    _clip_count = 0  # explicitly zero
+    if native_count > 0:
+        start_day = date.fromisoformat(date_str)
+        earliest = datetime.combine(
+            start_day, datetime.min.time(), tzinfo=tz,
+        )
+        allocated = allocate_publish_times(
+            franjas,
+            [(start_day, native_count)],
+            tz=tz,
+            earliest=earliest,
+            min_gap_minutes=_same_type_gap_minutes(),
+            daily_cap=native_count,
+        )
+        for target_dt in allocated:
+            overflow_days = (target_dt.date() - start_day).days
+            total_min = (
+                overflow_days * 24 * 60
+                + target_dt.hour * 60
+                + target_dt.minute
+            )
+            slot_rank = rank_by_time.get(
+                (target_dt.hour, target_dt.minute), 0,
+            )
+            all_slots.append((total_min, "native", None, slot_rank))
+            try:
+                _db.record_slot_usage(channel_id, "short", slot_rank)
+            except Exception:
+                pass
 
     # ── 3. Sort all slots by time and resolve collisions ──
     #    Same-type (native↔native, clip↔clip) → 60min publish gap enforced
@@ -1855,6 +1877,7 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
         channel_slots, global_pos = _build_shorts_slots_for_channel(
             ch, date_str, native_count, clips_per_long,
             yesterday_count, long_target_hours, global_pos,
+            db=db,
         )
 
         # ── Filler: disabled during quota remediation ──────────────
@@ -2327,15 +2350,35 @@ def _fill_native_short_queue(db=None, loop=None) -> dict | None:
     cid = best["channel_id"]
     slug = best["slug"]
 
-    # Slot nativo FUTURO (mañana en una ventana pico) — la generación ocurre
-    # ahora, la publicación la gobierna la válvula cuando toque.
+    # Slot nativo FUTURO (mañana en la mejor franja rankeada del canal) — la
+    # generación ocurre ahora, la publicación la gobierna la válvula cuando toque.
+    tomorrow = date.today() + timedelta(days=1)
     try:
-        tomorrow = date.today() + timedelta(days=1)
-        window = random.choice(NATIVE_WINDOWS)
-        total_min = window[0] * 60 + window[1]
+        tz = _resolve_channel_tz(db, cid, slug)
+        franjas = _load_shorts_franjas(db, cid)
+        start_day = tomorrow
+        allocated = allocate_publish_times(
+            franjas,
+            [(start_day, 1)],
+            tz=tz,
+            earliest=datetime.combine(
+                start_day, datetime.min.time(), tzinfo=tz,
+            ),
+            min_gap_minutes=0,
+            daily_cap=1,
+        )
+        if not allocated:
+            raise RuntimeError("sin franjas disponibles")
+        target_dt = allocated[0]
+        overflow_days = (target_dt.date() - start_day).days
+        total_min = (
+            overflow_days * 24 * 60
+            + target_dt.hour * 60
+            + target_dt.minute
+        )
         slot_dict = _minutes_to_utc_slot(
             tomorrow.isoformat(), total_min, cid, slug,
-            short_type="native", tz=DEFAULT_TIMEZONE,
+            short_type="native", tz=tz,
         )
         target_upload_at = slot_dict.get("target_upload_at")
         scheduled_at = slot_dict.get("scheduled_at") or _dt_fill.now(_tz_fill.utc).strftime("%Y-%m-%d %H:%M:%S")

@@ -46,6 +46,6 @@
 | 0 — contrato + regresiones | ✅ |
 | 1 — asignador único (`api/services/publish_allocator.py`) | ✅ |
 | 2 — histórico por publicación real | ✅ |
-| 3 — shorts por ranking de franja | pendiente |
+| 3 — shorts por ranking de franja | ✅ |
 | 4 — replan por canal | pendiente |
 | 5 — Reprogramar Ahora completo | pendiente |
