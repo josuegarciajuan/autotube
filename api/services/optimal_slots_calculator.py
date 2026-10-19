@@ -774,6 +774,23 @@ class OptimalSlotsCalculator:
             logger.info("Long-form replan ch%d: cap=0 — no se reprograma", channel_id)
             return 0
 
+        # Cap variable por día (rotación): un escalar aplicaría el bonus de hoy
+        # a todo el backlog y podría recortar/duplicar días futuros.
+        _cap_cache: dict = {}
+
+        def _cap_for_day(_day) -> int:
+            key = _day.isoformat() if hasattr(_day, "isoformat") else str(_day)[:10]
+            if key not in _cap_cache:
+                try:
+                    from api.services.channel_policy import policy_value
+                    _cap_cache[key] = max(0, int(policy_value(
+                        channel_id, "longform_publish_cap", db=self._db,
+                        default=daily_cap, day=key,
+                    ) or 0))
+                except Exception:
+                    _cap_cache[key] = daily_cap
+            return int(_cap_cache[key])
+
         try:
             with self._db._connect() as conn:
                 pending = conn.execute(
@@ -833,7 +850,7 @@ class OptimalSlotsCalculator:
             tz=tz,
             earliest=earliest,
             min_gap_minutes=min_gap,
-            daily_cap=daily_cap,
+            daily_cap=_cap_for_day,
         )
 
         updated = 0

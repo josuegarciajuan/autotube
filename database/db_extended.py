@@ -4805,7 +4805,12 @@ class ExtendedDatabase(Database):
         for (channel_id, _day), group in groups.items():
             try:
                 from api.services.channel_policy import policy_value
-                cap = max(0, int(policy_value(channel_id, "longform_publish_cap", db=self, default=0) or 0))
+                # Cap por FECHA: la rotación cambia el objetivo de cada día.
+                # Usar el cap de hoy recortaría el bonus de los días futuros.
+                cap = max(0, int(policy_value(
+                    channel_id, "longform_publish_cap", db=self, default=0,
+                    day=_day,
+                ) or 0))
             except Exception:
                 cap = 0
             ordered = sorted(group, key=lambda row: (

@@ -79,7 +79,7 @@ def allocate_publish_times(
     tz: tzinfo,
     earliest: datetime | None = None,
     min_gap_minutes: int = 0,
-    daily_cap: int = 0,
+    daily_cap: int | dict[date, int] | object = 0,
     busy: Sequence[datetime] | None = None,
     day_usage: dict[date, int] | None = None,
     max_extra_days: int = 366,
@@ -93,7 +93,9 @@ def allocate_publish_times(
         earliest: instante mínimo (aware). Los slots anteriores se descartan y
             su hueco se arrastra al día siguiente.
         min_gap_minutes: separación mínima entre publicaciones consecutivas.
-        daily_cap: máximo de publicaciones por día (0 = sin tope).
+        daily_cap: máximo de publicaciones por día (0 = sin tope). Puede ser
+            un entero, un dict ``{date: cap}`` o un callable ``f(date) -> int``
+            para estrategias con cap variable por día (rotación).
         busy: publicaciones ya comprometidas (vídeos/slots running). El
             asignador no las mueve; simplemente las esquiva respetando el gap.
         day_usage: ocupación inicial por día local (para el cap diario).
@@ -107,6 +109,15 @@ def allocate_publish_times(
 
     gap_seconds = max(0, int(min_gap_minutes)) * 60
     gap = timedelta(seconds=gap_seconds)
+
+    def _cap_for(day: date) -> int:
+        if isinstance(daily_cap, dict):
+            if day in daily_cap:
+                return int(daily_cap[day] or 0)
+            return max((int(v or 0) for v in daily_cap.values()), default=0)
+        if callable(daily_cap):
+            return int(daily_cap(day) or 0)
+        return int(daily_cap or 0)
     busy_list = sorted(busy or [])
     used = dict(day_usage or {})
     out: list[datetime] = []
@@ -133,7 +144,8 @@ def allocate_publish_times(
             carry = 0
             continue
 
-        cap = int(daily_cap) if int(daily_cap) > 0 else want
+        cap_value = _cap_for(day)
+        cap = cap_value if cap_value > 0 else want
         take = min(want, max(0, cap - used.get(day, 0)))
         if take <= 0:
             carry = want

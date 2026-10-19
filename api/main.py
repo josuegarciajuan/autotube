@@ -370,6 +370,22 @@ async def lifespan(app: FastAPI):
             except Exception as exc:
                 _logger.warning("Spam holds skipped: %s", exc)
             
+            # Rotación: materializar la fase de hoy antes de planificar (el
+            # horizonte y los shorts la leen por fecha).
+            try:
+                from api.services.rotation_strategy import ensure_daily_rotation
+                from database.db_extended import ExtendedDatabase as _RotDB
+                _rot = await _loop.run_in_executor(
+                    None, lambda: ensure_daily_rotation(_RotDB(), apply=False)
+                )
+                if _rot.get("assignment"):
+                    _logger.info(
+                        "Rotation: day %s phases %s", _rot.get("day"),
+                        {cid: info.get("phase") for cid, info in _rot["assignment"].items()},
+                    )
+            except Exception as exc:
+                _logger.warning("Rotation init skipped: %s", exc)
+
             # Planning engine
             try:
                 from api.services.planning_service import compute_and_store_horizon
@@ -530,6 +546,11 @@ async def lifespan(app: FastAPI):
     # request HTTP. Procesa coalescido en ≤15-20 s.
     replan_bg_task = _supervised_loop("planning_replan", _planning_replan_loop)
 
+    # ── Estrategia de publicación circular (4 canales × 4 fases) ──
+    # Materializa la fase del día (Madrid) al arrancar y en cada cambio de día,
+    # y reprográmica long-form + shorts para que el bonus surta efecto.
+    rotation_task = _supervised_loop("rotation_daily", _rotation_daily_loop)
+
     # Quota-free editorial reviews are opt-in per channel and only inspect new
     # uploads plus a daily channel audit. They never mutate historical videos.
     editorial_reviews_task = _supervised_loop("editorial_reviews", _editorial_reviews_loop)
@@ -593,6 +614,7 @@ async def lifespan(app: FastAPI):
         yt_state_task,
         packaging_recovery_task,
         replan_bg_task,
+        rotation_task,
         editorial_reviews_task,
         ia_mark_reconcile_task,
         playwright_reaper_task,
@@ -1748,6 +1770,43 @@ async def _planning_replan_loop():
             logger.warning("planning_replan loop: %s", exc, exc_info=True)
             await _asyncio_rp.sleep(15)
         await _asyncio_rp.sleep(15)
+
+
+async def _rotation_daily_loop():
+    """Circular publication strategy: materialize and apply the day's phases.
+
+    Runs every 5 min and is idempotent. The first tick of each Madrid day
+    materializes the four-phase assignment and rebuilds the long-form/shorts
+    horizon so the new phase takes effect at the start of the day.
+    """
+    import asyncio as _asyncio_rot
+    logger = logging.getLogger("autotube.rotation_loop")
+    await _asyncio_rot.sleep(10)
+    while True:
+        try:
+            from api.services.lifecycle_monitor import touch_task_heartbeat as _tth_rot
+            _tth_rot("rotation_daily")
+            from database.db_extended import ExtendedDatabase
+            _db = ExtendedDatabase()
+            if _db.get_system_state("scheduler_paused") == "true":
+                await _asyncio_rot.sleep(300)
+                continue
+            from api.services.rotation_strategy import ensure_daily_rotation
+            result = await _asyncio_rot.to_thread(
+                ensure_daily_rotation, _db, apply=True,
+            )
+            if result.get("newly_materialized"):
+                logger.info(
+                    "Rotation day %s applied: %s (horizon=%s)",
+                    result.get("day"),
+                    {cid: info.get("phase") for cid, info in (result.get("assignment") or {}).items()},
+                    (result.get("horizon") or {}).get("total_slots"),
+                )
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.warning("rotation_daily loop: %s", exc, exc_info=True)
+        await _asyncio_rot.sleep(300)
 
 
 async def _schedule_checker_loop():

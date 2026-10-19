@@ -950,35 +950,50 @@ def _pacing_int(key: str, default: int) -> int:
         return default
 
 
-def _hard_daily_cap(channel_id: int | None = None, db=None) -> int:
+def _hard_daily_cap(channel_id: int | None = None, db=None, day=None) -> int:
     """Cap diario por canal, con la política explícita como fuente exacta.
 
     Precedencia: política explícita (valor EXACTO, sin diluir con el perfil
-    global) > entitlement de fase post-strike > perfil global.
+    global) > entitlement de fase post-strike > perfil global. Encima de la base
+    se suma el bonus de la fase rotativa del día (máx. +1), que es la autoridad
+    de planificación y nunca relaja bloqueos/gaps.
     """
     base = _pacing_int("shorts_per_channel_day", SHORTS_HARD_PER_CHANNEL_DAILY_CAP)
     if channel_id is None:
         return base
+    bonus_shorts = 0
+    try:
+        from api.services.rotation_strategy import bonus_for
+        bonus_shorts = int(bonus_for(channel_id, db, day).get("shorts", 0))
+    except Exception:
+        bonus_shorts = 0
     try:
         from api.services.channel_policy import policy_value
-        base = int(policy_value(channel_id, "native_shorts_per_day", db=db, default=base) or 0)
+        # policy_value ya incluye el bonus de rotación; se descuenta para no
+        # sumarlo dos veces en las ramas que lo añaden explícitamente.
+        base = max(0, int(policy_value(
+            channel_id, "native_shorts_per_day", db=db,
+            default=base + bonus_shorts, day=day,
+        ) or 0) - bonus_shorts)
     except Exception:
         pass
     try:
         from api.services.gradual_resume import get_explicit_delivery_policy
         policy = get_explicit_delivery_policy(channel_id, db)
         if policy is not None:
-            return policy["native_shorts_per_day"]
+            _explicit = int(policy["native_shorts_per_day"] or 0)
+            return _explicit + (bonus_shorts if _explicit > 0 else 0)
     except Exception:
         pass
     try:
         from api.services.gradual_resume import effective_native_shorts_per_day
-        return max(base, effective_native_shorts_per_day(channel_id, db))
+        _base = max(base, effective_native_shorts_per_day(channel_id, db))
+        return _base + (bonus_shorts if _base > 0 else 0)
     except Exception:
-        return base
+        return base + (bonus_shorts if base > 0 else 0)
 
 
-_GLOBAL_SHORTS_CAP_CACHE: dict = {"ts": 0.0, "value": None, "path": ""}
+_GLOBAL_SHORTS_CAP_CACHE: dict = {"ts": 0.0, "value": None, "path": "", "day": ""}
 
 
 def _global_shorts_daily_cap() -> int:
@@ -990,10 +1005,13 @@ def _global_shorts_daily_cap() -> int:
     """
     import time as _t
     from config.settings import DATABASE_PATH as _DBP
+    from api.time_utils import MADRID
+    from datetime import datetime as _dt
+    _day = _dt.now(MADRID).date().isoformat()
     now = _t.time()
     cached = _GLOBAL_SHORTS_CAP_CACHE
     if (cached["value"] is not None and cached.get("path") == str(_DBP)
-            and (now - cached["ts"]) < 30):
+            and cached.get("day") == _day and (now - cached["ts"]) < 30):
         return int(cached["value"])
     total = None
     try:
@@ -1010,7 +1028,7 @@ def _global_shorts_daily_cap() -> int:
             found = True
             try:
                 acc += max(0, int(policy_value(
-                    cid, "native_shorts_per_day", db=db, default=0,
+                    cid, "native_shorts_per_day", db=db, default=0, day=_day,
                 ) or 0))
             except Exception:
                 continue
@@ -1026,6 +1044,7 @@ def _global_shorts_daily_cap() -> int:
     cached["ts"] = now
     cached["value"] = total
     cached["path"] = str(_DBP)
+    cached["day"] = _day
     return int(total)
 
 
@@ -1818,6 +1837,15 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
             )
         except Exception:
             native_count = int(native_count or 0)
+        # ── Rotación circular: +1 short en la fase "shorts+1" ──
+        # Se aplica al plan del día (no al perfil ni al override manual).
+        try:
+            native_count = int(native_count or 0)
+            if native_count > 0:
+                from api.services.rotation_strategy import bonus_for
+                native_count += int(bonus_for(ch_id, db, date_str).get("shorts", 0))
+        except Exception:
+            native_count = int(native_count or 0)
         clips_per_long = 0
 
         # ── Quota-aware: recortar nativos al cupo del proyecto ──
@@ -2162,70 +2190,73 @@ def cleanup_excessive_shorts_slots(db=None) -> dict:
             if not cfg.get("shorts_enabled", True):
                 continue
             
-            native_max = cfg.get("shorts_native_per_day", 3)
+            native_max = int(cfg.get("shorts_native_per_day", 3) or 0)
+            if native_max > 0:
+                try:
+                    from api.services.rotation_strategy import bonus_for
+                    native_max += int(bonus_for(ch_id, db, today).get("shorts", 0))
+                except Exception:
+                    pass
             clips_per_long = cfg.get("shorts_clips_per_long", 3)
             
-            # Count completed longs for clip target
-            from database.db_extended import ExtendedDatabase as _EDB
-            import sqlite3 as _sqlite3
-            from config.settings import DATABASE_PATH as _DB_PATH
-            conn = _sqlite3.connect(str(_DB_PATH), timeout=10)
-            conn.row_factory = _sqlite3.Row
-            long_count = conn.execute(
-                """SELECT COUNT(*) as cnt FROM videos
-                   WHERE channel_id = ?
-                     AND status IN ('uploaded', 'published', 'uploaded_private')
-                     AND DATE(uploaded_at) >= DATE('now', 'localtime', '-1 day')""",
-                (ch_id,),
-            ).fetchone()
-            clip_max = clips_per_long * (long_count["cnt"] if long_count else 0)
-            
-            # Cancel excess native pending slots (keep only first N)
-            native_pending = conn.execute(
-                """SELECT id FROM shorts_planned_slots
-                   WHERE date_key = ? AND channel_id = ?
-                     AND short_type = 'native' AND status = 'pending'
-                   ORDER BY scheduled_at ASC""",
-                (today, ch_id),
-            ).fetchall()
-            native_ids = [r["id"] for r in native_pending]
-            if len(native_ids) > native_max:
-                to_cancel = native_ids[native_max:]
-                conn.executemany(
-                    "UPDATE shorts_planned_slots SET status = 'cancelled', "
-                    "updated_at = datetime('now') WHERE id = ?",
-                    [(i,) for i in to_cancel],
-                )
-                result["cancelled_native"] += len(to_cancel)
-                logger.warning(
-                    "Cleaned up %d excess native slots for channel #%d (kept %d/%d)",
-                    len(to_cancel), ch_id, native_max, len(native_ids),
-                )
-            
-            # Cancel excess clip pending slots
-            clip_pending = conn.execute(
-                """SELECT id FROM shorts_planned_slots
-                   WHERE date_key = ? AND channel_id = ?
-                     AND short_type = 'clip' AND status = 'pending'
-                   ORDER BY scheduled_at ASC""",
-                (today, ch_id),
-            ).fetchall()
-            clip_ids = [r["id"] for r in clip_pending]
-            if len(clip_ids) > clip_max:
-                to_cancel = clip_ids[clip_max:]
-                conn.executemany(
-                    "UPDATE shorts_planned_slots SET status = 'cancelled', "
-                    "updated_at = datetime('now') WHERE id = ?",
-                    [(i,) for i in to_cancel],
-                )
-                result["cancelled_clip"] += len(to_cancel)
-                logger.warning(
-                    "Cleaned up %d excess clip slots for channel #%d (kept %d/%d)",
-                    len(to_cancel), ch_id, clip_max, len(clip_ids),
-                )
-            
-            conn.commit()
-        conn.close()
+            # Count completed longs for clip target. Usar la conexión del db
+            # recibido (nunca DATABASE_PATH global): en tests/worktrees debe
+            # operar sobre la misma DB que el planner, no sobre producción.
+            with db._connect() as conn:
+                long_count = conn.execute(
+                    """SELECT COUNT(*) as cnt FROM videos
+                       WHERE channel_id = ?
+                         AND status IN ('uploaded', 'published', 'uploaded_private')
+                         AND DATE(uploaded_at) >= DATE('now', 'localtime', '-1 day')""",
+                    (ch_id,),
+                ).fetchone()
+                clip_max = clips_per_long * (long_count["cnt"] if long_count else 0)
+
+                # Cancel excess native pending slots (keep only first N)
+                native_pending = conn.execute(
+                    """SELECT id FROM shorts_planned_slots
+                       WHERE date_key = ? AND channel_id = ?
+                         AND short_type = 'native' AND status = 'pending'
+                       ORDER BY scheduled_at ASC""",
+                    (today, ch_id),
+                ).fetchall()
+                native_ids = [r["id"] for r in native_pending]
+                if len(native_ids) > native_max:
+                    to_cancel = native_ids[native_max:]
+                    conn.executemany(
+                        "UPDATE shorts_planned_slots SET status = 'cancelled', "
+                        "updated_at = datetime('now') WHERE id = ?",
+                        [(i,) for i in to_cancel],
+                    )
+                    result["cancelled_native"] += len(to_cancel)
+                    logger.warning(
+                        "Cleaned up %d excess native slots for channel #%d (kept %d/%d)",
+                        len(to_cancel), ch_id, native_max, len(native_ids),
+                    )
+
+                # Cancel excess clip pending slots
+                clip_pending = conn.execute(
+                    """SELECT id FROM shorts_planned_slots
+                       WHERE date_key = ? AND channel_id = ?
+                         AND short_type = 'clip' AND status = 'pending'
+                       ORDER BY scheduled_at ASC""",
+                    (today, ch_id),
+                ).fetchall()
+                clip_ids = [r["id"] for r in clip_pending]
+                if len(clip_ids) > clip_max:
+                    to_cancel = clip_ids[clip_max:]
+                    conn.executemany(
+                        "UPDATE shorts_planned_slots SET status = 'cancelled', "
+                        "updated_at = datetime('now') WHERE id = ?",
+                        [(i,) for i in to_cancel],
+                    )
+                    result["cancelled_clip"] += len(to_cancel)
+                    logger.warning(
+                        "Cleaned up %d excess clip slots for channel #%d (kept %d/%d)",
+                        len(to_cancel), ch_id, clip_max, len(clip_ids),
+                    )
+
+                conn.commit()
         
         if result["cancelled_native"] > 0 or result["cancelled_clip"] > 0:
             logger.info(
@@ -2328,12 +2359,14 @@ def _fill_native_short_queue(db=None, loop=None) -> dict | None:
         if not sc.get("shorts_enabled", True):
             continue
         # Política explícita de entrega: un canal con cupo nativo 0 no debe
-        # acumular más shorts en cola (p. ej. canal3 en strike, 0/día).
+        # acumular más shorts en cola (p. ej. canal3 en strike, 0/día). El 0 es
+        # una pausa intencional: la rotación no la resucita.
         try:
             from api.services.gradual_resume import get_explicit_delivery_policy
             _pol = get_explicit_delivery_policy(cid, db)
             if _pol is not None and (
-                not _pol["shorts_enabled"] or _pol["native_shorts_per_day"] <= 0
+                not _pol["shorts_enabled"]
+                or _pol["native_shorts_per_day"] <= 0
             ):
                 continue
         except Exception:
@@ -5608,12 +5641,20 @@ def _upload_queued_shorts(db=None, max_per_pass: int = 3) -> int:
         slug = ch.get("slug", "")
         if not cid:
             continue
-        # ── Política explícita: un canal con shorts 0/día no sube nada ──
+        # ── Política explícita: un canal con shorts 0/día no sube nada.
+        # El 0 es una pausa intencional; la rotación solo suma sobre base > 0. ──
+        _rotation_shorts = 0
+        try:
+            from api.services.rotation_strategy import bonus_for
+            _rotation_shorts = int(bonus_for(cid, db).get("shorts", 0))
+        except Exception:
+            _rotation_shorts = 0
         try:
             from api.services.gradual_resume import get_explicit_delivery_policy
             _pol = get_explicit_delivery_policy(cid, db)
             if _pol is not None and (
-                not _pol["shorts_enabled"] or _pol["native_shorts_per_day"] <= 0
+                not _pol["shorts_enabled"]
+                or _pol["native_shorts_per_day"] <= 0
             ):
                 continue
         except Exception:
@@ -5638,10 +5679,10 @@ def _upload_queued_shorts(db=None, max_per_pass: int = 3) -> int:
                 continue
         except Exception:
             pass
-        # Tope diario de nativos publicados (planning)
+        # Tope diario de nativos publicados (planning) + bonus rotativo del día
         try:
             published_today = db.count_native_shorts_published_today(cid)
-            native_daily_max = db.get_native_shorts_per_day(cid)
+            native_daily_max = db.get_native_shorts_per_day(cid) + _rotation_shorts
             if published_today >= native_daily_max:
                 continue
         except Exception:

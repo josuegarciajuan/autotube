@@ -494,7 +494,9 @@ def apply_resume_phases(db=None, replan: bool = True, dry_run: bool = False) -> 
         # es la fuente de verdad de la cadencia en fase >=2.
         try:
             from api.services.channel_policy import resolve_channel_policy_values
-            _polv = resolve_channel_policy_values(cid, db=db)
+            # La rampa escribe la CADENCIA BASE del canal: nunca debe
+            # incorporar el bonus rotativo del día (se sumaría al config).
+            _polv = resolve_channel_policy_values(cid, db=db, include_rotation=False)
         except Exception:
             _polv = {}
 
