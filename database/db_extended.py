@@ -1468,6 +1468,9 @@ def migrate_v2(db_path: str = None):
     # ── v67: trazabilidad de selección editorial (F3) ──
     _migrate_v67(conn, logger)
 
+    # ── v68: normalización de banner_url/avatar_url al endpoint estático canónico ──
+    _migrate_v68(conn, logger)
+
     conn.commit()
     conn.close()
     
@@ -3965,6 +3968,49 @@ def _migrate_v67(conn, logger):
     except sqlite3.OperationalError as exc:
         logger.debug("Migration v67 failed: %s", exc)
     conn.commit()
+
+
+def _migrate_v68(conn, logger):
+    """Idempotent v68: normalize channel banner/avatar URLs.
+
+    Legacy `channels.banner_url` / `avatar_url` rows point to
+    ``/autotube/thumbnails/<slug>/<file>`` (an old nginx rule that no longer
+    exists) or to ``/thumbnails/<slug>/<file>``. Behind Apache → panel-gate,
+    ``/autotube`` is stripped and FastAPI has no ``/thumbnails`` route, so the
+    SPA catch-all returns HTML. Normalize them to the canonical static route
+    served by the API: ``/api/static/output/thumbnails/<slug>/<file>``.
+
+    Only rows carrying a legacy prefix are touched, so re-running is a no-op.
+    """
+    canonical = "/api/static/output/thumbnails/"
+    legacy_prefixes = ("/autotube/thumbnails/", "/thumbnails/")
+
+    try:
+        for column in ("banner_url", "avatar_url"):
+            updated = 0
+            for legacy in legacy_prefixes:
+                # Exact-prefix match keeps unrelated values (e.g. https URLs)
+                # untouched; the NOT LIKE guard makes the second pass idempotent
+                # even though the canonical path itself contains "/thumbnails/".
+                cur = conn.execute(
+                    f"""
+                    UPDATE channels
+                       SET {column} = REPLACE({column}, ?, ?)
+                     WHERE {column} LIKE ?
+                       AND {column} NOT LIKE '/api/static/%'
+                    """,
+                    (legacy, canonical, f"{legacy}%"),
+                )
+                updated += cur.rowcount if cur.rowcount > 0 else 0
+            if updated:
+                logger.info(
+                    "Migration v68: normalized %d %s row(s)", updated, column
+                )
+        conn.commit()
+        logger.info("Migration v68: channel media URLs normalized")
+    except sqlite3.OperationalError as exc:
+        logger.debug("Migration v68 failed: %s", exc)
+        conn.commit()
 
 
 def _migrate_v10(conn, logger):

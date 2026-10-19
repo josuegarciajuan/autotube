@@ -369,8 +369,8 @@ def recover_channel_images(channels: list[tuple]) -> dict:
             continue
 
         # ── Banner ──
+        # Canonical DB path (if ever needed): /api/static/output/thumbnails/{slug}/banner.jpg
         banner_path = slug_dir / "banner.jpg"
-        banner_url_db_path = f"/autotube/thumbnails/{slug}/banner.jpg"
 
         if banner_path.exists() and banner_path.stat().st_size > 5000:
             logger.info("  [skip] Banner already exists (%d bytes)", banner_path.stat().st_size)
@@ -388,8 +388,8 @@ def recover_channel_images(channels: list[tuple]) -> dict:
                 results["banner_fail"] += 1
 
         # ── Avatar ──
+        # Canonical DB path (if ever needed): /api/static/output/thumbnails/{slug}/avatar.jpg
         avatar_path = slug_dir / "avatar.jpg"
-        avatar_url_db_path = f"/autotube/thumbnails/{slug}/avatar.jpg"
 
         if avatar_path.exists() and avatar_path.stat().st_size > 2000:
             logger.info("  [skip] Avatar already exists (%d bytes)", avatar_path.stat().st_size)

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
-import { api, formatDate, formatDateTime, formatDuration, formatShortNumber, formatCountdown, formatTargetTime, parseApiDate, API_TIME_ZONE, apiUrl, statusBadge, statusLabel } from '../lib/api'
+import { api, formatDate, formatDateTime, formatDuration, formatShortNumber, formatCountdown, formatTargetTime, parseApiDate, API_TIME_ZONE, apiUrl, channelAssetUrl, statusBadge, statusLabel } from '../lib/api'
 import { useGeneration } from '../context/GenerationContext'
 import { useGenerationProgress } from '../hooks/useWebSocket'
 import { useResumeStatus } from '../hooks/useQueries'
@@ -944,7 +944,7 @@ export default function ChannelDetail() {
       <div className="relative">
         <div className="w-full h-32 sm:h-40 md:h-52 rounded-xl overflow-hidden bg-gradient-to-r from-dark-700 via-dark-600 to-neon-red/20">
           {channel.banner_url ? (
-            <img src={channel.banner_url} alt="Banner" className="w-full h-full object-cover" />
+            <img src={channelAssetUrl(channel.banner_url)} alt="Banner" className="w-full h-full object-cover" />
           ) : (
             <div className="w-full h-full flex items-center justify-center">
               <Image size={48} className="text-gray-700" />
@@ -956,7 +956,7 @@ export default function ChannelDetail() {
         <div className="px-4 md:px-6 -mt-8 sm:-mt-10 flex flex-col sm:flex-row items-start sm:items-end gap-3 sm:gap-5">
           <div className="w-16 h-16 sm:w-20 sm:h-20 md:w-24 md:h-24 rounded-full border-4 border-dark-900 bg-dark-700 overflow-hidden shrink-0">
             {channel.avatar_url ? (
-              <img src={channel.avatar_url} alt="Avatar" className="w-full h-full object-cover" />
+              <img src={channelAssetUrl(channel.avatar_url)} alt="Avatar" className="w-full h-full object-cover" />
             ) : (
               <div className="w-full h-full flex items-center justify-center bg-neon-red/20">
                 <Youtube size={28} className="text-neon-red" />

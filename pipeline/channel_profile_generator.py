@@ -384,9 +384,12 @@ def _get_rgb(palette: dict, key: str, fallback: tuple) -> tuple:
 
 
 def _build_static_url(slug: str, filename: str) -> str:
-    """Build the public URL for a channel asset via nginx proxy.
+    """Build the public URL for a channel asset via the FastAPI static route.
 
-    nginx routes /autotube/thumbnails/* → localhost:8000/api/static/thumbnails/*
-    Returns e.g. "/autotube/thumbnails/canal2/banner.jpg"
+    There is no nginx proxy anymore: production goes Apache → panel-gate →
+    FastAPI, and the gate strips the /autotube prefix. The canonical path is
+    served by the API under /api/static/output/thumbnails/... both in
+    production (Apache proxies /api) and in dev (Vite proxies /api).
+    Returns e.g. "/api/static/output/thumbnails/canal2/banner.jpg"
     """
-    return f"/autotube/thumbnails/{slug}/{filename}"
+    return f"/api/static/output/thumbnails/{slug}/{filename}"

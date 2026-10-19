@@ -911,6 +911,27 @@ export function mediaUrl(storedPath: string | null | undefined): string {
   return `api/static/${clean}`;
 }
 
+/** Resolve a channel banner/avatar path to a client-side URL.
+ *
+ *  Legacy rows may still store `/autotube/thumbnails/<slug>/<file>` (an old
+ *  nginx rule that no longer exists) or `/thumbnails/<slug>/<file>`. The gate
+ *  strips `/autotube` and FastAPI only serves the canonical
+ *  `/api/static/output/thumbnails/...` route, so normalize those prefixes here
+ *  until the DB migration has caught every row. Any other stored path falls
+ *  back to the generic media resolver. */
+export function channelAssetUrl(path: string | null | undefined): string {
+  if (!path) return '';
+  if (path.startsWith('http://') || path.startsWith('https://')) return path;
+  if (path.startsWith('/autotube/thumbnails/')) {
+    return `/api/static/output/thumbnails/${path.slice('/autotube/thumbnails/'.length)}`;
+  }
+  if (path.startsWith('/thumbnails/')) {
+    return `/api/static/output/thumbnails/${path.slice('/thumbnails/'.length)}`;
+  }
+  if (path.startsWith('/api/static/')) return path;
+  return mediaUrl(path);
+}
+
 /** Build a relative API URL that respects the <base href="/autotube/"> */
 export function apiUrl(path: string): string {
   return `api${path.startsWith('/') ? path : `/${path}`}`;
