@@ -55,6 +55,7 @@ def _validate_repack_plan(
     max_warmup_hours: int,
     warmup_min: int,
     timezone_str: str,
+    daily_cap_fn=None,
 ) -> list[str]:
     """Valida el plan COMPLETO antes de tocar YouTube o la DB.
 
@@ -101,8 +102,9 @@ def _validate_repack_plan(
         day = new_dt.astimezone(tz).date()
         per_day[day] = per_day.get(day, 0) + 1
     for day, count in per_day.items():
-        if max_per_day > 0 and count > max_per_day:
-            errors.append(f"{day}: {count} publicaciones > cap {max_per_day}")
+        cap = int(daily_cap_fn(day)) if callable(daily_cap_fn) else int(max_per_day)
+        if cap > 0 and count > cap:
+            errors.append(f"{day}: {count} publicaciones > cap {cap}")
 
     # 3. Orden subida + calentamiento → publicación, y ventana ≤48h.
     max_warm = max(1, int(max_warmup_hours)) * 3600
@@ -284,6 +286,24 @@ def apply_publish_repack(
     )
     cap_eff = int(policy.get("longform_publish_cap", 1) or 0)
     warmup_cap = int(policy.get("max_warmup_hours", 48) or 48)
+
+    # Cap por fecha (rotación). ``_policy`` resuelve hoy; validar todo el plan
+    # contra un único cap recortaría/abortaría los días con bonus.
+    _cap_cache: dict = {}
+
+    def _cap_for_validation(day) -> int:
+        key = day.isoformat() if hasattr(day, "isoformat") else str(day)[:10]
+        if key not in _cap_cache:
+            try:
+                from api.services.channel_policy import policy_value
+                _cap_cache[key] = int(policy_value(
+                    channel_id, "longform_publish_cap", db=db,
+                    default=cap_eff, day=key,
+                ) or 0)
+            except Exception:
+                _cap_cache[key] = cap_eff
+        return int(_cap_cache[key])
+
     validation_errors = _validate_repack_plan(
         changes,
         gap_hours=gap_eff,
@@ -291,6 +311,7 @@ def apply_publish_repack(
         max_warmup_hours=warmup_cap,
         warmup_min=warmup,
         timezone_str=tz_str,
+        daily_cap_fn=_cap_for_validation,
     )
     result["plan_valid"] = not validation_errors
     result["validation_errors"] = validation_errors

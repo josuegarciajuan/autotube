@@ -410,17 +410,23 @@ def ensure_daily_publish_coverage(db=None, horizon_days: int = 2,
             # ── Cuota diaria por canal (Configuración de Programación) ──
             # Fuente de verdad: el cap configurado del canal (override del
             # panel / perfil), NO el valor global del perfil.
-            try:
-                from api.services.channel_policy import policy_value
-                _cap = policy_value(
-                    ch_id, "longform_publish_cap", db=db, default=1,
-                )
-                # Un cap configurado a 0 es una PAUSA intencional del canal,
-                # no un valor ausente: no lo coerciones a 1.
-                n = 1 if _cap is None else int(_cap)
-            except Exception:
-                n = 1
-            n = max(0, n)
+            _cap_cache: dict = {}
+
+            def _cap_for(day) -> int:
+                key = day.isoformat() if hasattr(day, "isoformat") else str(day)[:10]
+                if key not in _cap_cache:
+                    try:
+                        from api.services.channel_policy import policy_value
+                        _value = policy_value(
+                            ch_id, "longform_publish_cap", db=db,
+                            default=1, day=key,
+                        )
+                        # Un cap configurado a 0 es una PAUSA intencional del
+                        # canal, no un valor ausente: no lo coerciones a 1.
+                        _cap_cache[key] = 1 if _value is None else max(0, int(_value))
+                    except Exception:
+                        _cap_cache[key] = 1
+                return int(_cap_cache[key])
 
             # ── Zona horaria del canal ──
             try:
@@ -450,6 +456,7 @@ def ensure_daily_publish_coverage(db=None, horizon_days: int = 2,
             # HOY ya cubierto por un vídeo publicado hoy cuenta como cobertura:
             # la cola pendiente lo excluye tras publicarse.
             published_today = _published_today_count(db, ch_id, tz)
+            n_today = _cap_for(today_local)
             days = []
             for i in range(horizon_days):
                 d = today_local + timedelta(days=i)
@@ -459,9 +466,9 @@ def ensure_daily_publish_coverage(db=None, horizon_days: int = 2,
                 count = coverage.get(d, 0)
                 if i == 0:
                     count += published_today
-                days.append((d, count))
+                days.append((d, count, _cap_for(d)))
 
-            deficit_days = [str(d) for d, c in days if c < n]
+            deficit_days = [str(d) for d, c, cap in days if c < cap]
             reason = "cobertura OK"
             triggered = False
 
@@ -482,7 +489,7 @@ def ensure_daily_publish_coverage(db=None, horizon_days: int = 2,
                           "reason": "skip"}
             try:
                 today_info = remediate_today_public_deficit(
-                    db, slug, ch_id, tz, n,
+                    db, slug, ch_id, tz, n_today,
                 )
                 if today_info.get("forced"):
                     result["public_catchup_forced"] = (
@@ -520,8 +527,8 @@ def ensure_daily_publish_coverage(db=None, horizon_days: int = 2,
 
             result["channels"][slug] = {
                 "pending": len(pending),
-                "quota_per_day": n,
-                "coverage": {str(d): c for d, c in days},
+                "quota_per_day": n_today,
+                "coverage": {str(d): c for d, c, _cap in days},
                 "deficit_days": deficit_days,
                 "triggered": triggered,
                 "reason": reason,

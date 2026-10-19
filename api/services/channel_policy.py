@@ -237,12 +237,19 @@ def get_historical_strikes(channel_id: int, db) -> int:
     return _int_state(db, f"shorts_spam_strikes_{channel_id}")
 
 
-def resolve_channel_policy_values(channel_id: int, db=None, config: dict | None = None) -> dict:
+def resolve_channel_policy_values(channel_id: int, db=None, config: dict | None = None,
+                                  day=None, include_rotation: bool = True) -> dict:
     """Resolve channel pacing while making the global profile a safety ceiling.
 
     A channel can be *more* conservative than the active profile.  It cannot
     raise caps or lower safety gaps, which keeps all scheduling entry points in
     agreement when the profile changes.
+
+    ``day`` (date or ISO string, Madrid calendar day) selects the rotating
+    publication phase.  It defaults to today; planning callers must pass the
+    target day so a 7-day horizon does not apply today's bonus to every day.
+    Rotation adds at most +1 long or +1 native short and never touches safety
+    gaps or the per-channel hard blocks.
     """
     if db is None:
         from database.db_extended import ExtendedDatabase
@@ -316,12 +323,32 @@ def resolve_channel_policy_values(channel_id: int, db=None, config: dict | None 
     else:
         longform_cap = (max(0, min(int(channel_cap), global_cap))
                         if channel_cap is not None else global_cap)
+    native_short_cap = max(0, int(native_short_cap))
+
+    # ── Rotating publication strategy (primordial planning authority) ──
+    # The bonus is added AFTER the base policy (panel/profile/state) so the
+    # program remains the baseline and the rotation contributes exactly +1.
+    rotation = {"enabled": False, "phase": None, "bonus_type": None,
+                "longs": 0, "shorts": 0}
+    if include_rotation:
+        try:
+            from api.services.rotation_strategy import bonus_for
+            rotation = bonus_for(int(channel_id), db, day)
+            # Un 0 explícito es una PAUSA intencional (breaker/strike/operador):
+            # la rotación suma sobre la programación, nunca la resucita.
+            if int(longform_cap) > 0:
+                longform_cap = int(longform_cap) + int(rotation.get("longs", 0))
+            if int(native_short_cap) > 0:
+                native_short_cap = int(native_short_cap) + int(rotation.get("shorts", 0))
+        except Exception:
+            _count("rotation_unavailable")
+
     return {
         "channel_id": int(channel_id),
         "longform_publish_cap": longform_cap,
-        "native_shorts_per_day": max(0, native_short_cap),
+        "native_shorts_per_day": native_short_cap,
         "public_longform_per_day": longform_cap,
-        "public_shorts_per_day": max(0, native_short_cap),
+        "public_shorts_per_day": native_short_cap,
         "same_channel_publish_gap_h": max(publish_gap, int(pacing.get("same_channel_publish_gap_h", 24))),
         "same_channel_upload_gap_h": max(upload_gap, int(pacing.get("same_channel_upload_gap_h", 6))),
         "publish_target_hour": target,
@@ -341,6 +368,12 @@ def resolve_channel_policy_values(channel_id: int, db=None, config: dict | None 
             "max_warmup_hours", "MAX_WARMUP_HOURS", "PUBLISH_MAX_WARMUP_HOURS",
             default=48,
         ) or 48)),
+        # ── Rotación (informativo para panel/telemetría) ──
+        "rotation_enabled": bool(rotation.get("enabled")),
+        "rotation_phase": rotation.get("phase"),
+        "rotation_bonus_type": rotation.get("bonus_type"),
+        "rotation_extra_longs": int(rotation.get("longs", 0)),
+        "rotation_extra_shorts": int(rotation.get("shorts", 0)),
     }
 
 
@@ -390,17 +423,27 @@ def resolve_channel_policy(channel_id: int, db=None, now: float | None = None) -
     return policy
 
 
-def policy_value(channel_id: int, key: str, db=None, default=None):
-    """Small common accessor used by schedulers (never reads config directly)."""
+def policy_value(channel_id: int, key: str, db=None, default=None, day=None,
+                 include_rotation: bool = True):
+    """Small common accessor used by schedulers (never reads config directly).
+
+    ``day`` selects the rotating phase (defaults to today, Madrid).
+    """
     try:
-        return resolve_channel_policy_values(channel_id, db=db).get(key, default)
+        return resolve_channel_policy_values(
+            channel_id, db=db, day=day, include_rotation=include_rotation,
+        ).get(key, default)
     except Exception:
         return default
 
 
-def resolve_policy_for_config(channel_id: int, config: dict, db=None) -> dict:
+def resolve_policy_for_config(channel_id: int, config: dict, db=None, day=None,
+                              include_rotation: bool = True) -> dict:
     """Resolve an in-memory planning row using the same global safety rules."""
-    return resolve_channel_policy_values(channel_id, db=db, config=config)
+    return resolve_channel_policy_values(
+        channel_id, db=db, config=config, day=day,
+        include_rotation=include_rotation,
+    )
 
 
 def collect_channel_policy_snapshot(db, now: float | None = None) -> list[dict]:

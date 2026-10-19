@@ -1548,13 +1548,34 @@ def repack_channel_publish_times(
     # (gap * len) daba 66h para 9 vídeos y dejaba el cap por defecto (120h) en
     # vigor, pero 9 vídeos a 2/día necesitan ~5 días → los sobrantes se
     # recortaban al bound y volvían a apilarse (bug canal5, sep 2026).
-    _rate_per_day = 1
+    # ── Cap por día (rotación: el objetivo cambia cada fecha) ──
+    # Se cachea por fecha para no resolver la política en cada vídeo del walk.
+    _cap_by_day: dict = {}
+
+    def _cap_for_day(_day) -> int:
+        key = _day.isoformat() if hasattr(_day, "isoformat") else str(_day)[:10]
+        if key not in _cap_by_day:
+            try:
+                from api.services.channel_policy import policy_value as _pv_day
+                _cap_by_day[key] = max(0, int(_pv_day(
+                    channel_id, "longform_publish_cap", db=db,
+                    default=1, day=key,
+                ) or 0))
+            except Exception:
+                _cap_by_day[key] = 1
+        return int(_cap_by_day[key])
+
     try:
-        from api.services.channel_policy import policy_value as _pv
-        _rate_per_day = int(_pv(channel_id, "longform_publish_cap", db=db, default=1) or 1)
+        from datetime import date as _date_cls
+        _cap_probe = [
+            _cap_for_day(_date_cls.today() + _td(days=offset))
+            for offset in range(8)
+        ]
     except Exception:
-        _rate_per_day = 1
-    _rate_per_day = max(1, _rate_per_day)
+        # Defensivo: si el probe falla, mantener el comportamiento conservador
+        # histórico (1/día) en lugar de abortar el repack.
+        _cap_probe = [1]
+    _rate_per_day = max(1, max(_cap_probe or [1]))
     _days_needed = (len(rows) + _rate_per_day - 1) // _rate_per_day
     safety_ahead_hours = max(safety_ahead_hours, (_days_needed + 1) * 24)
 
@@ -1588,16 +1609,13 @@ def repack_channel_publish_times(
     # Se resuelve ANTES de ordenar franjas y de calcular el horizonte: la tasa
     # diaria determina tanto el nº de franjas usables como los días que
     # necesita la cola.
-    max_per_day = 1
     try:
-        from api.services.channel_policy import policy_value as _pvp
-        max_per_day = int(_pvp(
-            channel_id, "longform_publish_cap", db=db, default=1,
-        ) or 0)
+        max_per_day = max(_cap_probe or [1])
     except Exception:
-        max_per_day = int(cfg.get("MAX_LONGFORM_PUBLISH_PER_DAY", 1) or 0)
-    max_per_day = max(0, max_per_day)
-    if max_per_day == 0:
+        max_per_day = max(0, int(cfg.get("MAX_LONGFORM_PUBLISH_PER_DAY", 1) or 0))
+    # Un cap 0 solo desactiva si TODOS los días del horizonte son 0 (pausa
+    # intencional); la rotación puede dar 0 hoy pero >0 mañana.
+    if max_per_day == 0 and not any(_cap_probe or []):
         logger.info("[%s] repack: publicación long-form desactivada (cap=0)", slug)
         return []
 
@@ -1725,7 +1743,7 @@ def repack_channel_publish_times(
         cursor_local_now = cursor_utc.astimezone(tz)
         while (
             counts_toward_cap
-            and day_used.get(cursor_local_now.date(), 0) >= max_per_day
+            and day_used.get(cursor_local_now.date(), 0) >= _cap_for_day(cursor_local_now.date())
             and guard < 14
         ):
             cursor_local_now = cursor_local_now.replace(
@@ -1794,7 +1812,7 @@ def repack_channel_publish_times(
             _old_local_date = old_dt.astimezone(tz).date()
             day_cap_ok = (
                 not counts_toward_cap
-                or day_used.get(_old_local_date, 0) < max_per_day
+                or day_used.get(_old_local_date, 0) < _cap_for_day(_old_local_date)
             )
             min_public_ok = True
             if status in ("awaiting_upload", "ready") and up_raw:
@@ -1876,7 +1894,7 @@ def repack_channel_publish_times(
         # siguiente slot usa la siguiente franja rank del MISMO día (day_slots_used
         # ya conoce las horas ocupadas). Si el día está lleno, saltamos al rank1
         # del día siguiente.
-        if counts_toward_cap and day_used.get(slot_local.date(), 0) >= max_per_day:
+        if counts_toward_cap and day_used.get(slot_local.date(), 0) >= _cap_for_day(slot_local.date()):
             cursor_utc = (
                 slot_local.replace(
                     hour=peak_hours[0], minute=0, second=0, microsecond=0,

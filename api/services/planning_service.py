@@ -525,21 +525,34 @@ def _global_generation_gap_minutes(db=None, channel_id=None, config=None) -> int
 
 # ── Alternate pattern resolution ─────────────────────────────────
 
-def _publish_cap_per_day(db=None, channel_id=None, config=None) -> int:
+def invalidate_policy_caches() -> None:
+    """Drop the short-lived planning cap cache (rotation reset/day change)."""
+    _PUBLISH_CAP_CACHE["ts"] = 0.0
+    _PUBLISH_CAP_CACHE["values"].clear()
+    try:
+        from api.services.rotation_strategy import invalidate_cache
+        invalidate_cache()
+    except Exception:
+        pass
+
+
+def _publish_cap_per_day(db=None, channel_id=None, config=None, day=None) -> int:
     """Techo diario de publicación por canal (fuente ÚNICA = perfil de pacing).
 
-    Lee ``max_longform_publish_day`` del perfil central (strike/recovery/normal).
-    Al cambiar de perfil, planning + repack + subida se reajustan al mismo número
-    (es el interruptor con el que se escala la cadencia tras los strikes). Cache
-    TTL corto para no abrir conexiones de DB por llamada (get_pacing_value crea
-    una por invocación y aquí se llama por canal×día en cada replan).
+    Lee ``max_longform_publish_day`` del perfil central (strike/recovery/normal)
+    y aplica el bonus de la fase rotativa del día. Al cambiar de perfil o de
+    fase, planning + repack + subida se reajustan al mismo número. Cache TTL
+    corto para no abrir conexiones de DB por llamada (get_pacing_value crea una
+    por invocación y aquí se llama por canal×día en cada replan).
     """
     import time as _t
     _now = _t.time()
-    # La caché DEBE ser por (DB, canal): un único valor global hacía que el
-    # primer canal consultado fijara el cap de todos los demás durante 5 min.
+    # La caché DEBE ser por (DB, canal, día): un único valor global hacía que el
+    # primer canal consultado fijara el cap de todos los demás durante 5 min, y
+    # sin el día el bonus de hoy se aplicaría a todo el horizonte.
     db_key = str(getattr(db, "db_path", "")) if db is not None else "default"
-    key = (db_key, int(channel_id or 0))
+    day_key = str(day) if day is not None else ""
+    key = (db_key, int(channel_id or 0), day_key)
     if _now - _PUBLISH_CAP_CACHE["ts"] > 300:
         _PUBLISH_CAP_CACHE["values"].clear()
         _PUBLISH_CAP_CACHE["ts"] = _now
@@ -548,7 +561,7 @@ def _publish_cap_per_day(db=None, channel_id=None, config=None) -> int:
             from api.services.channel_policy import policy_value
             if db is not None:
                 _value = int(policy_value(channel_id or 0, "longform_publish_cap", db=db,
-                                          default=1) or 1)
+                                          default=1, day=day) or 1)
             else:
                 # Unit/test callers may provide only an in-memory channel row;
                 # preserve the profile lookup without opening the live DB.
@@ -582,14 +595,34 @@ def _resolve_videos_per_day(ch: dict, date_str: str, db=None) -> int:
     """
     try:
         if db is None:
-            cap = _publish_cap_per_day()
+            cap = _publish_cap_per_day(day=date_str)
         else:
             from api.services.channel_policy import resolve_policy_for_config
             cap = int(resolve_policy_for_config(
-                int(ch.get("channel_id", 0) or 0), ch, db=db
+                int(ch.get("channel_id", 0) or 0), ch, db=db, day=date_str,
             )["longform_publish_cap"])
     except Exception:
-        cap = _publish_cap_per_day()
+        cap = _publish_cap_per_day(day=date_str)
+
+    # ── Rotación circular: autoridad de planificación (primordial) ──
+    # La base es la programación del panel; el bonus de fase se suma y NUNCA
+    # se aplica el boost aleatorio legacy en paralelo (evita el doble extra).
+    rotation = None
+    if db is not None:
+        try:
+            from api.services.rotation_strategy import bonus_for
+            rotation = bonus_for(int(ch.get("channel_id", 0) or 0), db, date_str)
+        except Exception:
+            rotation = None
+    if rotation and rotation.get("enabled"):
+        vpd_raw = ch.get("public_videos_per_day", ch.get("videos_per_day", 2))
+        try:
+            base = 2 if vpd_raw in (None, "") else int(vpd_raw)
+        except (TypeError, ValueError):
+            base = 2
+        if base <= 0:
+            return 0
+        return max(0, min(base + int(rotation.get("longs", 0)), int(cap)))
 
     # Legacy alternate pattern takes precedence if explicitly set
     pattern = ch.get("alternate_pattern")
@@ -817,12 +850,29 @@ def compute_daily_upload_allocation(db, date_str: str) -> dict:
         desired_long = 0
         if cfg.get("planning_enabled", True):
             try:
-                desired_long = _resolve_videos_per_day(cfg, date_str)
+                # Legacy callers resolved without DB (global profile). Rotation
+                # needs the date-aware per-channel resolver; keep the old path
+                # untouched while the strategy is disabled.
+                from api.services.rotation_strategy import is_enabled as _rot_on
+                _rotation_day = _rot_on(db)
+            except Exception:
+                _rotation_day = False
+            try:
+                desired_long = _resolve_videos_per_day(
+                    cfg, date_str, db=db if _rotation_day else None,
+                )
             except Exception:
                 desired_long = 0
         sc = shorts_cfg.get(ch_id, {})
         shorts_on = sc.get("shorts_enabled", True)
         desired_native = int(sc.get("shorts_native_per_day", 3) or 3) if shorts_on else 0
+        if desired_native > 0:
+            # El 0 es una pausa intencional: la rotación solo suma sobre base > 0.
+            try:
+                from api.services.rotation_strategy import bonus_for
+                desired_native += int(bonus_for(ch_id, db, date_str).get("shorts", 0))
+            except Exception:
+                pass
         clips_per_long = int(sc.get("shorts_clips_per_long", 3) or 3)
         by_project.setdefault(proj, []).append({
             "slug": slug,
@@ -1212,7 +1262,7 @@ def _distribute_slots(
         return []
 
     if is_scheduled:
-        daily_cap = _publish_cap_per_day(db, channel_id, cfg)
+        daily_cap = _publish_cap_per_day(db, channel_id, cfg, day=date_str)
         min_gap = _publish_gap_minutes(channel_id, db=db, config=cfg)
     else:
         # Immediate: no publication cap/gap beyond the requested count.
@@ -1725,13 +1775,19 @@ def _horizon_scheduled_allocations(
             datetime.now(tz) + timedelta(minutes=warmup_head),
         )
         busy, day_usage = _occupied_publish_targets(db, ch_id, tz)
+        # Cap variable por día: la fase rotativa cambia el objetivo de cada
+        # fecha. Un escalar aplicaría el bonus de hoy a todo el horizonte.
+        daily_caps = {
+            d: _publish_cap_per_day(db, ch_id, ch, day=d.isoformat())
+            for d, _ in day_counts
+        }
         times = allocate_publish_times(
             franjas,
             day_counts,
             tz=tz,
             earliest=earliest,
             min_gap_minutes=_publish_gap_minutes(ch_id, db=db, config=ch),
-            daily_cap=_publish_cap_per_day(db, ch_id, ch),
+            daily_cap=daily_caps,
             busy=busy,
             day_usage=day_usage,
         )
@@ -5208,7 +5264,10 @@ def _cap_pending_public_slots(existing: list[dict], db) -> tuple[list[dict], lis
     excess = []
     for (channel_id, _day), group in groups.items():
         from api.services.channel_policy import policy_value
-        cap = max(0, int(policy_value(channel_id, "longform_publish_cap", db=db, default=0) or 0))
+        # Cap de la FECHA del grupo: con rotación cada día tiene su objetivo.
+        cap = max(0, int(policy_value(
+            channel_id, "longform_publish_cap", db=db, default=0, day=_day,
+        ) or 0))
         ordered = sorted(group, key=lambda row: (str(row.get("target_public_at")),
                                                    str(row.get("scheduled_at") or ""), int(row["id"])))
         for row in ordered[:cap]:

@@ -73,6 +73,8 @@ def get_short_drain_status():
         per_day = 0
         try:
             per_day = int(db.get_native_shorts_per_day(cid) or 0)
+            from api.services.rotation_strategy import bonus_for
+            per_day += int(bonus_for(cid, db).get("shorts", 0))
         except Exception:
             pass
         eta_days = None

@@ -9,6 +9,7 @@ El perfil central gobierna TODAS las reglas de frecuencia y espaciado
 relaja/endurece el sistema de golpe sin tocar código.
 """
 
+import json
 import logging
 
 from fastapi import APIRouter
@@ -29,6 +30,12 @@ class ProfileUpdate(BaseModel):
 class ChannelDeliveryUpdate(BaseModel):
     state: str
     override: dict | None = None
+
+
+class RotationUpdate(BaseModel):
+    enabled: bool | None = None
+    reset: bool = False
+    allow_marathons: bool | None = None
 
 
 @router.get("/profile")
@@ -59,6 +66,47 @@ def set_profile(body: ProfileUpdate):
         "active_profile": body.profile,
         "pacing": resolved,
     }
+
+
+@router.get("/rotation")
+def get_rotation():
+    """Estado de la estrategia circular + fase de hoy y previsualización."""
+    from api.services.rotation_strategy import summary
+    return summary(get_db())
+
+
+@router.put("/rotation")
+def update_rotation(body: RotationUpdate):
+    """Activar/desactivar o reiniciar la estrategia de publicación circular.
+
+    Al aplicar el cambio se fuerza un replan long-form + shorts para que el
+    nuevo bonus surta efecto inmediatamente.
+    """
+    db = get_db()
+    from api.services import rotation_strategy as rs
+    if body.reset:
+        strategy = rs.reset_strategy(
+            db, enabled=True if body.enabled is None else bool(body.enabled),
+        )
+    else:
+        strategy = rs.get_strategy(db, create=True) or {}
+        if body.enabled is not None:
+            strategy = rs.set_enabled(db, bool(body.enabled))
+        if body.allow_marathons is not None:
+            strategy["allow_marathons"] = bool(body.allow_marathons)
+            db.set_system_state(rs.STRATEGY_KEY, json.dumps(strategy, ensure_ascii=False))
+            rs.invalidate_cache()
+    try:
+        from api.services.planning_service import invalidate_policy_caches
+        invalidate_policy_caches()
+    except Exception:
+        pass
+    applied = {}
+    try:
+        applied = rs.ensure_daily_rotation(db, apply=True, force=True)
+    except Exception as exc:
+        applied = {"error": str(exc)}
+    return {"ok": True, "applied": applied, **rs.summary(db)}
 
 
 @router.get("/channels/{channel_id}")

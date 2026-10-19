@@ -58,6 +58,7 @@ TASK_TIMEOUTS = {
     "retention_feedback": 90000,      # loop duerme 86400s (24h) + trabajo
     "media_retention": 25200,         # loop duerme 21600s (6h) + sweep ≤600s
     "generation_hold_refresh": 25200, # loop duerme 21600s (6h) + refresco
+    "rotation_daily": 900,            # materializa la fase del día (loop 300s + replan)
 }
 
 _TASK_HEARTBEATS_MONOTONIC: dict[str, float] = {}

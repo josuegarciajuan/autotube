@@ -330,6 +330,18 @@ def check_and_dispatch_marathon(db) -> dict | None:
         logger.info("Marathon: remediation mode active — generation is held until backlog preflight")
         return None
 
+    # ── Rotación circular: los maratones publican muchos longs fuera del plan
+    # diario, así que se inhiben mientras la estrategia esté activa. Kill-switch
+    # explícito: strategy["allow_marathons"]=true o desactivar la rotación.
+    try:
+        from api.services.rotation_strategy import get_strategy, is_enabled
+        _rotation = get_strategy(db)
+        if is_enabled(db) and not bool((_rotation or {}).get("allow_marathons", False)):
+            logger.info("Marathon: rotation strategy active — dispatch suppressed")
+            return None
+    except Exception:
+        pass
+
     # 1. Backlog REAL: solo no-maratones pendientes de subir.
     backlog = calculate_backlog(db)
 
