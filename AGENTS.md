@@ -516,6 +516,35 @@ gaps), `publish_scheduler` (gap mismo-canal + tope diario repack), `spam_mitigat
 > - **Día natural:** caps de shorts y cuenta se cuentan por día **Madrid**
 >   (`madrid_day_range`), no por `localtime` del server.
 
+### 🔄 Estrategia de publicación circular (4 canales × 4 fases) — oct 2026
+
+**Spec completo:** `specs/estrategia-publicacion-circular.md`.
+
+- **Fases**: `normal` (programa base), `shorts+1` (+1 short), `largos+1`
+  (+1 long), `random+1` (+1 long **o** short, decidido una vez/día de forma
+  determinista y balanceada: 2 long + 2 short por bloque de 4 días).
+- **Rotación**: permutación inicial aleatoria persistida (sin fases repetidas) +
+  avance de una posición por día natural de Madrid. Los 4 canales mantienen
+  siempre fases distintas; en 4 días cada canal pasa por las 4 fases.
+- **Autoridad**: la rotación manda sobre `smart_replan`, horizonte, top-up,
+  recovery, cobertura, repack, válvula de shorts, reconciliación de caps y
+  “Reprogramar Ahora”. El objetivo es `base + bonus` y todos los consumidores
+  resuelven el cap **por fecha** (`resolve_channel_policy_values(..., day=...)`).
+- **Seguridad intacta**: strike/bloqueo, cuota, gaps, cuenta Google, warmup y
+  content safety NO se relajan; si bloquean, el plan se difiere. Los maratones
+  quedan suprimidos mientras la rotación esté activa (publican fuera del plan).
+- **Persistencia** (sin migración): `system_state["rotation_strategy_v1"]` y
+  `system_state["rotation_day_<YYYY-MM-DD>"]`.
+- **Reprogramación diaria**: loop `rotation_daily` en `api/main.py` (cada 5 min).
+  Al cambiar el día materializa la fase y ejecuta replan de horizonte long-form
+  (`force_replan=True`, sin tocar `running`) + shorts. Idempotente.
+- **Panel/API**: `GET/PUT /api/pacing/rotation` (`enabled`, `reset`,
+  `allow_marathons`). Kill-switch de entorno: `ROTATION_STRATEGY_DISABLED=1`.
+- **Rampa post-strike**: `gradual_resume` usa `include_rotation=False` para
+  escribir la cadencia BASE (el bonus nunca se convierte en config permanente).
+- El boost aleatorio legacy (`videos_day_boost_weight`) y `alternate_pattern` se
+  ignoran mientras la rotación está activa (evita doble extra).
+
 ### 💧 Modo drenaje de shorts (`short_drain_mode`) — `api/services/shorts_scheduler.py`
 
 Cuando hay un backlog de nativos generados a cola (`status='generated'`, sin
