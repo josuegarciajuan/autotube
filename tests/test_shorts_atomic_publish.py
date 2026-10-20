@@ -527,3 +527,56 @@ def test_migration_v70_allows_duplicate_target_per_franja(tmp_path):
         conn.commit()
 
         _migrate_v70(conn, logging.getLogger("test"))  # idempotente
+
+
+def test_retime_updates_rank_and_avoids_exact_collision(tmp_path, monkeypatch):
+    db = _timing_db(tmp_path)
+    with db._connect() as conn:
+        for h, m, rank in ((8, 22, 1), (13, 13, 3), (17, 13, 2)):
+            conn.execute(
+                """INSERT INTO optimal_publish_slots
+                   (channel_id, content_type, target_hour, target_minute,
+                    slot_rank, timezone)
+                   VALUES (1, 'short', ?, ?, ?, 'Europe/Madrid')""",
+                (h, m, rank),
+            )
+        # Slot vigente en la franja rank2 (17:13 Madrid = 15:13 UTC).
+        conn.execute(
+            """INSERT INTO shorts_planned_slots
+               (channel_id, date_key, scheduled_at, target_upload_at,
+                target_publish_at, short_type, status, slot_rank,
+                franja_dup_index)
+               VALUES (1, '2026-10-20', '2026-10-20 14:20:00',
+                       '2026-10-20 15:13:00', '2026-10-20 15:13:00',
+                       'native', 'pending', 2, 0)"""
+        )
+        # Slot vencido (target en el pasado) con rank obsoleto.
+        conn.execute(
+            """INSERT INTO shorts_planned_slots
+               (channel_id, date_key, scheduled_at, target_upload_at,
+                target_publish_at, short_type, status, slot_rank,
+                franja_dup_index)
+               VALUES (1, '2026-10-20', '2026-10-20 07:00:00',
+                       '2026-10-20 08:00:00', '2026-10-20 08:00:00',
+                       'native', 'pending', 3, 0)"""
+        )
+        conn.commit()
+
+    monkeypatch.setattr(ss, "_short_schedule_lead_minutes", lambda db, cid: 60)
+    moved = ss.retime_overdue_shorts_slots(
+        db, now=datetime(2026, 10, 20, 10, 0, tzinfo=timezone.utc),
+    )
+    assert moved == 1
+    with db._connect() as conn:
+        rows = conn.execute(
+            """SELECT target_publish_at, slot_rank, franja_dup_index
+               FROM shorts_planned_slots WHERE channel_id=1 ORDER BY id"""
+        ).fetchall()
+    # No hay dos objetivos idénticos sin índice de duplicado.
+    by_target = {}
+    for row in rows:
+        by_target.setdefault(row["target_publish_at"], []).append(
+            int(row["franja_dup_index"] or 0))
+    assert all(len(set(dups)) == len(dups) for dups in by_target.values())
+    # El slot movido tiene un rank coherente con una de las franjas.
+    assert all(int(r["slot_rank"]) in (1, 2, 3) for r in rows)

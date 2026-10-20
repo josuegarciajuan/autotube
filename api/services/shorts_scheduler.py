@@ -2263,6 +2263,40 @@ def retime_overdue_shorts_slots(db=None, now=None) -> int:
             if not allocated:
                 continue
             new_local = allocated[0].when
+            new_rank = int(allocated[0].franja.rank)
+            dup_index = int(allocated[0].duplicate_index)
+
+            # Evitar colisión exacta con otro slot del mismo canal/día: si la
+            # franja elegida ya está ocupada, se trata como duplicado
+            # intencional (misma franja, offset secuencial) y se actualiza el
+            # rank para que los guards lo reconozcan.
+            try:
+                with db._connect() as conn:
+                    siblings = conn.execute(
+                        """SELECT target_publish_at, slot_rank, franja_dup_index
+                           FROM shorts_planned_slots
+                           WHERE channel_id = ? AND date_key = ? AND id != ?
+                             AND status IN ('pending', 'running')
+                             AND short_type = 'native'""",
+                        (channel_id, new_local.date().isoformat(), slot["id"]),
+                    ).fetchall()
+                used_times = {str(r["target_publish_at"]) for r in siblings
+                              if r["target_publish_at"]}
+                same_rank = [int(r["franja_dup_index"] or 0) for r in siblings
+                             if int(r["slot_rank"] or 0) == new_rank]
+                if same_rank:
+                    dup_index = max(same_rank) + 1
+                new_local = new_local + timedelta(minutes=3 * max(0, dup_index))
+                # Si aun así choca con otra hora, avanzar hasta quedar libre.
+                for _ in range(20):
+                    candidate = new_local.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
+                    if candidate not in used_times:
+                        break
+                    dup_index += 1
+                    new_local += timedelta(minutes=3)
+            except Exception as exc:
+                logger.debug("[%s] retime collision check skipped: %s", slug, exc)
+
             new_utc = new_local.astimezone(UTC)
             start_utc = new_utc - timedelta(minutes=lead)
             try:
@@ -2271,14 +2305,14 @@ def retime_overdue_shorts_slots(db=None, now=None) -> int:
                         """UPDATE shorts_planned_slots
                               SET scheduled_at = ?, target_upload_at = ?,
                                   target_publish_at = ?, date_key = ?,
-                                  franja_dup_index = ?,
+                                  slot_rank = ?, franja_dup_index = ?,
                                   updated_at = CURRENT_TIMESTAMP
                             WHERE id = ? AND status = 'pending'""",
                         (start_utc.strftime("%Y-%m-%d %H:%M:%S"),
                          new_utc.strftime("%Y-%m-%d %H:%M:%S"),
                          new_utc.strftime("%Y-%m-%d %H:%M:%S"),
-                         new_local.date().isoformat(),
-                         int(allocated[0].duplicate_index), slot["id"]),
+                         new_local.date().isoformat(), new_rank, dup_index,
+                         slot["id"]),
                     )
                     conn.commit()
                 busy_local.append(new_local)
