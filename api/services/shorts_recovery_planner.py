@@ -27,7 +27,7 @@ but only between 10:00-23:00 CEST.
 
 import logging
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 import pytz
@@ -100,13 +100,15 @@ def _count_published_by_type(db, channel_id: int) -> tuple[int, int]:
     clip = 0
     try:
         with db._connect() as conn:
+            from api.time_utils import madrid_day_range
+            day_start, day_end = madrid_day_range()
             rows = conn.execute(
                 """SELECT type FROM shorts
                    WHERE channel_id = ?
                      AND youtube_id IS NOT NULL
-                     AND status = 'published'
-                     AND DATE(published_at) = DATE('now', 'localtime')""",
-                (channel_id,),
+                     AND status IN ('published', 'scheduled')
+                     AND published_at >= ? AND published_at < ?""",
+                (channel_id, day_start, day_end),
             ).fetchall()
             for r in rows:
                 if r["type"] == "native":
@@ -224,46 +226,75 @@ def _create_recovery_slots(
     missing: int, now_minute_of_day: int,
     active_slots: list[dict], db,
 ) -> list[dict]:
-    """Create recovery slots of the given type. Returns list of created slot info."""
-    existing_times = []
-    for s in active_slots:
-        t = _parse_minute_of_day(s.get("scheduled_at"))
-        if t is not None:
-            existing_times.append(t)
+    """Create recovery slots with the SAME planner as the daily programme.
 
-    min_ahead = MIN_HOUR_AHEAD * 60
-    created_slots = []
+    Recovery used to scan the clock every 15 minutes with a hardcoded 20-min
+    gap, which produced off-peak publishes and diverged from the normal plan.
+    It now uses ranked franjas, the channel timezone and the real render+upload
+    lead (start = publish - lead).
+    """
+    from api.services.shorts_scheduler import (
+        _channel_lead_minutes, _load_shorts_franjas, _resolve_channel_tz,
+        _same_type_gap_minutes,
+    )
+    from api.services.publish_allocator import allocate_publish_times
 
-    for i in range(missing):
-        chosen = _find_available_minute(now_minute_of_day, existing_times, min_ahead)
-        if chosen is None:
-            logger.warning("[shorts:%s] No available time for recovery slot #%d", slug, i + 1)
+    tz = _resolve_channel_tz(db, ch_id, slug)
+    lead = _channel_lead_minutes(db, ch_id)
+    franjas = _load_shorts_franjas(db, ch_id)
+    now_local = _now_madrid()
+
+    busy: list[datetime] = []
+    for slot in active_slots:
+        raw = slot.get("target_publish_at") or slot.get("target_upload_at")
+        if not raw:
+            continue
+        try:
+            busy.append(
+                datetime.strptime(str(raw)[:19], "%Y-%m-%d %H:%M:%S")
+                .replace(tzinfo=pytz.utc).astimezone(tz)
+            )
+        except (ValueError, TypeError):
             continue
 
-        scheduled_h = chosen // 60
-        scheduled_m = chosen % 60
-        up_min = chosen + SHORTS_GEN_MINUTES
-        up_h = min(up_min // 60, 23)
-        up_m = min(up_min % 60, 59)
+    earliest = now_local.astimezone(tz) + timedelta(
+        minutes=MIN_HOUR_AHEAD * 60 + lead,
+    )
+    allocated = allocate_publish_times(
+        franjas,
+        [(earliest.date(), missing)],
+        tz=tz,
+        earliest=earliest,
+        min_gap_minutes=_same_type_gap_minutes(),
+        daily_cap=missing,
+        busy=busy,
+    )
 
-        scheduled_str = _local_hm_to_utc(today, scheduled_h, scheduled_m)
-        upload_str = _local_hm_to_utc(today, up_h, up_m)
-
+    created_slots = []
+    for target_local in allocated:
+        target_utc = target_local.astimezone(pytz.utc)
+        start_utc = target_utc - timedelta(minutes=lead)
+        date_key = target_local.date().isoformat()
         try:
             slot_id = db.create_shorts_slot(
-                channel_id=ch_id, date_key=today,
-                scheduled_at=scheduled_str, target_upload_at=upload_str,
+                channel_id=ch_id, date_key=date_key,
+                scheduled_at=start_utc.strftime("%Y-%m-%d %H:%M:%S"),
+                target_upload_at=target_utc.strftime("%Y-%m-%d %H:%M:%S"),
+                target_publish_at=target_utc.strftime("%Y-%m-%d %H:%M:%S"),
                 short_type=short_type,
                 slot_position=len(active_slots) + len(created_slots) + 1,
             )
-            existing_times.append(chosen)
             created_slots.append({
-                "slot_id": slot_id, "scheduled_at": scheduled_str,
-                "target_upload_at": upload_str, "type": short_type,
+                "slot_id": slot_id,
+                "scheduled_at": start_utc.strftime("%Y-%m-%d %H:%M:%S"),
+                "target_upload_at": target_utc.strftime("%Y-%m-%d %H:%M:%S"),
+                "target_publish_at": target_utc.strftime("%Y-%m-%d %H:%M:%S"),
+                "type": short_type,
             })
             logger.info(
-                "[shorts:%s] Recovery slot #%d: gen=%02d:%02d type=%s",
-                slug, slot_id, scheduled_h, scheduled_m, short_type,
+                "[shorts:%s] Recovery slot #%d: start=%s publish=%s type=%s (lead=%dmin)",
+                slug, slot_id, start_utc.strftime("%H:%M"),
+                target_utc.strftime("%H:%M"), short_type, lead,
             )
         except Exception as exc:
             logger.error("[shorts:%s] Failed to create recovery slot: %s", slug, exc)
@@ -495,7 +526,12 @@ def auto_recover_shorts(db=None) -> dict:
             )
             continue
 
-        native_target = cfg.get("shorts_native_per_day", 3)
+        try:
+            from api.services.channel_policy import resolve_channel_policy_values
+            native_target = int(resolve_channel_policy_values(
+                ch_id, db, day=today).get("native_shorts_per_day", 0) or 0)
+        except Exception:
+            native_target = int(cfg.get("shorts_native_per_day", 3) or 0)
         clips_per_long = 0
 
         if native_target <= 0 and clips_per_long <= 0:
