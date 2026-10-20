@@ -400,6 +400,25 @@ capado histórico.
 - **Para volver a 1 concurrente:** `MAX_CONCURRENT_LONGFORM_JOBS=1` o desactivar `AUTOTUBE_DIST_RENDER_V2`.
 - **Para permitir 2:** `AUTOTUBE_DIST_RENDER_V2=1` (requiere nodos `render` provisionados con `autotube-worker:1`). Ver `superserver/projects/autotube.md`.
 
+### 🧩 Invariante de publicación atómica de shorts (oct 2026)
+
+- Un slot nativo planificado **no genera cola**: `scheduled_at =
+  target_publish_at - lead_time` y el worker renderiza y sube en la misma
+  ejecución (`generate_only=False`). La hora pública se garantiza arrancando
+  antes, no con `publishAt` ni con una segunda válvula.
+- `lead_time` = p90 real de `render+subida` por canal (últimos 45 días,
+  mínimo 20 muestras; fallback global/60 min; margen 10 min). Servicio:
+  `api/services/shorts_lead_time.py`.
+- Planificación única: `reconcile_shorts_schedule()` (horizonte, panel,
+  rotación, franjas óptimas, recuperación). La hora de inicio puede caer el
+  día anterior a la publicación.
+- `_spawn_background_short_upload` y `_fill_native_short_queue` ya **no** se
+  ejecutan en el tick normal. Los shorts `status='generated'` existentes se
+  conservan y se suben SOLO manualmente
+  (`POST /api/planning/shorts-queue/upload/{id}`).
+- Gates antes de renderizar y re-check antes de subir (cuota, strike, topes,
+  espaciado). Lock de subida por canal vía `flock` entre procesos.
+
 ### 🎬 Invariante de escenas — NO repetir jamás
 **Un video generado NUNCA repetirá escenas visuales.** Cada escena debe tener un asset visual único (video o imagen distinta).
 
