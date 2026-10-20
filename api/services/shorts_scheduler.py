@@ -2310,6 +2310,56 @@ def normalize_pending_shorts_starts(db=None) -> int:
     return updated
 
 
+def spread_pending_slots_globally(db=None) -> int:
+    """Apply cross-channel spacing to slots that already exist in the DB.
+
+    Needed for the transition: previously planned slots were never spaced
+    globally, so several channels could share the same minute. Their targets
+    are moved (and starts recalculated) without changing status.
+    """
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+    try:
+        pending = db.get_shorts_planned_slots(status="pending")
+    except Exception:
+        return 0
+    native = [s for s in pending if (s.get("short_type") or "native") == "native"]
+    if len(native) < 2:
+        return 0
+    before = {s["id"]: (s.get("target_publish_at"), s.get("scheduled_at"),
+                        s.get("date_key")) for s in native}
+    _spread_shorts_globally(native, db)
+    changed = 0
+    for slot in native:
+        key = slot.get("id")
+        if key not in before:
+            continue
+        now_val = (slot.get("target_publish_at"), slot.get("scheduled_at"),
+                   slot.get("date_key"))
+        if now_val == before[key]:
+            continue
+        try:
+            with db._connect() as conn:
+                conn.execute(
+                    """UPDATE shorts_planned_slots
+                          SET scheduled_at = ?, target_upload_at = ?,
+                              target_publish_at = ?, date_key = ?,
+                              updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ? AND status = 'pending'""",
+                    (slot.get("scheduled_at"), slot.get("target_publish_at"),
+                     slot.get("target_publish_at"), slot.get("date_key"), key),
+                )
+                conn.commit()
+            changed += 1
+        except Exception as exc:
+            logger.debug("global spread update failed for slot #%s: %s", key, exc)
+    if changed:
+        logger.info("Shorts reconcile: %d pending slot(s) spread across channels",
+                    changed)
+    return changed
+
+
 def retime_overdue_shorts_slots(db=None, now=None) -> int:
     """Move pending native slots whose START time is already unviable.
 
@@ -2468,6 +2518,7 @@ def reconcile_shorts_schedule(db=None, channel_ids=None, start_day=None,
             results[day_str] = f"ERROR: {e}"
 
     normalize_pending_shorts_starts(db)
+    spread_pending_slots_globally(db)
     retime_overdue_shorts_slots(db)
     total = sum(int(v.split()[0]) for v in results.values() if v and v[0].isdigit())
     logger.info(
