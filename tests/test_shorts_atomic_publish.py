@@ -292,3 +292,30 @@ def test_migration_v69_adds_and_backfills_columns(tmp_path):
 
         # Idempotent
         _migrate_v69(conn, logging.getLogger("test"))
+
+
+# ── 8. Transición: slots antiguos alinean su hora de inicio ─────
+
+
+def test_normalize_aligns_existing_pending_start(tmp_path, monkeypatch):
+    db = _timing_db(tmp_path)
+    with db._connect() as conn:
+        conn.execute(
+            """INSERT INTO shorts_planned_slots
+               (channel_id, date_key, scheduled_at, target_upload_at,
+                target_publish_at, short_type, status)
+               VALUES (1, '2026-10-21', '2026-10-21 07:45:00',
+                       '2026-10-21 08:00:00', '2026-10-21 08:00:00',
+                       'native', 'pending')"""
+        )
+        conn.commit()
+    monkeypatch.setattr(ss, "_channel_lead_minutes", lambda db, cid: 60)
+
+    assert ss.normalize_pending_shorts_starts(db) == 1
+    with db._connect() as conn:
+        row = conn.execute(
+            "SELECT scheduled_at, target_publish_at FROM shorts_planned_slots "
+            "WHERE date_key='2026-10-21'"
+        ).fetchone()
+    assert row["scheduled_at"] == "2026-10-21 07:00:00", "publicación intacta, inicio −60m"
+    assert row["target_publish_at"] == "2026-10-21 08:00:00"
