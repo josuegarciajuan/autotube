@@ -100,6 +100,9 @@ def _get_extended_db(db_path):
     from database.db_extended import ExtendedDatabase
     db = ExtendedDatabase()
     db._db_path = str(db_path)  # override the default path
+    # La caché de cap/política usa db.db_path: sin esto, las pruebas leen la
+    # ruta de producción y comparten caché entre tests.
+    db.db_path = str(db_path)
     # Monkey-patch _connect to use our test path
     original_connect = db._connect
     def _test_connect():
