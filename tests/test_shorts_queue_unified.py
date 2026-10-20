@@ -13,7 +13,7 @@ ago 2026:
      generación.
   5. La válvula corre aunque el tope global esté alcanzado (no lo frena el
      early-return del dispatch), pero no supera el tope.
-  6. Un slot native due se despacha con generate_only=True (a cola).
+  6. Un slot native due se despacha con generate_only=False (trabajo atómico).
   7. El clip pre-renderizado (status='ready') NO se sube al despacharse: queda
      en cola para la válvula.
 """
@@ -326,13 +326,15 @@ def test_valve_cooldown_passes_after_gap(patch_database_path, fake_uploader):
 
 # ── 5. La válvula corre aunque el tope global esté alcanzado ─────
 
-def test_valve_runs_even_when_global_cap_reached(tmp_path, monkeypatch):
+def test_dispatch_does_not_drain_legacy_queue_automatically(tmp_path, monkeypatch):
+    """La cola heredada (`status='generated'`) NO se drena desde el scheduler.
+
+    Se conserva para subida manual; el flujo nuevo es atómico (render→upload)
+    y no crea ni consume esa cola.
+    """
     db, path = _db(tmp_path)
     import config.settings as settings
     monkeypatch.setattr(settings, "DATABASE_PATH", __import__("pathlib").Path(path))
-    # Tope global alcanzado (6 publicados hoy)
-    for ch in (1, 2):
-        _set_published(db, ch, 3)
     calls = {"n": 0}
 
     def _spy(*a, **kw):
@@ -341,14 +343,13 @@ def test_valve_runs_even_when_global_cap_reached(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ss, "_upload_queued_shorts", _spy)
     monkeypatch.setattr(ss, "_youtube_quota_blocked", lambda *a, **kw: False)
-    monkeypatch.setattr(ss, "_fill_native_short_queue", lambda *a, **kw: None)
     ss.dispatch_next_due_shorts_slot(db=db)
-    assert calls["n"] == 1, "la válvula debe ejecutarse aunque el tope global esté alcanzado"
+    assert calls["n"] == 0, "el scheduler no debe drenar la cola heredada"
 
 
 # ── 6. Slot native due → generate_only ───────────────────────────
 
-def test_native_slot_dispatches_generate_only(tmp_path, monkeypatch):
+def test_native_slot_dispatches_atomic_render_and_upload(tmp_path, monkeypatch):
     import asyncio
     db, path = _db(tmp_path)
     import config.settings as settings
@@ -390,7 +391,9 @@ def test_native_slot_dispatches_generate_only(tmp_path, monkeypatch):
     finally:
         loop.close()
     assert captured.get("short_type") == "native"
-    assert captured.get("generate_only") is True, "el native debe despacharse a cola (generate_only)"
+    assert captured.get("generate_only") is False, (
+        "el native planificado es atómico: renderiza y sube en el mismo worker"
+    )
 
 
 # ── 7. Clip pre-renderizado NO se sube al despacharse ────────────

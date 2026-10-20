@@ -50,6 +50,9 @@ CREATE TABLE IF NOT EXISTS generation_jobs (
     error_msg   TEXT,
     started_at  TIMESTAMP,
     finished_at TIMESTAMP,
+    render_finished_at TIMESTAMP,
+    upload_started_at TIMESTAMP,
+    upload_finished_at TIMESTAMP,
     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

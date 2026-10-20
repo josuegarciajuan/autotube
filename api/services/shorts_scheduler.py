@@ -14,6 +14,8 @@ Key v12 changes:
 - Fair daily rotation across channels
 """
 
+import contextlib as _contextlib_mod
+import fcntl as _fcntl_mod
 import hashlib
 import logging
 import os
@@ -93,6 +95,39 @@ _CHANNEL_UPLOAD_LOCKS_GUARD = _threading_mod.Lock()
 def _channel_upload_lock(cid: int) -> _threading_mod.Lock:
     with _CHANNEL_UPLOAD_LOCKS_GUARD:
         return _CHANNEL_UPLOAD_LOCKS.setdefault(cid, _threading_mod.Lock())
+
+
+@_contextlib_mod.contextmanager
+def _short_upload_file_lock(channel_id: int, timeout: int = 1800):
+    """Cross-process upload lock for one channel.
+
+    Planned shorts run in subprocess workers, so the in-process
+    ``_channel_upload_lock`` is not enough: two workers (or a worker plus the
+    manual backlog upload) could otherwise upload for the same channel at the
+    same time. ``flock`` is atomic across processes on this host.
+    """
+    import tempfile
+    path = Path(tempfile.gettempdir()) / f"autotube-short-upload-{int(channel_id)}.lock"
+    handle = open(path, "a+")
+    deadline = time.time() + max(1, int(timeout))
+    try:
+        while True:
+            try:
+                _fcntl_mod.flock(handle.fileno(), _fcntl_mod.LOCK_EX | _fcntl_mod.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.time() >= deadline:
+                    raise TimeoutError(
+                        f"upload lock timeout for channel {channel_id}"
+                    )
+                time.sleep(1)
+        yield
+    finally:
+        try:
+            _fcntl_mod.flock(handle.fileno(), _fcntl_mod.LOCK_UN)
+        except Exception:
+            pass
+        handle.close()
 
 
 # Cooldown after all slots exhausted to prevent log spam and CPU waste
@@ -1119,24 +1154,30 @@ def _minutes_to_utc_slot(date_str: str, total_min: int,
                           long_slot_position: int = None,
                           slot_position: int = 0,
                           gen_lead_min: int = None) -> dict:
-    """Convert a minute-of-day (local tz) to a slot dict with UTC timestamps.
+    """Convert a PUBLISH minute-of-day (local tz) to a slot dict.
 
-    Handles overflow past midnight: target_upload_at / scheduled_at spill
-    into the next day, but date_key stays as the original planning day.
+    ``total_min`` is the target public-publish time. ``scheduled_at`` is
+    derived by subtracting ``gen_lead_min`` and MAY fall on the previous day
+    (a 09:30 publish with a 60-min lead starts at 08:30 the same day; a 00:30
+    publish starts at 23:30 the day before). The old implementation clamped
+    the start to 00:00, which made early-morning slots fire late.
+
+    ``date_key`` always stays on the PUBLISH day, even when the render starts
+    on the previous calendar day.
 
     Args:
-        gen_lead_min: generation lead time in minutes. Defaults to
-            SHORT_GEN_LEAD_MIN (15) for native, pass SHORT_GEN_LEAD_MIN_CLIP (5)
-            for pre-rendered clips.
+        gen_lead_min: full render+upload lead time in minutes. Defaults to
+            SHORT_GEN_LEAD_MIN only for callers without a channel estimate.
     """
     if gen_lead_min is None:
         gen_lead_min = SHORT_GEN_LEAD_MIN
-    # Handle overflow past midnight: adjust effective date for datetime
-    # conversion, but keep original date_key (slot was planned for this day)
+    gen_lead_min = max(0, int(gen_lead_min))
+
+    # Adjust the publish date for slots planned past midnight, keeping date_key
+    # as the original planning day.
     overflow_days = total_min // (24 * 60)
     if overflow_days > 0:
-        dt_date = date.fromisoformat(date_str)
-        dt_date = dt_date + timedelta(days=overflow_days)
+        dt_date = date.fromisoformat(date_str) + timedelta(days=overflow_days)
         effective_date_str = dt_date.isoformat()
         total_min = total_min % (24 * 60)
     else:
@@ -1145,19 +1186,38 @@ def _minutes_to_utc_slot(date_str: str, total_min: int,
 
     h, m = total_min // 60, total_min % 60
     target_utc = _local_to_utc(effective_date_str, h, m, tz)
-    sched_total = max(0, total_min - gen_lead_min)
-    sh, sm = sched_total // 60, sched_total % 60
-    sched_utc = _local_to_utc(effective_date_str, sh, sm, tz)
+
+    # Start = publish - lead. Negative totals (early-morning publishes) must
+    # roll the START date backwards instead of clamping to midnight.
+    sched_total = total_min - gen_lead_min
+    sched_date = date.fromisoformat(effective_date_str) + timedelta(
+        days=sched_total // (24 * 60)
+    )
+    sched_min = sched_total % (24 * 60)
+    sh, sm = sched_min // 60, sched_min % 60
+    sched_utc = _local_to_utc(sched_date.isoformat(), sh, sm, tz)
     return {
         "channel_id": channel_id,
-        "date_key": date_str,  # keep original planning date
+        "date_key": date_str,  # keep original PUBLISH date
         "scheduled_at": sched_utc,
-        "target_upload_at": target_utc,
+        "target_upload_at": target_utc,  # legacy alias
+        "target_publish_at": target_utc,
+        "schedule_lead_min": gen_lead_min,
         "short_type": short_type,
         "long_slot_position": long_slot_position,
         "slot_position": slot_position,
         "channel_slug": channel_slug,
     }
+
+
+def _channel_lead_minutes(db, channel_id: int) -> int:
+    """Estimated render+upload lead for planned native shorts (minutes)."""
+    try:
+        from api.services.shorts_lead_time import estimate_channel_lead_minutes
+        return int(estimate_channel_lead_minutes(channel_id, db))
+    except Exception as exc:
+        logger.debug("[shorts lead] estimate failed for ch=%s: %s", channel_id, exc)
+        return SHORT_GEN_LEAD_MIN
 
 
 def _load_shorts_optimal_windows(db=None, channel_id=None) -> list[tuple]:
@@ -1337,6 +1397,7 @@ def _build_shorts_slots_for_channel(
     tz = _resolve_channel_tz(_db, channel_id, slug)
     franjas = _load_shorts_franjas(_db, channel_id)
     rank_by_time = {(f.hour, f.minute): f.rank for f in franjas}
+    lead_min = _channel_lead_minutes(_db, channel_id)
 
     if native_count > 0:
         start_day = date.fromisoformat(date_str)
@@ -1415,6 +1476,7 @@ def _build_shorts_slots_for_channel(
             tz=tz,
             long_slot_position=long_pos,
             slot_position=pos,
+            gen_lead_min=lead_min,
         )
         slot["channel_name"] = ch.get("name", slug)
         slot["slot_rank"] = slot_rank  # track which optimal slot was used
@@ -1454,6 +1516,11 @@ def _build_filler_slots_for_channel(
     slug = ch["slug"]
     channel_id = ch["id"]
     pos = global_start_pos
+    try:
+        from database.db_extended import ExtendedDatabase
+        lead_min = _channel_lead_minutes(ExtendedDatabase(), channel_id)
+    except Exception:
+        lead_min = SHORT_GEN_LEAD_MIN
 
     # Load channel timezone from config
     tz = DEFAULT_TIMEZONE
@@ -1504,6 +1571,7 @@ def _build_filler_slots_for_channel(
             tz=tz,
             long_slot_position=None,
             slot_position=pos + 1,
+            gen_lead_min=lead_min,
         )
         pos += 1
         slot["channel_name"] = ch.get("name", slug)
@@ -1762,6 +1830,128 @@ def get_shorts_distribution(channel_id: int, db, date_str: str) -> tuple[int, in
     return natives, clips
 
 
+
+def _global_publish_spacing_minutes(db) -> int:
+    """Separación mínima entre publicaciones de CANALES DISTINTOS (min)."""
+    try:
+        from api.services.pacing_profile import get_pacing_value
+        return max(0, int(get_pacing_value("global_upload_spacing_min", 45, db) or 0))
+    except Exception:
+        return 45
+
+
+def _spread_shorts_globally(all_slots: list[dict], db) -> list[dict]:
+    """Evita que varios canales publiquen shorts casi a la vez.
+
+    El perfil de cadencia impone ``global_upload_spacing_min`` entre subidas de
+    canales distintos. Antes solo se aplicaba en la válvula (esperando en
+    caliente, lo que retrasaba la publicación). Ahora se aplica al PLAN: si dos
+    canales caen en la misma franja, el segundo se mueve a la siguiente franja
+    válida de SU canal, y su hora de inicio se recalcula con su lead.
+
+    Se conserva el gap del mismo canal y nunca se adelanta una publicación.
+    """
+    spacing = _global_publish_spacing_minutes(db)
+    if spacing <= 0 or len(all_slots) < 2:
+        return all_slots
+
+    tz_cache: dict[int, ZoneInfo] = {}
+    franjas_cache: dict[int, list] = {}
+
+    def _tz(cid):
+        if cid not in tz_cache:
+            slug = next((x.get("channel_slug", "") for x in all_slots
+                         if int(x.get("channel_id", 0)) == cid), "")
+            tz_cache[cid] = _resolve_channel_tz(db, cid, slug)
+        return tz_cache[cid]
+
+    def _franjas(cid):
+        if cid not in franjas_cache:
+            franjas_cache[cid] = _load_shorts_franjas(db, cid)
+        return franjas_cache[cid]
+
+    def _as_utc(value: str) -> datetime:
+        return datetime.strptime(str(value)[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+
+    def _conflict(cid: int, when: datetime, accepted: list[tuple[int, datetime]]) -> bool:
+        gap = _same_type_gap_minutes()
+        for other_cid, other_dt in accepted:
+            minutes = abs((when - other_dt).total_seconds()) / 60.0
+            if other_cid == cid:
+                if minutes < gap:
+                    return True
+            elif minutes < spacing:
+                return True
+        return False
+
+    def _next_window(cid: int, earliest: datetime,
+                     accepted: list[tuple[int, datetime]]) -> datetime | None:
+        tz = _tz(cid)
+        local_earliest = earliest.astimezone(tz)
+        base_day = local_earliest.date()
+        windows = sorted((f.hour, f.minute) for f in _franjas(cid))
+        for day_offset in range(0, 4):
+            day = base_day + timedelta(days=day_offset)
+            for hour, minute in windows:
+                candidate = datetime.combine(
+                    day, datetime.min.time(), tzinfo=tz,
+                ).replace(hour=hour, minute=minute)
+                if candidate < local_earliest:
+                    continue
+                candidate_utc = candidate.astimezone(UTC)
+                if not _conflict(cid, candidate_utc, accepted):
+                    return candidate_utc
+        return None
+
+    ordered = sorted(
+        all_slots,
+        key=lambda x: (x.get("target_publish_at") or x.get("target_upload_at") or "",
+                       int(x.get("slot_rank") or 999)),
+    )
+    accepted: list[tuple[int, datetime]] = []
+    moved = 0
+    for slot in ordered:
+        raw = slot.get("target_publish_at") or slot.get("target_upload_at")
+        cid = int(slot.get("channel_id") or 0)
+        if not raw or not cid:
+            continue
+        when = _as_utc(raw)
+        if not _conflict(cid, when, accepted):
+            accepted.append((cid, when))
+            continue
+
+        # Move past the blocking publication, then to the next own franja.
+        blocking = [
+            dt for other_cid, dt in accepted
+            if (other_cid == cid and abs((when - dt).total_seconds()) / 60.0 < _same_type_gap_minutes())
+            or (other_cid != cid and abs((when - dt).total_seconds()) / 60.0 < spacing)
+        ]
+        earliest = max([when] + [dt + timedelta(minutes=spacing) for dt in blocking])
+        new_when = _next_window(cid, earliest, accepted)
+        if new_when is None:
+            accepted.append((cid, when))
+            continue
+
+        lead = int(slot.get("schedule_lead_min") or _channel_lead_minutes(db, cid))
+        tz = _tz(cid)
+        local = new_when.astimezone(tz)
+        publish_utc = new_when.strftime("%Y-%m-%d %H:%M:%S")
+        start_utc = (new_when - timedelta(minutes=lead)).strftime("%Y-%m-%d %H:%M:%S")
+        slot["target_upload_at"] = publish_utc
+        slot["target_publish_at"] = publish_utc
+        slot["scheduled_at"] = start_utc
+        slot["date_key"] = local.date().isoformat()
+        slot["schedule_lead_min"] = lead
+        slot["globally_retimed"] = True
+        accepted.append((cid, new_when))
+        moved += 1
+
+    if moved:
+        logger.info("Shorts plan: %d slot(s) retimed to honour global upload spacing (%d min)",
+                    moved, spacing)
+    return all_slots
+
+
 def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
     """Compute shorts slots per active channel for a given date (YYYY-MM-DD).
 
@@ -1933,7 +2123,10 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
 
         all_slots.extend(channel_slots)
 
-    # Sort by scheduled_at
+    # ── Reparto global entre canales (spacing de subida) ──
+    all_slots = _spread_shorts_globally(all_slots, db)
+
+    # Sort by scheduled_at (start of the atomic render+upload job)
     all_slots.sort(key=lambda s: s["scheduled_at"])
 
     # Re-number slot positions after final sort
@@ -2064,63 +2257,175 @@ def _inject_compensation_native_slots(date_str: str, db) -> int:
     return inserted
 
 
-def generate_upcoming_shorts(days: int = 7, db=None) -> dict:
-    """Generate and persist shorts slots for the next N days (including today).
+def retime_overdue_shorts_slots(db=None, now=None) -> int:
+    """Move pending native slots whose START time is already unviable.
 
-    Returns summary dict: {date_str: "N slots" | "ERROR: ..."}.
+    A slot is overdue when ``target_publish_at - lead`` is in the past. It is
+    moved to the next valid ranked franja (never published immediately), so an
+    API restart or a busy host does not create a burst. The target public time
+    and the derived start time are both rewritten.
+    """
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+    now_utc = now or datetime.now(UTC)
+    moved = 0
+    try:
+        pending = db.get_shorts_planned_slots(status="pending")
+    except Exception:
+        return 0
+
+    by_channel: dict[int, list[dict]] = {}
+    for slot in pending:
+        if (slot.get("short_type") or "native") != "native":
+            continue
+        by_channel.setdefault(int(slot["channel_id"]), []).append(slot)
+
+    for channel_id, slots in by_channel.items():
+        slug = slots[0].get("channel_slug", "")
+        tz = _resolve_channel_tz(db, channel_id, slug)
+        lead = _channel_lead_minutes(db, channel_id)
+        franjas = _load_shorts_franjas(db, channel_id)
+        busy_local = []
+        for other in slots:
+            raw = other.get("target_publish_at") or other.get("target_upload_at")
+            if not raw:
+                continue
+            try:
+                busy_local.append(
+                    datetime.strptime(str(raw)[:19], "%Y-%m-%d %H:%M:%S")
+                    .replace(tzinfo=UTC).astimezone(tz)
+                )
+            except (ValueError, TypeError):
+                continue
+
+        for slot in slots:
+            raw = slot.get("target_publish_at") or slot.get("target_upload_at")
+            if not raw:
+                continue
+            try:
+                target_utc = datetime.strptime(
+                    str(raw)[:19], "%Y-%m-%d %H:%M:%S"
+                ).replace(tzinfo=UTC)
+            except (ValueError, TypeError):
+                continue
+            if target_utc >= now_utc + timedelta(minutes=lead):
+                continue
+
+            earliest = (max(now_utc, target_utc) + timedelta(minutes=lead + 5)).astimezone(tz)
+            try:
+                allocated = allocate_publish_times(
+                    franjas,
+                    [(earliest.date(), 1)],
+                    tz=tz,
+                    earliest=earliest,
+                    min_gap_minutes=_same_type_gap_minutes(),
+                    daily_cap=1,
+                    busy=[b for b in busy_local if b != target_utc.astimezone(tz)],
+                )
+            except Exception as exc:
+                logger.debug("[%s] retime allocate failed: %s", slug, exc)
+                allocated = []
+            if not allocated:
+                continue
+            new_local = allocated[0]
+            new_utc = new_local.astimezone(UTC)
+            start_utc = new_utc - timedelta(minutes=lead)
+            try:
+                with db._connect() as conn:
+                    conn.execute(
+                        """UPDATE shorts_planned_slots
+                              SET scheduled_at = ?, target_upload_at = ?,
+                                  target_publish_at = ?, date_key = ?,
+                                  updated_at = CURRENT_TIMESTAMP
+                            WHERE id = ? AND status = 'pending'""",
+                        (start_utc.strftime("%Y-%m-%d %H:%M:%S"),
+                         new_utc.strftime("%Y-%m-%d %H:%M:%S"),
+                         new_utc.strftime("%Y-%m-%d %H:%M:%S"),
+                         new_local.date().isoformat(), slot["id"]),
+                    )
+                    conn.commit()
+                busy_local.append(new_local)
+                moved += 1
+                logger.info(
+                    "[%s] Retimed overdue short slot #%s → publish %s (start %s)",
+                    slug, slot["id"], new_utc.strftime("%Y-%m-%d %H:%M"),
+                    start_utc.strftime("%Y-%m-%d %H:%M"),
+                )
+            except Exception as exc:
+                logger.warning("[%s] retime update failed for #%s: %s",
+                               slug, slot["id"], exc)
+    if moved:
+        logger.info("Shorts reconcile: %d overdue slot(s) retimed", moved)
+    return moved
+
+
+def reconcile_shorts_schedule(db=None, channel_ids=None, start_day=None,
+                              horizon_days: int = 7, reason: str = "reconcile") -> dict:
+    """ÚNICA entrada de planificación de shorts.
+
+    Calcula el plan del horizonte con el asignador de franjas, deriva la hora
+    de inicio restando el lead real de cada canal, reparte las publicaciones
+    entre canales y replanifica slots vencidos. Todos los replans (arranque,
+    panel, rotación, franjas óptimas, recuperación) deben delegar aquí.
     """
     if db is None:
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
 
-    today = datetime.now(DEFAULT_TIMEZONE).date()
-    results = {}
-
-    for day_offset in range(days):
-        day_str = (today + timedelta(days=day_offset)).isoformat()
+    base_day = datetime.now(DEFAULT_TIMEZONE).date()
+    if start_day:
         try:
-            # La idempotencia es POR CANAL dentro de compute_daily_shorts_slots:
-            # un canal ya cubierto se salta, y uno deficitario se regenera sin
-            # tocar los pendientes de los demás. Antes, cualquier pendiente de
-            # cualquier canal bloqueaba el día entero y dejaba horarios viejos.
-            existing_pending = db.get_shorts_planned_slots(date_key=day_str, status="pending")
-            if existing_pending and day_str == '2026-07-31':
-                # ── v25: One-day native compensation (solo 2026-07-31) ──
-                _inject_compensation_native_slots(day_str, db)
+            base_day = date.fromisoformat(str(start_day)[:10])
+        except ValueError:
+            pass
+    results = {}
+    wanted = {int(c) for c in channel_ids} if channel_ids else None
 
+    for day_offset in range(max(1, int(horizon_days))):
+        day_str = (base_day + timedelta(days=day_offset)).isoformat()
+        try:
             slots = compute_daily_shorts_slots(day_str, db)
+            if wanted is not None:
+                slots = [s for s in slots if int(s.get("channel_id") or 0) in wanted]
 
-            # ── Today: discard past-due slots so they don't fire immediately ──
-            # scheduled_at is stored in UTC (see _minutes_to_utc_slot), so the
-            # "now" reference MUST be UTC too. Using local time (CEST) here made
-            # every replan drop slots that were actually up to 2h in the future,
-            # orphaning their pre-rendered shorts (status 'ready' without slot).
+            # Today: drop only slots whose PUBLIC time is already past. A slot
+            # whose start passed but whose publish is still in the future must
+            # stay (the dispatcher starts it immediately; retime handles stale
+            # ones).
             if day_offset == 0 and slots:
                 now_utc_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
-                future = [s for s in slots if s.get("scheduled_at", "") >= now_utc_str]
+                future = [
+                    s for s in slots
+                    if (s.get("target_publish_at") or s.get("target_upload_at") or "")
+                    >= now_utc_str
+                ]
                 dropped = len(slots) - len(future)
                 if dropped > 0:
                     logger.info(
-                        "Dropped %d past-due shorts slots for %s "
-                        "(already behind current time %s)",
-                        dropped, day_str, now_utc_str[:16],
+                        "Dropped %d shorts slots for %s whose publish time already passed",
+                        dropped, day_str,
                     )
                 slots = future
 
             count = persist_daily_shorts_slots(day_str, slots, db) if slots else 0
             results[day_str] = f"{count} slots"
         except Exception as e:
-            logger.error("Failed to generate shorts schedule for %s: %s", day_str, e)
+            logger.error("Failed to reconcile shorts schedule for %s: %s", day_str, e)
             results[day_str] = f"ERROR: {e}"
 
-    total = sum(
-        int(v.split()[0]) for v in results.values() if v and v[0].isdigit()
-    )
+    retime_overdue_shorts_slots(db)
+    total = sum(int(v.split()[0]) for v in results.values() if v and v[0].isdigit())
     logger.info(
-        "Generated shorts slots for %d days: %d total",
-        days, total,
+        "Shorts reconcile (%s): %d days, %d slots", reason, horizon_days, total,
     )
     return results
+
+
+def generate_upcoming_shorts(days: int = 7, db=None) -> dict:
+    """Compat wrapper: delegate to the single reconciliation entry point."""
+    return reconcile_shorts_schedule(db=db, horizon_days=days,
+                                     reason="generate_upcoming")
 
 
 def ensure_today_shorts_scheduled(db=None) -> bool:
@@ -2161,10 +2466,11 @@ def ensure_today_shorts_scheduled(db=None) -> bool:
         )
         return True
 
-    logger.info("No pending/running shorts slots for today — regenerating schedule")
-    slots = compute_daily_shorts_slots(today, db)
-    count = persist_daily_shorts_slots(today, slots, db)
-    return count > 0
+    logger.info("No pending/running shorts slots for today — reconciling schedule")
+    result = reconcile_shorts_schedule(
+        db=db, start_day=today, horizon_days=1, reason="ensure_today",
+    )
+    return any(v and v[0].isdigit() and not v.startswith("0 ") for v in result.values())
 
 
 def cleanup_excessive_shorts_slots(db=None) -> dict:
@@ -2190,13 +2496,23 @@ def cleanup_excessive_shorts_slots(db=None) -> dict:
             if not cfg.get("shorts_enabled", True):
                 continue
             
+            # Base: override explícito del panel; si no existe, el valor de
+            # planificación legado del canal. Encima se suma el bonus rotativo.
             native_max = int(cfg.get("shorts_native_per_day", 3) or 0)
-            if native_max > 0:
-                try:
-                    from api.services.rotation_strategy import bonus_for
+            try:
+                from api.services.gradual_resume import get_explicit_delivery_policy
+                explicit = get_explicit_delivery_policy(ch_id, db)
+                if explicit is not None:
+                    native_max = int(explicit["native_shorts_per_day"])
+            except Exception:
+                pass
+            # La rotación suma +1 sobre una base > 0 (nunca la resucita).
+            try:
+                from api.services.rotation_strategy import bonus_for
+                if native_max > 0:
                     native_max += int(bonus_for(ch_id, db, today).get("shorts", 0))
-                except Exception:
-                    pass
+            except Exception:
+                pass
             clips_per_long = cfg.get("shorts_clips_per_long", 3)
             
             # Count completed longs for clip target. Usar la conexión del db
@@ -2581,6 +2897,41 @@ def check_shorts_daily_coverage(db=None) -> dict:
     return result
 
 
+def _planned_native_gate(channel_id: int, slug: str, db, *,
+                         for_upload: bool = False) -> tuple[bool, str]:
+    """Safety envelope shared by the planned render+upload path.
+
+    Called twice: before starting the render and again immediately before the
+    YouTube upload (the render can take tens of minutes, so another upload may
+    have consumed the cap/spacing window meanwhile).
+    """
+    if _channel_shorts_spam_blocked(channel_id, db):
+        return False, "canal spam-bloqueado"
+    if _youtube_quota_blocked(db=db, channel_slug=slug):
+        return False, "cuota de YouTube agotada"
+    if _channel_hard_daily_short_cap_reached(channel_id, db):
+        return False, "tope duro diario del canal"
+    if _global_shorts_daily_cap_reached(db):
+        return False, "tope global diario de shorts"
+    try:
+        from api.services.channel_policy import resolve_channel_policy_values
+        policy = resolve_channel_policy_values(channel_id, db)
+        target = int(policy.get("native_shorts_per_day", 0) or 0)
+        if target <= 0:
+            return False, "canal con 0 shorts/día"
+        if db.count_native_shorts_published_today(channel_id) >= target:
+            return False, "objetivo diario de nativos alcanzado"
+    except Exception as exc:
+        logger.debug("[%s] planned gate policy skipped: %s", slug, exc)
+    try:
+        ok, wait = _channel_short_spacing_ok(channel_id, "native", db)
+        if not ok and (for_upload or wait > 600):
+            return False, f"espaciado mismo-canal ({wait}s)"
+    except Exception:
+        pass
+    return True, ""
+
+
 def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
     """Check for due shorts planned slots and dispatch ONE.
 
@@ -2616,24 +2967,11 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
         logger.info("Shorts dispatch: shorts pausados por kill-switch (shorts_paused)")
         return None
 
-    # ── Válvula de goteo PRIMERO: drena la cola de shorts en todos los ticks.
-    # Único punto de subida de la cola. Respeta internamente TODOS los topes
-    # (cuota por proyecto, tope duro por canal, tope global, cooldown, caps de
-    # planning), así que puede correr incluso con cuota/tope global alcanzados
-    # (drena hasta que el tope global real lo frene) sin arriesgar spam.
-    #
-    # FIX (stabilize-scheduler): la subida in-process de un short incluye
-    # `_wait_global_upload_spacing()` que hace `time.sleep(30)` hasta 3600s
-    # (youtube_uploader.py). Si esto se ejecuta de forma síncrona dentro del
-    # tick del `schedule_checker`, el loop queda bloqueado esperando el thread
-    # (`await asyncio.to_thread(...)`) y su heartbeat deja de latir → el
-    # task_watchdog declara el loop "stale" y pide un "controlled API restart",
-    # matando la generación long-form en curso. Se lanza en un thread daemon
-    # independiente para que el tick del scheduler retorne al instante.
-    try:
-        _spawn_background_short_upload(db, max_per_pass=2)
-    except Exception as exc:
-        logger.warning("Shorts dispatch: queued upload pasada falló: %s", exc)
+    # ── Cola heredada: SOLO subida manual ─────────────────────────────
+    # Los shorts nuevos son trabajos atómicos (render → upload en el mismo
+    # worker) y NUNCA entran en la cola. Los shorts `status='generated'` que
+    # ya existían se conservan intactos y se suben manualmente desde el panel
+    # (POST /api/planning/shorts-queue/upload/{id}); el scheduler no los drena.
 
     # ── Modo drenaje POR CANAL: la válvula YA subió arriba (nunca se frena).
     # Ya NO se corta TODA la generación: solo se suprimen los slots de canales
@@ -2842,13 +3180,6 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                                 f"(bypass={_force_bypass_guards}). Slots intentados: "
                                 f"{list(sorted(_failed_force_ids))[:20]}."
                             )
-                        # ── Fase 2: sin slots subibles → rellenar cola de nativos ──
-                        try:
-                            _fill = _fill_native_short_queue(db=db, loop=loop)
-                            if _fill:
-                                return _fill
-                        except Exception as exc:
-                            logger.debug("Shorts dispatch: fill fallback falló: %s", exc)
                         return None
 
                     slot_id = force_slot["id"]
@@ -2868,25 +3199,19 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                         _failed_force_ids.add(slot_id)
                         continue
 
-                    # ── HARD spam filter: channel blocked by a spam strike ──
-                    # Cola unificada: los NATIVOS se generan siempre a cola
-                    # (generate_only); los CLIPS se cancelan si el canal está
-                    # spam-bloqueado (necesitan long-form publicado reciente).
+                    # ── HARD spam filter ──
+                    # Ningún short se renderiza si no puede subirse: el slot
+                    # queda pendiente/replanificado en vez de acumular cola.
                     _spam_gen_only_f = False
                     if short_type_f == "native":
-                        _spam_gen_only_f = True
-                        if _channel_shorts_spam_blocked(channel_id):
+                        if _channel_shorts_spam_blocked(channel_id, db):
                             logger.info(
                                 "Force dispatch: slot #%d (%s) — canal spam-bloqueado, "
-                                "generando native en cola (generate_only, sin subir)",
+                                "slot queda pendiente",
                                 slot_id, slug,
                             )
-                        else:
-                            logger.debug(
-                                "Force dispatch: slot #%d (%s) — native a cola (generate_only)",
-                                slot_id, slug,
-                            )
-                        # No continuar: el dispatch normal generará sin subir.
+                            _failed_force_ids.add(slot_id)
+                            continue
                     elif _channel_shorts_spam_blocked(channel_id):
                         logger.warning(
                             "Force dispatch: slot #%d (%s) — channel spam-blocked, CANCELLING",
@@ -2985,6 +3310,20 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                             slot_id, slug, short_type_f, scheduled_f,
                         )
 
+                    # ── Gate del trabajo atómico (antes de renderizar) ──
+                    _gate_ok_f, _gate_reason_f = (True, "")
+                    if short_type_f == "native":
+                        _gate_ok_f, _gate_reason_f = _planned_native_gate(
+                            channel_id, slug, db,
+                        )
+                    if not _gate_ok_f:
+                        logger.info(
+                            "Force dispatch: slot #%d (%s) blocked by gate: %s",
+                            slot_id, slug, _gate_reason_f,
+                        )
+                        _failed_force_ids.add(slot_id)
+                        continue
+
                     db.update_shorts_slot_status(slot_id, "running",
                                                   source_video_id=source_video_id_f)
                     conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
@@ -3076,48 +3415,19 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
             _skipped_slot_ids.add(slot_id)
             continue
 
-        # ── Hard spam filter: channel blocked by a spam strike ──
-        # Durante el ban NO se sube nada, pero los NATIVOS se GENERAN y quedan
-        # en cola (status='generated') para despacharlos al expirar el bloqueo.
-        # Los CLIPS se cancelan (necesitan long-form publicado reciente).
-        #
-        # Cola unificada (ago 2026): los natives se generan SIEMPRE a cola
-        # (generate_only), estén o no spam-bloqueados — la válvula de goteo es
-        # el único punto de subida. Aquí solo se distingue el límite de cola.
+        # ── Hard spam filter ──
+        # Un short planificado es atómico: si no puede subirse ahora, no se
+        # renderiza. El slot se mantiene pendiente (o se replanifica) en vez de
+        # engrosar una cola de subida.
         _spam_gen_only = False
-        if short_type == "native":
-            # Tope de cola: no acumular sin límite (disco/LLM).
-            try:
-                from config.defaults import MAX_QUEUED_NATIVE_SHORTS_PER_CHANNEL
-                queued = db.count_queued_shorts(channel_id)
-                if queued >= MAX_QUEUED_NATIVE_SHORTS_PER_CHANNEL:
-                    logger.info(
-                        "Shorts slot #%d (%s): cola de shorts llena (%d/%d) — cancelando slot",
-                        slot_id, slug, queued, MAX_QUEUED_NATIVE_SHORTS_PER_CHANNEL,
-                    )
-                    _skipped_slot_ids.add(slot_id)
-                    db.update_shorts_slot_status(
-                        slot_id, "cancelled",
-                        error_message="cola de shorts llena",
-                    )
-                    continue
-            except Exception:
-                pass
-            _spam_gen_only = True
-            if _channel_shorts_spam_blocked(channel_id, db=db):
-                logger.info(
-                    "Shorts slot #%d (%s): canal spam-bloqueado — generando native "
-                    "en cola (generate_only, sin subir)",
-                    slot_id, slug,
-                )
-            else:
-                logger.debug(
-                    "Shorts slot #%d (%s): native generado a cola (generate_only) — "
-                    "la válvula lo despachará",
-                    slot_id, slug,
-                )
-            # NO continuar: dejar pasar al dispatch normal (generará sin subir).
-        elif _channel_shorts_spam_blocked(channel_id):
+        if short_type == "native" and _channel_shorts_spam_blocked(channel_id, db=db):
+            logger.info(
+                "Shorts slot #%d (%s): canal spam-bloqueado — slot queda pendiente",
+                slot_id, slug,
+            )
+            _skipped_slot_ids.add(slot_id)
+            continue
+        if short_type != "native" and _channel_shorts_spam_blocked(channel_id):
             logger.warning(
                 "Shorts slot #%d (%s) skipped: channel spam-blocked — CANCELLING clip slot",
                 slot_id, slug,
@@ -3263,6 +3573,18 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                     _skipped_slot_ids.add(slot_id)
                     continue  # ← retry with next candidate
 
+        # ── Gate del trabajo atómico: no renderizar lo que no se puede subir ──
+        _gate_ok, _gate_reason = (True, "")
+        if short_type == "native":
+            _gate_ok, _gate_reason = _planned_native_gate(channel_id, slug, db)
+        if not _gate_ok:
+            logger.info(
+                "Shorts slot #%d (%s) bloqueado por gate: %s — queda pendiente",
+                slot_id, slug, _gate_reason,
+            )
+            _skipped_slot_ids.add(slot_id)
+            continue
+
         # All guards passed — this is a dispatchable slot. Only NOW do we
         # consume a retry count (predictable skips like no-source don't count).
         _retry_count += 1
@@ -3330,13 +3652,7 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
     _alert_shorts_dispatch_exhausted(
         "Dispatch principal sin slot despachable (p. ej. clips sin vídeo fuente)."
     )
-    # ── Fase 2: sin slots subibles → rellenar cola de nativos (generación a cola) ──
-    try:
-        _fill = _fill_native_short_queue(db=db, loop=loop)
-        if _fill:
-            return _fill
-    except Exception as exc:
-        logger.debug("Shorts dispatch: fill fallback falló: %s", exc)
+    # La fábrica de cola ya no se usa: los slots planificados son atómicos.
     return None
 
 
@@ -5091,6 +5407,16 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
 
     _update_short_job_progress(job_id, 75, "render")
 
+    # ── Fase de job: render completado (base del lead time por canal) ──
+    try:
+        from datetime import datetime as _dt_log, timezone as _tz_log
+        dbx.update_job(
+            job_id,
+            render_finished_at=_dt_log.now(_tz_log.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        )
+    except Exception as _rf_exc:
+        logger.debug("[%s] render_finished_at stamp failed: %s", channel_slug, _rf_exc)
+
     # ── vX: generate_only — dejar el short en cola (sin subir) ──
     # Durante un bloqueo por spam se genera el native y queda status='generated';
     # la subida la hará _upload_queued_native_shorts al expirar el bloqueo.
@@ -5157,23 +5483,59 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
         channel_url=channel_url,
     )
     _update_short_job_progress(job_id, 90, "upload")
-    if _youtube_quota_blocked(channel_slug=channel_slug):
+
+    # ── Gate final (el render puede haber durado decenas de minutos) ──
+    _gate_ok_up, _gate_reason_up = _planned_native_gate(
+        channel_id, channel_slug, dbx, for_upload=True,
+    )
+    if not _gate_ok_up:
+        logger.info(
+            "[%s] Native short rendered but upload blocked by gate: %s — "
+            "slot will be deferred/replanned",
+            channel_slug, _gate_reason_up,
+        )
+        _native_fail(slot_id, job_id, f"subida bloqueada tras render: {_gate_reason_up}")
+        return None
+    if _youtube_quota_blocked(db=dbx, channel_slug=channel_slug):
         from pipeline.youtube_uploader import QuotaExhaustedError
         raise QuotaExhaustedError("YouTube quota exhausted before native short upload")
-    # Shorts are always immediate.  The target remains planning metadata only;
-    # scheduled publication is reserved for long-form videos.
+
+    from datetime import datetime as _dt_up, timezone as _tz_up
+    _upload_started = _dt_up.now(_tz_up.utc).strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        dbx.update_job(job_id, upload_started_at=_upload_started)
+    except Exception:
+        pass
+
+    # A planned short publishes immediately once rendered. Its public time is
+    # guaranteed by starting the atomic job at ``target_publish_at - lead``;
+    # there is no second upload queue and no publishAt.
     privacy_mode = "public"
     publish_at = None
-    result = uploader.upload(
-        video_path=video_path,
-        title=title[:100],
-        description=description[:5000],
-        tags=hashtags[:60],
-        category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"),
-        privacy=privacy_mode,
-        publish_at=publish_at,
-        content_type="short",
-    )
+    try:
+        with _short_upload_file_lock(channel_id):
+            result = uploader.upload(
+                video_path=video_path,
+                title=title[:100],
+                description=description[:5000],
+                tags=hashtags[:60],
+                category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"),
+                privacy=privacy_mode,
+                publish_at=publish_at,
+                content_type="short",
+            )
+    except TimeoutError as _lock_exc:
+        logger.warning("[%s] Upload lock timeout: %s", channel_slug, _lock_exc)
+        _native_fail(slot_id, job_id, "upload lock timeout (otra subida en curso)")
+        return None
+
+    try:
+        dbx.update_job(
+            job_id,
+            upload_finished_at=_dt_up.now(_tz_up.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        )
+    except Exception:
+        pass
 
     yt_id = result.get("video_id")
     if not yt_id:
@@ -5435,17 +5797,18 @@ def _upload_queued_short(short_record: dict, db=None, force_immediate: bool = Fa
         privacy = "public"
         publish_at = None
         try:
-            result = uploader.upload(
-                video_path=file_path,
-                title=title,
-                description=description[:5000],
-                tags=hashtags[:60],
-                category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"),
-                privacy=privacy,
-                publish_at=publish_at,
-                content_type="short",
-                manual_override=force_immediate,
-            )
+            with _short_upload_file_lock(channel_id):
+                result = uploader.upload(
+                    video_path=file_path,
+                    title=title,
+                    description=description[:5000],
+                    tags=hashtags[:60],
+                    category_id=getattr(ch_config, "YT_CATEGORY_ID", "24"),
+                    privacy=privacy,
+                    publish_at=publish_at,
+                    content_type="short",
+                    manual_override=force_immediate,
+                )
         except Exception as exc:
             logger.warning("[%s] Queued short #%d upload failed: %s", slug, short_id, exc)
             return False

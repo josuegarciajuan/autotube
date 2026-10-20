@@ -1471,6 +1471,9 @@ def migrate_v2(db_path: str = None):
     # ── v68: normalización de banner_url/avatar_url al endpoint estático canónico ──
     _migrate_v68(conn, logger)
 
+    # ── v69: publicación atómica de shorts — objetivo público + fases de job ──
+    _migrate_v69(conn, logger)
+
     conn.commit()
     conn.close()
     
@@ -4994,7 +4997,8 @@ class ExtendedDatabase(Database):
     def update_job(self, job_id: int, **kwargs) -> bool:
         allowed = ["status", "progress", "phase", "error_msg", "video_id",
                    "pipeline_phase", "last_heartbeat_at", "retry_count", "worker_pid",
-                   "started_at", "result_short_id"]
+                   "started_at", "result_short_id", "render_finished_at",
+                   "upload_started_at", "upload_finished_at"]
         fields, values = [], []
         for k, v in kwargs.items():
             if k in allowed and v is not None:
@@ -10838,16 +10842,24 @@ class ExtendedDatabase(Database):
     def create_shorts_slot(self, channel_id: int, date_key: str, scheduled_at: str,
                            target_upload_at: str = None, short_type: str = 'native',
                            long_slot_position: int = None, source_video_id: int = None,
-                           slot_position: int = 0) -> int:
-        """Create a single shorts planned slot. Returns slot id."""
+                           slot_position: int = 0, target_publish_at: str = None) -> int:
+        """Create a single shorts planned slot. Returns slot id.
+
+        ``target_upload_at`` is the legacy name; ``target_publish_at`` is the
+        canonical public-publish target. Both are written with the same value
+        while old readers still exist.
+        """
+        target_publish_at = target_publish_at or target_upload_at
         with self._connect() as conn:
             conn.execute("PRAGMA busy_timeout=30000")
             cursor = conn.execute(
                 """INSERT INTO shorts_planned_slots
-                   (channel_id, date_key, scheduled_at, target_upload_at, short_type,
+                   (channel_id, date_key, scheduled_at, target_upload_at,
+                    target_publish_at, short_type,
                     long_slot_position, source_video_id, slot_position)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (channel_id, date_key, scheduled_at, target_upload_at, short_type,
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (channel_id, date_key, scheduled_at, target_upload_at,
+                 target_publish_at, short_type,
                  long_slot_position, source_video_id, slot_position),
             )
             conn.commit()
@@ -10862,11 +10874,13 @@ class ExtendedDatabase(Database):
                 conn.execute(
                     """INSERT INTO shorts_planned_slots
                        (channel_id, date_key, scheduled_at, target_upload_at,
-                        short_type, slot_position, long_slot_position, source_video_id,
-                        slot_rank)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        target_publish_at, short_type, slot_position,
+                        long_slot_position, source_video_id, slot_rank)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (s["channel_id"], s["date_key"], s["scheduled_at"],
-                     s.get("target_upload_at"), s["short_type"],
+                     s.get("target_upload_at"),
+                     s.get("target_publish_at") or s.get("target_upload_at"),
+                     s["short_type"],
                      s.get("slot_position", 0), s.get("long_slot_position"),
                      s.get("source_video_id"), s.get("slot_rank", 0)),
                 )
@@ -12794,3 +12808,44 @@ class ExtendedDatabase(Database):
         """Save the marathon rotation order to survive API restarts."""
         import json as _mj
         self.set_system_state("marathon_rotation_order", _mj.dumps(order))
+
+
+def _migrate_v69(conn, logger):
+    """Idempotent v69: atomic planned-short publishing.
+
+    Adds the canonical public-publish target for planned shorts and the job
+    phase timestamps used to estimate per-channel render+upload lead time.
+
+    ``target_publish_at`` is backfilled from ``target_upload_at`` so existing
+    pending slots keep their intended public time. The legacy column is kept
+    as an alias for old readers during the transition.
+    """
+    try:
+        sps_cols = {row[1] for row in conn.execute(
+            "PRAGMA table_info('shorts_planned_slots')").fetchall()}
+        if "target_publish_at" not in sps_cols:
+            conn.execute(
+                "ALTER TABLE shorts_planned_slots ADD COLUMN target_publish_at TIMESTAMP"
+            )
+            logger.info("Migration v69: shorts_planned_slots.target_publish_at added")
+        conn.execute(
+            """UPDATE shorts_planned_slots
+                  SET target_publish_at = target_upload_at
+                WHERE target_publish_at IS NULL
+                  AND target_upload_at IS NOT NULL"""
+        )
+    except Exception as exc:
+        logger.warning("Migration v69 shorts_planned_slots: %s", exc)
+
+    try:
+        job_cols = {row[1] for row in conn.execute(
+            "PRAGMA table_info('generation_jobs')").fetchall()}
+        for col in ("render_finished_at", "upload_started_at", "upload_finished_at"):
+            if col not in job_cols:
+                conn.execute(f"ALTER TABLE generation_jobs ADD COLUMN {col} TIMESTAMP")
+                logger.info("Migration v69: generation_jobs.%s added", col)
+    except Exception as exc:
+        logger.warning("Migration v69 generation_jobs: %s", exc)
+
+    conn.commit()
+    logger.info("Migration v69: atomic planned-short publishing ready")

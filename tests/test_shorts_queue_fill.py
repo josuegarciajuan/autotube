@@ -46,6 +46,7 @@ def _db(tmp_path):
                 date_key TEXT NOT NULL,
                 scheduled_at TIMESTAMP NOT NULL,
                 target_upload_at TIMESTAMP,
+                target_publish_at TIMESTAMP,
                 short_type TEXT NOT NULL DEFAULT 'native',
                 status TEXT NOT NULL DEFAULT 'pending',
                 job_id INTEGER, short_id INTEGER,

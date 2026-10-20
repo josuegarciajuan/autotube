@@ -76,7 +76,8 @@ CREATE TABLE IF NOT EXISTS shorts_planned_slots (
     channel_id INTEGER NOT NULL,
     date_key TEXT NOT NULL,                  -- YYYY-MM-DD
     scheduled_at TIMESTAMP NOT NULL,         -- when to start generation
-    target_upload_at TIMESTAMP,              -- target YouTube publish time
+    target_upload_at TIMESTAMP,              -- legacy alias of target_publish_at
+    target_publish_at TIMESTAMP,             -- target public publish time
     short_type TEXT NOT NULL DEFAULT 'native', -- 'native' | 'clip'
     long_slot_position INTEGER,              -- for clips: which long-form slot this pairs with
     source_video_id INTEGER,                 -- for clips: source long-form video
