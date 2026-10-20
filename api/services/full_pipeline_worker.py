@@ -2108,6 +2108,32 @@ def run_job(
                 except Exception as _vd_exc:
                     logger.debug("[%s] Checkpoint video injection skipped: %s", canal, _vd_exc)
 
+            # ── upload_only: la DB manda sobre el título ─────────────
+            # El checkpoint/script conserva el título original de generación.
+            # Tras un re-título (packaging recovery, freshness o edición del
+            # operador) phase_upload seguía usando metadata["selected_title"]
+            # viejo. Eso subió a YouTube títulos ya reemplazados en la DB
+            # (bug oct 2026, vídeos 2658/2696).
+            if action == "upload_only":
+                try:
+                    db_title = str((video_record or {}).get("titulo_final") or "").strip()
+                    if db_title:
+                        if not isinstance(metadata, dict):
+                            metadata = {}
+                        stale = metadata.get("selected_title")
+                        metadata["selected_title"] = db_title
+                        if isinstance(video_data, dict):
+                            video_data["titulo"] = db_title
+                        if stale and stale != db_title:
+                            logger.info(
+                                "[%s] upload_only: título de DB prevalece sobre "
+                                "metadata antiguo ('%s' → '%s')",
+                                canal, str(stale)[:60], db_title[:60],
+                            )
+                except Exception as _title_exc:
+                    logger.debug("[%s] upload_only DB title override skipped: %s",
+                                 canal, _title_exc)
+
             yt_video_id = orch.phase_upload(script, video_data, metadata, job_id=job_id,
                                               planned_public_at=planned_public_at,
                                               skip_lifecycle_scheduling=True)

@@ -1308,6 +1308,67 @@ class YouTubeUploader:
             privacy=privacy,
         )
 
+    def set_title(self, video_id: str, title: str) -> dict:
+        """Update the title of an existing YouTube video.
+
+        YouTube requires the full snippet on ``videos().update``, so the
+        current description/tags/category are fetched first (1 unit) and
+        preserved. Quota cost: 1 + 50 units.
+
+        Returns ``{updated: True, yt_video_id, title}`` or raises HttpError.
+        """
+        clean = " ".join(str(title or "").split())[:100]
+        if not clean:
+            raise ValueError("title cannot be empty")
+        service = self._get_service()
+
+        try:
+            list_response = service.videos().list(
+                part="snippet",
+                id=video_id,
+            ).execute()
+        except HttpError as exc:
+            self._raise_if_quota_exceeded(
+                exc, "set_title.fetch_snippet",
+                operation="videos.list", units=1, yt_id=video_id,
+            )
+            raise
+
+        track_quota(self.quota_slug, "videos.list", 1,
+                    yt_id=video_id, caller="set_title.fetch_snippet")
+
+        items = list_response.get("items", [])
+        if not items:
+            raise ValueError(f"Video {video_id} not found or not accessible "
+                             f"(channel: {self.channel_slug})")
+        snippet = items[0]["snippet"]
+        body = {
+            "id": video_id,
+            "snippet": {
+                "title": clean,
+                "description": snippet.get("description", ""),
+                "categoryId": snippet.get(
+                    "categoryId", self._get_config_attr("YT_CATEGORY_ID", "22"),
+                ),
+                "tags": snippet.get("tags", []),
+            },
+        }
+
+        try:
+            service.videos().update(part="snippet", body=body).execute()
+        except HttpError as exc:
+            self._raise_if_quota_exceeded(
+                exc, "set_title",
+                operation="videos.update", units=50, yt_id=video_id,
+            )
+            raise
+
+        track_quota(self.quota_slug, "videos.update", 50,
+                    yt_id=video_id, caller="set_title")
+        logger.info("[%s] Title updated for video %s: %s",
+                    self.channel_slug, video_id, clean[:70])
+        return {"updated": True, "yt_video_id": video_id, "title": clean}
+
     def update_description(self, video_id: str, description: str) -> dict:
         """Update the description of an existing YouTube video.
 
