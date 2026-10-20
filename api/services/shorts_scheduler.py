@@ -2257,6 +2257,59 @@ def _inject_compensation_native_slots(date_str: str, db) -> int:
     return inserted
 
 
+def normalize_pending_shorts_starts(db=None) -> int:
+    """Align every pending native slot's START with the current lead time.
+
+    Slots created before the atomic model had ``scheduled_at`` only 15 minutes
+    before the publish target, so a ~45 min render+upload would miss the
+    franja. This keeps the target public time and only rewrites the start.
+    """
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+    try:
+        pending = db.get_shorts_planned_slots(status="pending")
+    except Exception:
+        return 0
+    leads: dict[int, int] = {}
+    updated = 0
+    for slot in pending:
+        if (slot.get("short_type") or "native") != "native":
+            continue
+        raw = slot.get("target_publish_at") or slot.get("target_upload_at")
+        if not raw:
+            continue
+        cid = int(slot.get("channel_id") or 0)
+        if cid not in leads:
+            leads[cid] = _channel_lead_minutes(db, cid)
+        lead = leads[cid]
+        try:
+            target = datetime.strptime(str(raw)[:19], "%Y-%m-%d %H:%M:%S")
+            current = datetime.strptime(
+                str(slot.get("scheduled_at"))[:19], "%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError):
+            continue
+        wanted = target - timedelta(minutes=lead)
+        if abs((current - wanted).total_seconds()) < 60:
+            continue
+        try:
+            with db._connect() as conn:
+                conn.execute(
+                    """UPDATE shorts_planned_slots
+                          SET scheduled_at = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ? AND status = 'pending'""",
+                    (wanted.strftime("%Y-%m-%d %H:%M:%S"), slot["id"]),
+                )
+                conn.commit()
+            updated += 1
+        except Exception as exc:
+            logger.debug("normalize start failed for slot #%s: %s", slot.get("id"), exc)
+    if updated:
+        logger.info("Shorts reconcile: %d pending slot start(s) aligned to lead time",
+                    updated)
+    return updated
+
+
 def retime_overdue_shorts_slots(db=None, now=None) -> int:
     """Move pending native slots whose START time is already unviable.
 
@@ -2414,6 +2467,7 @@ def reconcile_shorts_schedule(db=None, channel_ids=None, start_day=None,
             logger.error("Failed to reconcile shorts schedule for %s: %s", day_str, e)
             results[day_str] = f"ERROR: {e}"
 
+    normalize_pending_shorts_starts(db)
     retime_overdue_shorts_slots(db)
     total = sum(int(v.split()[0]) for v in results.values() if v and v[0].isdigit())
     logger.info(
