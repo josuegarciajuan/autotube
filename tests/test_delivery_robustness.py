@@ -149,9 +149,10 @@ def test_safe_full_replan_cancels_excess_public_targets_without_deleting_history
     safe_full_replan_apply(preflight["confirmation_token"], db=db)
     with db._connect() as conn:
         active = conn.execute("""SELECT COUNT(*) FROM planned_slots
-            WHERE channel_id=1 AND target_public_at='2030-01-01T20:00:00+00:00'
-              AND status IN ('pending','running')""").fetchone()[0]
+            WHERE channel_id=1 AND status IN ('pending','running')""").fetchone()[0]
         historical = conn.execute("SELECT COUNT(*) FROM planned_slots WHERE status='cancelled'").fetchone()[0]
+    # La regla franja-first puede repartir los 2 activos entre franjas; lo
+    # importante es que queden 2 activos y no se borre el histórico.
     assert active == 2
     assert historical >= 2
 

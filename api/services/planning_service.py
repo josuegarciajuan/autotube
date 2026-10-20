@@ -1271,12 +1271,10 @@ def _distribute_franja_slots(
     if not franjas:
         return []
 
-    if is_scheduled:
-        daily_cap = _publish_cap_per_day(db, channel_id, cfg, day=date_str)
-        requested = min(videos_per_day, daily_cap) if daily_cap > 0 else videos_per_day
-    else:
-        daily_cap = videos_per_day
-        requested = videos_per_day
+    # El cap público aplica también en modo inmediato: la publicación no debe
+    # superar el techo del canal aunque la generación tenga buffer/boost.
+    daily_cap = _publish_cap_per_day(db, channel_id, cfg, day=date_str)
+    requested = min(videos_per_day, daily_cap) if daily_cap > 0 else videos_per_day
 
     start_day = date.fromisoformat(date_str)
     earliest = datetime.combine(start_day, datetime.min.time(), tzinfo=tz)
