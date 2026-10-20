@@ -416,6 +416,13 @@ capado histórico.
   ejecutan en el tick normal. Los shorts `status='generated'` existentes se
   conservan y se suben SOLO manualmente
   (`POST /api/planning/shorts-queue/upload/{id}`).
+- **Reparto franja-first:** cada día usa sus franjas (3 por canal/tipo). Si
+  hay N elementos y N <= F, N franjas distintas (máxima separación); si N > F,
+  los extras comparten franja con offset de 3 min y se suben en secuencia. El
+  gap same-channel no manda al día siguiente.
+- Los duplicados intencionales de una franja están exentos del conflicto
+  same-type, del cooldown y del espaciado de subida; el lock de subida sigue
+  serializando.
 - Gates antes de renderizar y re-check antes de subir (cuota, strike, topes,
   espaciado). Lock de subida por canal vía `flock` entre procesos.
 

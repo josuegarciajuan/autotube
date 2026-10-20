@@ -11,10 +11,11 @@
 2. **Zona horaria del canal.** Toda decisión de día/hora se hace en
    `PUBLISH_TIMEZONE` (por defecto `Europe/Madrid`). Al persistir se convierte a
    UTC, pero los caps y los gaps se calculan en hora local.
-3. **Separación mínima por canal.** Dos publicaciones del mismo canal nunca
-   quedan a menos de `same_channel_publish_gap_h`. Si no caben ese día, la
-   segunda pasa al siguiente día; **nunca** se recorta a `23:xx` ni se desplaza
-   un minuto.
+3. **Reparto franja-first.** Cada día usa sus franjas: si `N <= F`, N franjas
+   distintas (máxima separación, rank desempata); si `N > F`, todas las franjas
+   y los extras comparten franja con un offset secuencial. El gap
+   `same_channel_publish_gap_h` es una preferencia, **no** un veto: nunca manda
+   una publicación al día siguiente.
 4. **Cap diario.** Como máximo `longform_publish_cap` long-forms por canal y
    `native_shorts_per_day` shorts nativos por canal y día Madrid.
 5. **Reparto de shorts.** Varios shorts del día usan franjas distintas, elegidas
