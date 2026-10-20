@@ -1072,34 +1072,11 @@ def _apply_channel_composition(
         # which added irrelevant banners to non-rescue/non-medical channels.
         channel_config = get_channel_config(channel_slug)
         
-        # Build a config namespace that preserves the channel's overlay settings
-        # while adding any required defaults
-        from types import SimpleNamespace
-        maker_config = SimpleNamespace(
-            THUMBNAIL_WIDTH=getattr(channel_config, "THUMBNAIL_WIDTH", 1280),
-            THUMBNAIL_HEIGHT=getattr(channel_config, "THUMBNAIL_HEIGHT", 720),
-            THUMBNAIL_FONT_SIZE=getattr(channel_config, "THUMBNAIL_FONT_SIZE", 56),
-            THUMBNAIL_BORDER_WIDTH=getattr(channel_config, "THUMBNAIL_BORDER_WIDTH", 5),
-            THUMBNAIL_FONT_FAMILY=getattr(channel_config, "THUMBNAIL_FONT_FAMILY", "DejaVuSans-Bold"),
-            THUMBNAIL_BORDER_COLOR=getattr(channel_config, "THUMBNAIL_BORDER_COLOR", "#CC0000"),
-            THUMBNAIL_SHOW_4K_BADGE=getattr(channel_config, "THUMBNAIL_SHOW_4K_BADGE", True),
-            THUMBNAIL_TEXT_STROKE_WIDTH=getattr(channel_config, "THUMBNAIL_TEXT_STROKE_WIDTH", 0),
-            THUMBNAIL_TEXT_STROKE_COLOR=getattr(channel_config, "THUMBNAIL_TEXT_STROKE_COLOR", "#000000"),
-            THUMBNAIL_VISUAL_STYLE=getattr(channel_config, "THUMBNAIL_VISUAL_STYLE", "dark_cinematic"),
-            THUMBNAIL_MANUAL_STYLE=getattr(channel_config, "THUMBNAIL_MANUAL_STYLE", None),
-            COLOR_PALETTE=getattr(channel_config, "COLOR_PALETTE", {}),
-            CANAL_DISPLAY_NAME=getattr(channel_config, "CANAL_DISPLAY_NAME", ""),
-            THUMBNAILS_DIR=getattr(channel_config, "THUMBNAILS_DIR", "output/thumbnails"),
-            # ── Overlays: use channel config, NEVER hardcode to True ──
-            THUMBNAIL_RESCUE_MAYDAY=getattr(channel_config, "THUMBNAIL_RESCUE_MAYDAY", False),
-            THUMBNAIL_RESCUE_COORDINATES=getattr(channel_config, "THUMBNAIL_RESCUE_COORDINATES", False),
-            THUMBNAIL_RESCUE_SIN_SENAL=getattr(channel_config, "THUMBNAIL_RESCUE_SIN_SENAL", False),
-            THUMBNAIL_MEDICAL_ECG=getattr(channel_config, "THUMBNAIL_MEDICAL_ECG", False),
-            THUMBNAIL_MEDICAL_CROSS=getattr(channel_config, "THUMBNAIL_MEDICAL_CROSS", False),
-            THUMBNAIL_MEDICAL_DIAGNOSIS=getattr(channel_config, "THUMBNAIL_MEDICAL_DIAGNOSIS", False),
-        )
-
-        maker = ThumbnailMaker(config=maker_config)
+        # Pasar la config COMPLETA del canal. El namespace parcial anterior
+        # omitía IMAGE_STYLE_MODIFIERS (y cualquier atributo nuevo de defaults):
+        # la búsqueda de stock del thumbnail fallaba con AttributeError en cada
+        # vídeo viral y emitía alertas críticas de pipeline.image_fetcher.
+        maker = ThumbnailMaker(config=channel_config)
         keywords = keywords or []
 
         result = maker.make_viral_thumbnail(

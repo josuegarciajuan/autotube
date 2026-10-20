@@ -336,7 +336,10 @@ def llm_json_call_or_fallback(
             **call_kwargs,
         )
     except Exception as exc:
-        logger.error(
+        # El fallback es una degradación CONTROLADA, no un fallo del pipeline
+        # (el llamante sigue con datos por defecto). Registrarlo como ERROR
+        # generaba una alerta crítica por cada respuesta truncada del proveedor.
+        logger.warning(
             "LLM JSON call failed after %d retries: %s — using fallback",
             max_retries, exc,
         )

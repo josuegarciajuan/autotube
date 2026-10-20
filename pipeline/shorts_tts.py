@@ -55,6 +55,47 @@ def _run_async_in_thread(coro):
 TICK_TO_MS = 10000                # 100-nanosecond ticks → milliseconds
 SHORTS_MAX_DURATION_SEC = 58.0    # YouTube Shorts max = 60 s; leave 2 s buffer
 MIN_WORD_COUNT = 45               # minimum words for a coherent Short (raised from 35 for more visual variety)
+
+
+def coerce_short_text(value) -> str:
+    """Normalise one LLM field to plain text.
+
+    The model occasionally returns an array for a field declared as a string
+    (``texto``, ``search_query_en``…).  Calling ``.strip()`` on that list used
+    to abort the whole Short with ``'list' object has no attribute 'strip'``.
+    Joining is lossless and keeps the content usable.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return " ".join(coerce_short_text(item) for item in value if item is not None).strip()
+    if isinstance(value, dict):
+        return " ".join(coerce_short_text(item) for item in value.values() if item is not None).strip()
+    return str(value)
+
+
+def normalize_short_script(script):
+    """Coerce the string fields of a Short script in place (defensive).
+
+    Applied at the generation boundary (native + standalone) so downstream
+    TTS/media code never receives list/dict values where strings are expected.
+    """
+    if not isinstance(script, dict):
+        return script
+    for key in ("tema", "titulo", "title", "hook_text"):
+        if key in script and not isinstance(script.get(key), str):
+            script[key] = coerce_short_text(script.get(key))
+    bloques = script.get("bloques")
+    if isinstance(bloques, list):
+        for block in bloques:
+            if not isinstance(block, dict):
+                continue
+            for key in ("texto", "search_query_en", "tono", "tipo", "emocion"):
+                if key in block and not isinstance(block.get(key), str):
+                    block[key] = coerce_short_text(block.get(key))
+    return script
 # Hard cap for audio safety.  Measured expressive edge-tts runs ~0.57 s/word
 # (slow prosody −18..−22% + inter-block pauses), so the old 105-word cap went
 # OVER 58 s (59-61 s seen in production) and the short failed AFTER synthesis.
@@ -169,7 +210,7 @@ def trim_blocks_to_word_budget(
         max_words: target total word count.
         min_words_per_block: floor per block (a block is never emptied).
     """
-    total = sum(len(b.get("texto", "").split()) for b in bloques)
+    total = sum(len(coerce_short_text(b.get("texto", "")).split()) for b in bloques)
     if total <= max_words:
         return bloques
 
@@ -181,13 +222,13 @@ def trim_blocks_to_word_budget(
         for b in bloques:
             if b.get("tipo") != block_type:
                 continue
-            words = b.get("texto", "").split()
+            words = coerce_short_text(b.get("texto", "")).split()
             if len(words) > min_words_per_block:
                 remove = min(to_remove, len(words) - min_words_per_block)
                 b["texto"] = " ".join(words[: len(words) - remove])
                 to_remove -= remove
 
-    new_total = sum(len(b.get("texto", "").split()) for b in bloques)
+    new_total = sum(len(coerce_short_text(b.get("texto", "")).split()) for b in bloques)
     logger.info("Trimmed short script: %d → %d words (budget %d)", total, new_total, max_words)
     return bloques
 
@@ -391,7 +432,7 @@ def validate_short_script(script: dict) -> list[str]:
     valid_types = {"hook", "desarrollo1", "desarrollo2", "desarrollo3", "climax", "cierre", "subscribe_cta"}
     for b in bloques:
         tipo = b.get("tipo", "?")
-        texto = b.get("texto", "")
+        texto = coerce_short_text(b.get("texto", ""))
         if tipo not in valid_types:
             errors.append(f"Invalid block type: '{tipo}'")
         if not texto.strip():
@@ -406,7 +447,7 @@ def validate_short_script(script: dict) -> list[str]:
                 errors.append(f"Development blocks must be sequential: expected '{expected}', got '{t}'")
 
     total_words = len(
-        " ".join(b.get("texto", "") for b in bloques).split()
+        " ".join(coerce_short_text(b.get("texto", "")) for b in bloques).split()
     )
     if total_words < MIN_WORD_COUNT:
         errors.append(f"Script too short: {total_words} words (min {MIN_WORD_COUNT})")
@@ -562,8 +603,8 @@ def _synthesize_shorts_blocks_impl(
     if voice is None:
         voice = resolved["voice"]
 
-    # Filter out empty blocks
-    valid = [b for b in bloques if b.get("texto", "").strip()]
+    # Filter out empty blocks (coerce list/dict values defensively)
+    valid = [b for b in bloques if coerce_short_text(b.get("texto", "")).strip()]
     if not valid:
         raise RuntimeError("No blocks with text to synthesise")
 
@@ -582,7 +623,7 @@ def _synthesize_shorts_blocks_impl(
 
     for i, block in enumerate(valid):
         block_type = block.get("tipo", "desarrollo")
-        block_text = block.get("texto", "").strip()
+        block_text = coerce_short_text(block.get("texto", "")).strip()
         # Normalize numbers for natural TTS pronunciation
         from pipeline.text_normalizer import normalize_numbers
         block_text = normalize_numbers(block_text)

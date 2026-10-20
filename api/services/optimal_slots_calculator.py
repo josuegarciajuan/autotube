@@ -853,31 +853,64 @@ class OptimalSlotsCalculator:
             daily_cap=_cap_for_day,
         )
 
-        updated = 0
+        # Calcular todos los destinos ANTES de tocar la tabla. Actualizar en
+        # caliente chocaba con el target antiguo de otra fila `pending` aún no
+        # procesada (UNIQUE index uq_active_planned_public_target) y abortaba
+        # el replan completo (bug oct 2026, canal5).
+        assignments: list[tuple[int, str, datetime]] = []
         last_dt = None
-        with self._db._connect() as conn:
-            for row, target_dt in zip(pending, allocated):
-                # Evitar chocar con un target ya ocupado (running/vídeo): pasa
-                # al mismo horario del día siguiente, conservando el gap.
-                while True:
-                    iso = target_dt.astimezone(dt_timezone.utc).isoformat()
-                    gap_ok = last_dt is None or (
-                        (target_dt - last_dt).total_seconds() / 60 >= min_gap
-                    )
-                    if iso not in occupied and gap_ok:
-                        break
-                    target_dt += timedelta(days=1)
-
+        for row, target_dt in zip(pending, allocated):
+            # Evitar chocar con un target ya ocupado (running/vídeo): pasa
+            # al mismo horario del día siguiente, conservando el gap.
+            while True:
                 iso = target_dt.astimezone(dt_timezone.utc).isoformat()
+                gap_ok = last_dt is None or (
+                    (target_dt - last_dt).total_seconds() / 60 >= min_gap
+                )
+                if iso not in occupied and gap_ok:
+                    break
+                target_dt += timedelta(days=1)
+            iso = target_dt.astimezone(dt_timezone.utc).isoformat()
+            assignments.append((int(row["id"]), iso, target_dt))
+            occupied.add(iso)
+            last_dt = target_dt
+
+        updated = 0
+        with self._db._connect() as conn:
+            # Fase 1: liberar los targets de TODAS las filas pending con valores
+            # únicos temporales. Así ninguna actualización intermedia colisiona
+            # con el target antiguo de otra fila que todavía no se ha movido.
+            for row in pending:
+                placeholder = (
+                    datetime(1900, 1, 1, tzinfo=dt_timezone.utc)
+                    + timedelta(minutes=int(row["id"]))
+                ).isoformat()
+                conn.execute(
+                    """UPDATE planned_slots SET target_public_at = ?
+                       WHERE id = ? AND status = 'pending'""",
+                    (placeholder, row["id"]),
+                )
+
+            # Fase 2: escribir los targets definitivos.
+            for slot_id, iso, _target_dt in assignments:
                 conn.execute(
                     """UPDATE planned_slots
                        SET target_public_at = ?
                        WHERE id = ? AND status = 'pending'""",
-                    (iso, row["id"]),
+                    (iso, slot_id),
                 )
-                occupied.add(iso)
-                last_dt = target_dt
                 updated += 1
+
+            # Si el asignador no cubrió alguna fila (caso excepcional), se
+            # restaura su target original para no dejarla sin programar.
+            assigned_ids = {slot_id for slot_id, _iso, _dt in assignments}
+            for row in pending:
+                if int(row["id"]) not in assigned_ids and row["target_public_at"]:
+                    conn.execute(
+                        """UPDATE planned_slots SET target_public_at = ?
+                           WHERE id = ? AND status = 'pending'""",
+                        (row["target_public_at"], row["id"]),
+                    )
             conn.commit()
 
         logger.info("Long-form replan ch%d: %d pending slots updated", channel_id, updated)

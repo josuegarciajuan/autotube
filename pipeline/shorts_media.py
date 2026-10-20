@@ -192,6 +192,9 @@ def _build_portrait_query(
     # Ground literal labels in observable actions/objects while retaining the
     # original query for provider relevance scoring.
     from pipeline.cinematic_staging import enrich_scene_query, sanitize_person_query
+    from pipeline.shorts_tts import coerce_short_text
+    search_query_en = coerce_short_text(search_query_en)
+    scene_text = coerce_short_text(scene_text)
     search_query_en = enrich_scene_query(search_query_en, theme_ctx, scene_text)
     search_query_en = sanitize_person_query(search_query_en)
 
@@ -399,9 +402,10 @@ def _build_query_pool(
     """
     import re
     from config.settings import SHORTS_FALLBACK_QUERIES
+    from pipeline.shorts_tts import coerce_short_text
 
-    search_en = block.get("search_query_en", "")
-    block_type = block.get("tipo", "desarrollo")
+    search_en = coerce_short_text(block.get("search_query_en", ""))
+    block_type = coerce_short_text(block.get("tipo", "desarrollo"))
 
     pool: list[str] = []
 
