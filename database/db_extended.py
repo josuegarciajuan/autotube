@@ -1474,6 +1474,9 @@ def migrate_v2(db_path: str = None):
     # ── v69: publicación atómica de shorts — objetivo público + fases de job ──
     _migrate_v69(conn, logger)
 
+    # ── v70: reparto franja-first — índice de duplicado por franja ──
+    _migrate_v70(conn, logger)
+
     conn.commit()
     conn.close()
     
@@ -4773,14 +4776,15 @@ class ExtendedDatabase(Database):
         """Cancel duplicate active targets and return an operator diagnostic."""
         with self._connect() as conn:
             rows = conn.execute("""SELECT id FROM (
-                SELECT id, ROW_NUMBER() OVER (PARTITION BY channel_id,target_public_at ORDER BY id) rn
+                SELECT id, ROW_NUMBER() OVER (PARTITION BY channel_id,target_public_at,franja_dup_index ORDER BY id) rn
                 FROM planned_slots WHERE status IN ('pending','running') AND target_public_at IS NOT NULL
             ) WHERE rn > 1""").fetchall()
             ids = [row[0] for row in rows]
             if ids:
                 conn.executemany("UPDATE planned_slots SET status='cancelled' WHERE id=?", ((i,) for i in ids))
+            conn.execute("""DROP INDEX IF EXISTS uq_active_planned_public_target""")
             conn.execute("""CREATE UNIQUE INDEX IF NOT EXISTS uq_active_planned_public_target
-                ON planned_slots(channel_id, target_public_at)
+                ON planned_slots(channel_id, target_public_at, franja_dup_index)
                 WHERE status IN ('pending','running') AND target_public_at IS NOT NULL""")
             conn.execute("""CREATE UNIQUE INDEX IF NOT EXISTS uq_active_upload_job_per_video
                 ON generation_jobs(video_id)
@@ -8565,13 +8569,14 @@ class ExtendedDatabase(Database):
                     conn.execute(
                         """INSERT INTO planned_slots (channel_id, date_key, scheduled_at,
                            target_upload_at, target_public_at, upload_window_start, upload_window_end,
-                           slot_position, source_mode)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                           slot_position, source_mode, franja_dup_index)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (s["channel_id"], s["date_key"], s["scheduled_at"],
                          s.get("target_upload_at"), s.get("target_public_at"),
                          s.get("upload_window_start", 9), s.get("upload_window_end", 11),
                          s.get("slot_position", 0),
-                         s.get("source_mode", "original")),
+                         s.get("source_mode", "original"),
+                         int(s.get("franja_dup_index", 0) or 0)),
                     )
                     count += 1
                 except sqlite3.IntegrityError:
@@ -10842,7 +10847,8 @@ class ExtendedDatabase(Database):
     def create_shorts_slot(self, channel_id: int, date_key: str, scheduled_at: str,
                            target_upload_at: str = None, short_type: str = 'native',
                            long_slot_position: int = None, source_video_id: int = None,
-                           slot_position: int = 0, target_publish_at: str = None) -> int:
+                           slot_position: int = 0, target_publish_at: str = None,
+                           franja_dup_index: int = 0) -> int:
         """Create a single shorts planned slot. Returns slot id.
 
         ``target_upload_at`` is the legacy name; ``target_publish_at`` is the
@@ -10856,11 +10862,13 @@ class ExtendedDatabase(Database):
                 """INSERT INTO shorts_planned_slots
                    (channel_id, date_key, scheduled_at, target_upload_at,
                     target_publish_at, short_type,
-                    long_slot_position, source_video_id, slot_position)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    long_slot_position, source_video_id, slot_position,
+                    franja_dup_index)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (channel_id, date_key, scheduled_at, target_upload_at,
                  target_publish_at, short_type,
-                 long_slot_position, source_video_id, slot_position),
+                 long_slot_position, source_video_id, slot_position,
+                 int(franja_dup_index or 0)),
             )
             conn.commit()
             return cursor.lastrowid
@@ -10875,14 +10883,16 @@ class ExtendedDatabase(Database):
                     """INSERT INTO shorts_planned_slots
                        (channel_id, date_key, scheduled_at, target_upload_at,
                         target_publish_at, short_type, slot_position,
-                        long_slot_position, source_video_id, slot_rank)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        long_slot_position, source_video_id, slot_rank,
+                        franja_dup_index)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (s["channel_id"], s["date_key"], s["scheduled_at"],
                      s.get("target_upload_at"),
                      s.get("target_publish_at") or s.get("target_upload_at"),
                      s["short_type"],
                      s.get("slot_position", 0), s.get("long_slot_position"),
-                     s.get("source_video_id"), s.get("slot_rank", 0)),
+                     s.get("source_video_id"), s.get("slot_rank", 0),
+                     int(s.get("franja_dup_index", 0) or 0)),
                 )
                 count += 1
             conn.commit()
@@ -12849,3 +12859,35 @@ def _migrate_v69(conn, logger):
 
     conn.commit()
     logger.info("Migration v69: atomic planned-short publishing ready")
+
+
+def _migrate_v70(conn, logger):
+    """Idempotent v70: franja-first distribution.
+
+    Adds ``franja_dup_index`` so several items may intentionally share the same
+    franja (same channel/day) without violating the active-target unique index.
+    """
+    for table in ("planned_slots", "shorts_planned_slots"):
+        try:
+            cols = {row[1] for row in conn.execute(f"PRAGMA table_info('{table}')")}
+            if cols and "franja_dup_index" not in cols:
+                conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN franja_dup_index INTEGER DEFAULT 0"
+                )
+                logger.info("Migration v70: %s.franja_dup_index added", table)
+        except Exception as exc:
+            logger.warning("Migration v70 %s: %s", table, exc)
+
+    try:
+        conn.execute("DROP INDEX IF EXISTS uq_active_planned_public_target")
+        conn.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS uq_active_planned_public_target
+               ON planned_slots(channel_id, target_public_at, franja_dup_index)
+               WHERE status IN ('pending','running')
+                 AND target_public_at IS NOT NULL"""
+        )
+    except Exception as exc:
+        logger.warning("Migration v70 unique index: %s", exc)
+
+    conn.commit()
+    logger.info("Migration v70: franja-first duplicate index ready")

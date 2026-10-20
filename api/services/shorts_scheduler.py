@@ -26,7 +26,12 @@ from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 from api.time_utils import madrid_day_range, MADRID, UTC, parse_utc
-from api.services.publish_allocator import Franja, allocate_publish_times
+from api.services.publish_allocator import (
+    Franja,
+    FranjaSlot,
+    allocate_publish_times,
+    assign_franja_slots,
+)
 
 logger = logging.getLogger("autotube.shorts_scheduler")
 
@@ -1356,6 +1361,17 @@ def _load_shorts_franjas(db, channel_id: int) -> list[Franja]:
     ]
 
 
+def _short_schedule_lead_minutes(db, channel_id: int) -> int:
+    """Lead de un short planificado: render + subida.
+
+    El espaciado global se mantiene en la subida (decisión de producto), pero
+    NO se suma al lead: si se sumara sin esperar realmente, el short se
+    publicaría antes de su franja. Si la espera ocurre, el short publica unos
+    minutos más tarde; el plan conserva la franja.
+    """
+    return _channel_lead_minutes(db, channel_id)
+
+
 def _build_shorts_slots_for_channel(
     ch: dict,
     date_str: str,
@@ -1365,28 +1381,18 @@ def _build_shorts_slots_for_channel(
     long_target_hours: list[int],
     global_start_pos: int,
     db=None,
+    global_busy: list | None = None,
 ) -> tuple[list[dict], int]:
-    """Generate native shorts slots for ONE channel for a given date.
+    """Genera los slots nativos de UN canal con la regla franja-first.
 
-    Fase 3: las franjas se eligen por ``slot_rank`` (no por orden del reloj) y
-    se reparten cronológicamente con el asignador común, aplicando el gap
-    native↔native. La zona horaria es la del canal, no la del servidor.
-
-    Args:
-        ch: channel dict with at least id, slug, name
-        date_str: YYYY-MM-DD
-        native_count: how many native shorts today
-        clips_per_long: multiplier (clips ya no se pre-planifican)
-        long_video_count: how many long videos published yesterday
-        long_target_hours: target publish hours for those long videos (local tz)
-        global_start_pos: starting slot_position for this channel
-        db: ExtendedDatabase (se usa el mismo que el planificador)
-
-    Returns (slots_list, next_global_pos).
+    - N <= F: N franjas distintas (máxima separación, desempate por rank).
+    - N > F: todas las franjas y los extras comparten franja (offset 3 min).
+    - El gap same-channel no manda al día siguiente.
+    - ``global_busy`` es una preferencia para el espaciado entre canales; si
+      no hay franja libre, se permite el solape.
     """
     slug = ch["slug"]
     channel_id = ch["id"]
-    all_slots = []
     pos = global_start_pos
 
     _db = db
@@ -1396,96 +1402,69 @@ def _build_shorts_slots_for_channel(
 
     tz = _resolve_channel_tz(_db, channel_id, slug)
     franjas = _load_shorts_franjas(_db, channel_id)
-    rank_by_time = {(f.hour, f.minute): f.rank for f in franjas}
-    lead_min = _channel_lead_minutes(_db, channel_id)
+    lead_min = _short_schedule_lead_minutes(_db, channel_id)
 
+    raw_slots: list[FranjaSlot] = []
     if native_count > 0:
         start_day = date.fromisoformat(date_str)
         earliest = datetime.combine(
             start_day, datetime.min.time(), tzinfo=tz,
         )
-        allocated = allocate_publish_times(
+        # HOY: si quedan menos franjas futuras que shorts, no apilar todos en
+        # la última; se planifican solo las alcanzables.
+        franja_times = [
+            datetime.combine(start_day, datetime.min.time(), tzinfo=tz).replace(
+                hour=int(f.hour), minute=int(f.minute)
+            )
+            for f in franjas
+        ]
+        reachable = [t for t in franja_times if t >= earliest]
+        # Solo se recorta si alguna franja del día ya pasó (hoy). En fechas
+        # futuras se permite N > F con duplicados.
+        if any(t < earliest for t in franja_times):
+            effective_count = min(native_count, len(reachable))
+        else:
+            effective_count = native_count
+        if effective_count <= 0:
+            return [], pos
+        raw_slots = assign_franja_slots(
             franjas,
-            [(start_day, native_count)],
+            [(start_day, effective_count)],
             tz=tz,
             earliest=earliest,
-            min_gap_minutes=_same_type_gap_minutes(),
             daily_cap=native_count,
+            busy=global_busy or [],
+            soft_busy=True,
+            soft_gap=True,
+            overlap_offset_minutes=3,
+            busy_spacing_minutes=_global_publish_spacing_minutes(_db),
         )
-        for target_dt in allocated:
-            overflow_days = (target_dt.date() - start_day).days
-            total_min = (
-                overflow_days * 24 * 60
-                + target_dt.hour * 60
-                + target_dt.minute
-            )
-            slot_rank = rank_by_time.get(
-                (target_dt.hour, target_dt.minute), 0,
-            )
-            all_slots.append((total_min, "native", None, slot_rank))
-            try:
-                _db.record_slot_usage(channel_id, "short", slot_rank)
-            except Exception:
-                pass
 
-    # ── 3. Sort all slots by time and resolve collisions ──
-    #    Same-type (native↔native, clip↔clip) → 60min publish gap enforced
-    #    Cross-type (native↔clip) → overlap allowed, only 35min gen gap
-    #    Iterates forward through resolved slots; skips later slots to avoid
-    #    false-positive negative gaps from reversed-order checking.
-    all_slots.sort(key=lambda x: x[0])
-
-    resolved = []
-    for total_min, slot_type, long_pos, slot_rank in all_slots:
-        pushed_min = total_min
-        for prev_min, prev_type, _, _ in resolved:
-            if prev_min >= pushed_min:
-                continue  # This resolved slot is after us — not a collision
-            if slot_type == prev_type:
-                # Same type: enforce publish-level gap
-                if pushed_min - prev_min < _same_type_gap_minutes():
-                    pushed_min = prev_min + _same_type_gap_minutes()
-            else:
-                # Cross-type (native↔clip): enforce publish gap (v10.3)
-                if pushed_min - prev_min < _cross_type_gap_minutes():
-                    pushed_min = prev_min + _cross_type_gap_minutes()
-        pushed_min = pushed_min  # no end-of-day clamp — _minutes_to_utc_slot handles overflow
-        resolved.append((pushed_min, slot_type, long_pos, slot_rank))
-
-    # ── 3b. Dedup same-type slots at the exact same minute ──
-    #    When multiple same-type slots collide at the exact same minute
-    #    (e.g. end-of-day clamping from earlier collision rounds before
-    #    the overflow fix), push later ones forward by the gap.
-    #    Overflow past midnight is handled by _minutes_to_utc_slot.
-    deduped: list = []
-    for minutes_val, stype, long_pos, rank in resolved:
-        pushed = minutes_val
-        for prev_min, prev_type, _, _ in deduped:
-            if prev_type == stype and prev_min == pushed:
-                pushed = prev_min + _same_type_gap_minutes()
-        deduped.append((pushed, stype, long_pos, rank))
-    resolved = deduped
-
-    # ── 4. Build slot dicts ──
     slots = []
-    for total_min, slot_type, long_pos, slot_rank in resolved:
+    for franja_slot in raw_slots:
+        target_dt = franja_slot.when
+        total_min = target_dt.hour * 60 + target_dt.minute
         pos += 1
         slot = _minutes_to_utc_slot(
             date_str, total_min, channel_id, slug,
-            short_type=slot_type,
+            short_type="native",
             tz=tz,
-            long_slot_position=long_pos,
+            long_slot_position=None,
             slot_position=pos,
             gen_lead_min=lead_min,
         )
         slot["channel_name"] = ch.get("name", slug)
-        slot["slot_rank"] = slot_rank  # track which optimal slot was used
+        slot["slot_rank"] = franja_slot.franja.rank
+        slot["franja_dup_index"] = franja_slot.duplicate_index
         slots.append(slot)
+        try:
+            _db.record_slot_usage(channel_id, "short", franja_slot.franja.rank)
+        except Exception:
+            pass
 
     logger.debug(
-        "[%s] Built %d shorts slots: %d native + 0 clip "
-        "(clips generated ad-hoc after long video)",
-        slug, len(slots), native_count,
+        "[%s] Built %d shorts slots (franja-first, lead=%dmin)",
+        slug, len(slots), lead_min,
     )
 
     return slots, pos
@@ -1840,118 +1819,6 @@ def _global_publish_spacing_minutes(db) -> int:
         return 45
 
 
-def _spread_shorts_globally(all_slots: list[dict], db) -> list[dict]:
-    """Evita que varios canales publiquen shorts casi a la vez.
-
-    El perfil de cadencia impone ``global_upload_spacing_min`` entre subidas de
-    canales distintos. Antes solo se aplicaba en la válvula (esperando en
-    caliente, lo que retrasaba la publicación). Ahora se aplica al PLAN: si dos
-    canales caen en la misma franja, el segundo se mueve a la siguiente franja
-    válida de SU canal, y su hora de inicio se recalcula con su lead.
-
-    Se conserva el gap del mismo canal y nunca se adelanta una publicación.
-    """
-    spacing = _global_publish_spacing_minutes(db)
-    if spacing <= 0 or len(all_slots) < 2:
-        return all_slots
-
-    tz_cache: dict[int, ZoneInfo] = {}
-    franjas_cache: dict[int, list] = {}
-
-    def _tz(cid):
-        if cid not in tz_cache:
-            slug = next((x.get("channel_slug", "") for x in all_slots
-                         if int(x.get("channel_id", 0)) == cid), "")
-            tz_cache[cid] = _resolve_channel_tz(db, cid, slug)
-        return tz_cache[cid]
-
-    def _franjas(cid):
-        if cid not in franjas_cache:
-            franjas_cache[cid] = _load_shorts_franjas(db, cid)
-        return franjas_cache[cid]
-
-    def _as_utc(value: str) -> datetime:
-        return datetime.strptime(str(value)[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
-
-    def _conflict(cid: int, when: datetime, accepted: list[tuple[int, datetime]]) -> bool:
-        gap = _same_type_gap_minutes()
-        for other_cid, other_dt in accepted:
-            minutes = abs((when - other_dt).total_seconds()) / 60.0
-            if other_cid == cid:
-                if minutes < gap:
-                    return True
-            elif minutes < spacing:
-                return True
-        return False
-
-    def _next_window(cid: int, earliest: datetime,
-                     accepted: list[tuple[int, datetime]]) -> datetime | None:
-        tz = _tz(cid)
-        local_earliest = earliest.astimezone(tz)
-        base_day = local_earliest.date()
-        windows = sorted((f.hour, f.minute) for f in _franjas(cid))
-        for day_offset in range(0, 4):
-            day = base_day + timedelta(days=day_offset)
-            for hour, minute in windows:
-                candidate = datetime.combine(
-                    day, datetime.min.time(), tzinfo=tz,
-                ).replace(hour=hour, minute=minute)
-                if candidate < local_earliest:
-                    continue
-                candidate_utc = candidate.astimezone(UTC)
-                if not _conflict(cid, candidate_utc, accepted):
-                    return candidate_utc
-        return None
-
-    ordered = sorted(
-        all_slots,
-        key=lambda x: (x.get("target_publish_at") or x.get("target_upload_at") or "",
-                       int(x.get("slot_rank") or 999)),
-    )
-    accepted: list[tuple[int, datetime]] = []
-    moved = 0
-    for slot in ordered:
-        raw = slot.get("target_publish_at") or slot.get("target_upload_at")
-        cid = int(slot.get("channel_id") or 0)
-        if not raw or not cid:
-            continue
-        when = _as_utc(raw)
-        if not _conflict(cid, when, accepted):
-            accepted.append((cid, when))
-            continue
-
-        # Move past the blocking publication, then to the next own franja.
-        blocking = [
-            dt for other_cid, dt in accepted
-            if (other_cid == cid and abs((when - dt).total_seconds()) / 60.0 < _same_type_gap_minutes())
-            or (other_cid != cid and abs((when - dt).total_seconds()) / 60.0 < spacing)
-        ]
-        earliest = max([when] + [dt + timedelta(minutes=spacing) for dt in blocking])
-        new_when = _next_window(cid, earliest, accepted)
-        if new_when is None:
-            accepted.append((cid, when))
-            continue
-
-        lead = int(slot.get("schedule_lead_min") or _channel_lead_minutes(db, cid))
-        tz = _tz(cid)
-        local = new_when.astimezone(tz)
-        publish_utc = new_when.strftime("%Y-%m-%d %H:%M:%S")
-        start_utc = (new_when - timedelta(minutes=lead)).strftime("%Y-%m-%d %H:%M:%S")
-        slot["target_upload_at"] = publish_utc
-        slot["target_publish_at"] = publish_utc
-        slot["scheduled_at"] = start_utc
-        slot["date_key"] = local.date().isoformat()
-        slot["schedule_lead_min"] = lead
-        slot["globally_retimed"] = True
-        accepted.append((cid, new_when))
-        moved += 1
-
-    if moved:
-        logger.info("Shorts plan: %d slot(s) retimed to honour global upload spacing (%d min)",
-                    moved, spacing)
-    return all_slots
-
-
 def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
     """Compute shorts slots per active channel for a given date (YYYY-MM-DD).
 
@@ -2006,6 +1873,7 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
 
     all_slots = []
     global_pos = 0
+    assigned_global: list[datetime] = []
 
     for ch in channels:
         ch_id = ch["id"]
@@ -2017,23 +1885,16 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
         native_count = sc.get("shorts_native_per_day", 3)
         clips_per_long = sc.get("shorts_clips_per_long", 3)
 
-        # The per-channel post-strike policy is authoritative. Adaptive
-        # distribution remains analytical while clip shorts are disabled and
-        # must not reduce phase-2 channels below two native slots.
+        # Fuente ÚNICA: panel "Configuración de Programación" (override) >
+        # perfil > fase. El resolver ya incluye el bonus de rotación del día.
+        # Antes se usaba effective_native_shorts_per_day(), que no ve el
+        # override_json del panel y dejaba el plan en 2/día aunque el panel
+        # pidiera 3.
         try:
-            from api.services.gradual_resume import effective_native_shorts_per_day
-            native_count = effective_native_shorts_per_day(
-                ch_id, db, datetime.strptime(date_str, "%Y-%m-%d").date(),
-            )
-        except Exception:
-            native_count = int(native_count or 0)
-        # ── Rotación circular: +1 short en la fase "shorts+1" ──
-        # Se aplica al plan del día (no al perfil ni al override manual).
-        try:
-            native_count = int(native_count or 0)
-            if native_count > 0:
-                from api.services.rotation_strategy import bonus_for
-                native_count += int(bonus_for(ch_id, db, date_str).get("shorts", 0))
+            from api.services.channel_policy import resolve_channel_policy_values
+            native_count = int(resolve_channel_policy_values(
+                ch_id, db, day=date_str,
+            ).get("native_shorts_per_day", 0) or 0)
         except Exception:
             native_count = int(native_count or 0)
         clips_per_long = 0
@@ -2096,6 +1957,15 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
             ch, date_str, native_count, clips_per_long,
             yesterday_count, long_target_hours, global_pos,
             db=db,
+            global_busy=assigned_global,
+        )
+        assigned_global.extend(
+            datetime.strptime(s["target_publish_at"], "%Y-%m-%d %H:%M:%S")
+            .replace(tzinfo=UTC).astimezone(
+                _resolve_channel_tz(db, ch["id"], ch["slug"])
+            )
+            for s in channel_slots
+            if s.get("target_publish_at")
         )
 
         # ── Filler: disabled during quota remediation ──────────────
@@ -2123,8 +1993,8 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
 
         all_slots.extend(channel_slots)
 
-    # ── Reparto global entre canales (spacing de subida) ──
-    all_slots = _spread_shorts_globally(all_slots, db)
+    # El espaciado global ya se aplicó como preferencia en la selección de
+    # franjas (global_busy). Aquí no se mueve nada de día.
 
     # Sort by scheduled_at (start of the atomic render+upload job)
     all_slots.sort(key=lambda s: s["scheduled_at"])
@@ -2281,7 +2151,7 @@ def normalize_pending_shorts_starts(db=None) -> int:
             continue
         cid = int(slot.get("channel_id") or 0)
         if cid not in leads:
-            leads[cid] = _channel_lead_minutes(db, cid)
+            leads[cid] = _short_schedule_lead_minutes(db, cid)
         lead = leads[cid]
         try:
             target = datetime.strptime(str(raw)[:19], "%Y-%m-%d %H:%M:%S")
@@ -2308,56 +2178,6 @@ def normalize_pending_shorts_starts(db=None) -> int:
         logger.info("Shorts reconcile: %d pending slot start(s) aligned to lead time",
                     updated)
     return updated
-
-
-def spread_pending_slots_globally(db=None) -> int:
-    """Apply cross-channel spacing to slots that already exist in the DB.
-
-    Needed for the transition: previously planned slots were never spaced
-    globally, so several channels could share the same minute. Their targets
-    are moved (and starts recalculated) without changing status.
-    """
-    if db is None:
-        from database.db_extended import ExtendedDatabase
-        db = ExtendedDatabase()
-    try:
-        pending = db.get_shorts_planned_slots(status="pending")
-    except Exception:
-        return 0
-    native = [s for s in pending if (s.get("short_type") or "native") == "native"]
-    if len(native) < 2:
-        return 0
-    before = {s["id"]: (s.get("target_publish_at"), s.get("scheduled_at"),
-                        s.get("date_key")) for s in native}
-    _spread_shorts_globally(native, db)
-    changed = 0
-    for slot in native:
-        key = slot.get("id")
-        if key not in before:
-            continue
-        now_val = (slot.get("target_publish_at"), slot.get("scheduled_at"),
-                   slot.get("date_key"))
-        if now_val == before[key]:
-            continue
-        try:
-            with db._connect() as conn:
-                conn.execute(
-                    """UPDATE shorts_planned_slots
-                          SET scheduled_at = ?, target_upload_at = ?,
-                              target_publish_at = ?, date_key = ?,
-                              updated_at = CURRENT_TIMESTAMP
-                        WHERE id = ? AND status = 'pending'""",
-                    (slot.get("scheduled_at"), slot.get("target_publish_at"),
-                     slot.get("target_publish_at"), slot.get("date_key"), key),
-                )
-                conn.commit()
-            changed += 1
-        except Exception as exc:
-            logger.debug("global spread update failed for slot #%s: %s", key, exc)
-    if changed:
-        logger.info("Shorts reconcile: %d pending slot(s) spread across channels",
-                    changed)
-    return changed
 
 
 def retime_overdue_shorts_slots(db=None, now=None) -> int:
@@ -2387,7 +2207,7 @@ def retime_overdue_shorts_slots(db=None, now=None) -> int:
     for channel_id, slots in by_channel.items():
         slug = slots[0].get("channel_slug", "")
         tz = _resolve_channel_tz(db, channel_id, slug)
-        lead = _channel_lead_minutes(db, channel_id)
+        lead = _short_schedule_lead_minutes(db, channel_id)
         franjas = _load_shorts_franjas(db, channel_id)
         busy_local = []
         for other in slots:
@@ -2416,22 +2236,33 @@ def retime_overdue_shorts_slots(db=None, now=None) -> int:
                 continue
 
             earliest = (max(now_utc, target_utc) + timedelta(minutes=lead + 5)).astimezone(tz)
+            allocated = []
             try:
-                allocated = allocate_publish_times(
-                    franjas,
-                    [(earliest.date(), 1)],
-                    tz=tz,
-                    earliest=earliest,
-                    min_gap_minutes=_same_type_gap_minutes(),
-                    daily_cap=1,
-                    busy=[b for b in busy_local if b != target_utc.astimezone(tz)],
-                )
+                for day_offset in range(0, 5):
+                    day = earliest.date() + timedelta(days=day_offset)
+                    day_earliest = earliest if day_offset == 0 else datetime.combine(
+                        day, datetime.min.time(), tzinfo=tz,
+                    )
+                    candidate_slots = assign_franja_slots(
+                        franjas,
+                        [(day, 1)],
+                        tz=tz,
+                        earliest=day_earliest,
+                        daily_cap=1,
+                        busy=[b for b in busy_local if b != target_utc.astimezone(tz)],
+                        soft_busy=True,
+                        soft_gap=True,
+                        busy_spacing_minutes=_global_publish_spacing_minutes(db),
+                    )
+                    if candidate_slots:
+                        allocated = candidate_slots
+                        break
             except Exception as exc:
                 logger.debug("[%s] retime allocate failed: %s", slug, exc)
                 allocated = []
             if not allocated:
                 continue
-            new_local = allocated[0]
+            new_local = allocated[0].when
             new_utc = new_local.astimezone(UTC)
             start_utc = new_utc - timedelta(minutes=lead)
             try:
@@ -2440,12 +2271,14 @@ def retime_overdue_shorts_slots(db=None, now=None) -> int:
                         """UPDATE shorts_planned_slots
                               SET scheduled_at = ?, target_upload_at = ?,
                                   target_publish_at = ?, date_key = ?,
+                                  franja_dup_index = ?,
                                   updated_at = CURRENT_TIMESTAMP
                             WHERE id = ? AND status = 'pending'""",
                         (start_utc.strftime("%Y-%m-%d %H:%M:%S"),
                          new_utc.strftime("%Y-%m-%d %H:%M:%S"),
                          new_utc.strftime("%Y-%m-%d %H:%M:%S"),
-                         new_local.date().isoformat(), slot["id"]),
+                         new_local.date().isoformat(),
+                         int(allocated[0].duplicate_index), slot["id"]),
                     )
                     conn.commit()
                 busy_local.append(new_local)
@@ -2518,7 +2351,6 @@ def reconcile_shorts_schedule(db=None, channel_ids=None, start_day=None,
             results[day_str] = f"ERROR: {e}"
 
     normalize_pending_shorts_starts(db)
-    spread_pending_slots_globally(db)
     retime_overdue_shorts_slots(db)
     total = sum(int(v.split()[0]) for v in results.values() if v and v[0].isdigit())
     logger.info(
@@ -3002,8 +2834,43 @@ def check_shorts_daily_coverage(db=None) -> dict:
     return result
 
 
+def _intentional_franja_duplicate(slot_id: int, db) -> bool:
+    """True si el slot comparte franja con otro slot nativo del mismo canal/día.
+
+    Los duplicados intencionales (N > F) deben poder ejecutarse y subir
+    seguidos; los guards de conflicto/cooldown no aplican entre ellos.
+    """
+    if not slot_id:
+        return False
+    try:
+        with db._connect() as conn:
+            row = conn.execute(
+                """SELECT channel_id, date_key, slot_rank, franja_dup_index
+                   FROM shorts_planned_slots WHERE id = ?""",
+                (int(slot_id),),
+            ).fetchone()
+            if not row:
+                return False
+            if int(row["franja_dup_index"] or 0) > 0:
+                return True
+            if int(row["slot_rank"] or 0) <= 0:
+                return False  # slot legado sin franja: no eximir guards
+            sibling = conn.execute(
+                """SELECT 1 FROM shorts_planned_slots
+                   WHERE channel_id = ? AND date_key = ? AND slot_rank = ?
+                     AND short_type = 'native' AND id != ?
+                     AND status IN ('pending', 'running', 'completed')
+                   LIMIT 1""",
+                (row["channel_id"], row["date_key"], row["slot_rank"], int(slot_id)),
+            ).fetchone()
+            return sibling is not None
+    except Exception:
+        return False
+
+
 def _planned_native_gate(channel_id: int, slug: str, db, *,
-                         for_upload: bool = False) -> tuple[bool, str]:
+                         for_upload: bool = False,
+                         allow_same_franja: bool = False) -> tuple[bool, str]:
     """Safety envelope shared by the planned render+upload path.
 
     Called twice: before starting the render and again immediately before the
@@ -3028,12 +2895,13 @@ def _planned_native_gate(channel_id: int, slug: str, db, *,
             return False, "objetivo diario de nativos alcanzado"
     except Exception as exc:
         logger.debug("[%s] planned gate policy skipped: %s", slug, exc)
-    try:
-        ok, wait = _channel_short_spacing_ok(channel_id, "native", db)
-        if not ok and (for_upload or wait > 600):
-            return False, f"espaciado mismo-canal ({wait}s)"
-    except Exception:
-        pass
+    if not allow_same_franja:
+        try:
+            ok, wait = _channel_short_spacing_ok(channel_id, "native", db)
+            if not ok and (for_upload or wait > 600):
+                return False, f"espaciado mismo-canal ({wait}s)"
+        except Exception:
+            pass
     return True, ""
 
 
@@ -3329,6 +3197,11 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                         )
                         continue
 
+                    _allow_dup_f = (
+                        short_type_f == "native"
+                        and _intentional_franja_duplicate(slot_id, db)
+                    )
+
                     # ── v10.5: Apply same-channel guards even in force dispatch ──
                     # Only bypass these guards as absolute last resort (after
                     # exhausting all channels). This prevents the force dispatch
@@ -3346,7 +3219,7 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                             continue
 
                         # Per-channel cooldown
-                        if not _channel_shorts_cooldown_ok(channel_id, db):
+                        if not _allow_dup_f and not _channel_shorts_cooldown_ok(channel_id, db):
                             logger.info(
                                 "Force dispatch: slot #%d (%s) — cooldown active "
                                 "(< %d min), trying next channel",
@@ -3357,10 +3230,11 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
 
                         # Same-type/cross-type collision guard
                         target_up = force_slot.get("target_upload_at")
-                        if _same_type_shorts_slot_conflict(channel_id, short_type_f,
-                                                            target_up, db,
-                                                            exclude_slot_id=slot_id,
-                                                            cross_type=True):
+                        if not _allow_dup_f and _same_type_shorts_slot_conflict(
+                                channel_id, short_type_f,
+                                target_up, db,
+                                exclude_slot_id=slot_id,
+                                cross_type=True):
                             logger.info(
                                 "Force dispatch: slot #%d (%s) — publish conflict, "
                                 "trying next channel",
@@ -3420,6 +3294,7 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                     if short_type_f == "native":
                         _gate_ok_f, _gate_reason_f = _planned_native_gate(
                             channel_id, slug, db,
+                            allow_same_franja=_allow_dup_f,
                         )
                     if not _gate_ok_f:
                         logger.info(
@@ -3544,6 +3419,11 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
             )
             continue
 
+        _allow_dup = (
+            short_type == "native"
+            and _intentional_franja_duplicate(slot_id, db)
+        )
+
         # 4. Per-channel short job guard — skip to next slot instead of failing.
         #    Different channels can generate shorts in parallel since each has
         #    its own API keys, TTS resources, and render pipeline.
@@ -3559,7 +3439,7 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
 
         # 5. Per-channel cooldown guard — skip to next slot instead of failing
         #    (cooldown de GENERACIÓN: espacia la producción de shorts).
-        if not _channel_shorts_cooldown_ok(channel_id, db):
+        if not _allow_dup and not _channel_shorts_cooldown_ok(channel_id, db):
             logger.info(
                 "Shorts slot #%d (%s) skipped: cooldown active "
                 "(last short < %d min ago) — trying next channel",
@@ -3575,8 +3455,9 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
 
         # 8. Publish collision guard — same-type (45 min) + cross-type (20 min)
         target_upload = next_slot.get("target_upload_at")
-        if _same_type_shorts_slot_conflict(channel_id, short_type, target_upload, db,
-                                            exclude_slot_id=slot_id, cross_type=True):
+        if not _allow_dup and _same_type_shorts_slot_conflict(
+                channel_id, short_type, target_upload, db,
+                exclude_slot_id=slot_id, cross_type=True):
             logger.info(
                 "Shorts slot #%d (%s) skipped: publish conflict "
                 "(%s within %d min same-type / %d min cross-type) — trying next channel",
@@ -3681,7 +3562,9 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
         # ── Gate del trabajo atómico: no renderizar lo que no se puede subir ──
         _gate_ok, _gate_reason = (True, "")
         if short_type == "native":
-            _gate_ok, _gate_reason = _planned_native_gate(channel_id, slug, db)
+            _gate_ok, _gate_reason = _planned_native_gate(
+                channel_id, slug, db, allow_same_franja=_allow_dup,
+            )
         if not _gate_ok:
             logger.info(
                 "Shorts slot #%d (%s) bloqueado por gate: %s — queda pendiente",
@@ -5592,6 +5475,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     # ── Gate final (el render puede haber durado decenas de minutos) ──
     _gate_ok_up, _gate_reason_up = _planned_native_gate(
         channel_id, channel_slug, dbx, for_upload=True,
+        allow_same_franja=_intentional_franja_duplicate(slot_id, dbx),
     )
     if not _gate_ok_up:
         logger.info(

@@ -234,13 +234,13 @@ def _create_recovery_slots(
     lead (start = publish - lead).
     """
     from api.services.shorts_scheduler import (
-        _channel_lead_minutes, _load_shorts_franjas, _resolve_channel_tz,
-        _same_type_gap_minutes,
+        _global_publish_spacing_minutes as _global_spacing,
+        _load_shorts_franjas, _resolve_channel_tz, _short_schedule_lead_minutes,
     )
-    from api.services.publish_allocator import allocate_publish_times
+    from api.services.publish_allocator import assign_franja_slots
 
     tz = _resolve_channel_tz(db, ch_id, slug)
-    lead = _channel_lead_minutes(db, ch_id)
+    lead = _short_schedule_lead_minutes(db, ch_id)
     franjas = _load_shorts_franjas(db, ch_id)
     now_local = _now_madrid()
 
@@ -260,18 +260,31 @@ def _create_recovery_slots(
     earliest = now_local.astimezone(tz) + timedelta(
         minutes=MIN_HOUR_AHEAD * 60 + lead,
     )
-    allocated = allocate_publish_times(
-        franjas,
-        [(earliest.date(), missing)],
-        tz=tz,
-        earliest=earliest,
-        min_gap_minutes=_same_type_gap_minutes(),
-        daily_cap=missing,
-        busy=busy,
-    )
+    allocated = []
+    for day_offset in range(0, 5):
+        day = earliest.date() + timedelta(days=day_offset)
+        day_earliest = earliest if day_offset == 0 else datetime.combine(
+            day, datetime.min.time(), tzinfo=tz,
+        )
+        candidate_slots = assign_franja_slots(
+            franjas,
+            [(day, missing)],
+            tz=tz,
+            earliest=day_earliest,
+            daily_cap=missing,
+            busy=busy,
+            soft_busy=True,
+            soft_gap=True,
+            overlap_offset_minutes=3,
+            busy_spacing_minutes=_global_spacing(db),
+        )
+        if candidate_slots:
+            allocated = candidate_slots
+            break
 
     created_slots = []
-    for target_local in allocated:
+    for franja_slot in allocated:
+        target_local = franja_slot.when
         target_utc = target_local.astimezone(pytz.utc)
         start_utc = target_utc - timedelta(minutes=lead)
         date_key = target_local.date().isoformat()
@@ -283,6 +296,7 @@ def _create_recovery_slots(
                 target_publish_at=target_utc.strftime("%Y-%m-%d %H:%M:%S"),
                 short_type=short_type,
                 slot_position=len(active_slots) + len(created_slots) + 1,
+                franja_dup_index=int(franja_slot.duplicate_index),
             )
             created_slots.append({
                 "slot_id": slot_id,

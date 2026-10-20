@@ -67,6 +67,7 @@ def _mkdb(tmp_path, queued_by_channel: dict):
                 date_key TEXT NOT NULL,
                 scheduled_at TIMESTAMP NOT NULL,
                 target_upload_at TIMESTAMP,
+                franja_dup_index INTEGER DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'pending',
                 short_type TEXT NOT NULL DEFAULT 'native',
                 slot_position INTEGER DEFAULT 0,
