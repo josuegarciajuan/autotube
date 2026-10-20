@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS planned_slots (
     job_id          INTEGER REFERENCES generation_jobs(id) ON DELETE SET NULL,
     video_id        INTEGER REFERENCES videos(id) ON DELETE SET NULL,
     slot_position   INTEGER DEFAULT 0,           -- 1,2,3... order within the day
+    franja_dup_index INTEGER DEFAULT 0,          -- 0=first in franja, 1+=overlap
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

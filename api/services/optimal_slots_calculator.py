@@ -31,7 +31,19 @@ from zoneinfo import ZoneInfo
 
 from database.db_extended import ExtendedDatabase
 from pipeline.youtube_stats import YouTubeStatsFetcher
-from api.services.publish_allocator import Franja, allocate_publish_times
+from api.services.publish_allocator import (
+    Franja,
+    assign_franja_slots,
+)
+
+
+def _global_spacing_minutes(db) -> int:
+    try:
+        from api.services.pacing_profile import get_pacing_value
+        return max(0, int(get_pacing_value("global_upload_spacing_min", 45, db) or 0))
+    except Exception:
+        return 45
+
 
 logger = logging.getLogger("autotube.optimal_slots")
 
@@ -844,36 +856,61 @@ class OptimalSlotsCalculator:
             else datetime.combine(start_day, datetime.min.time(), tzinfo=tz)
         )
 
-        allocated = allocate_publish_times(
+        # Repartir TODO el backlog pendiente con la regla franja-first:
+        # tantos elementos por día como permita el cap; si hay más que
+        # franjas, comparten franja con offset. Sin carry por gap.
+        busy_dt: list[datetime] = []
+        day_usage: dict = {}
+        for raw in occupied:
+            try:
+                value = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+                if value.tzinfo is None:
+                    value = value.replace(tzinfo=dt_timezone.utc)
+                local = value.astimezone(tz)
+            except Exception:
+                continue
+            busy_dt.append(local)
+            day_usage[local.date()] = day_usage.get(local.date(), 0) + 1
+
+        day_counts: list[tuple[date, int]] = []
+        remaining = len(pending)
+        cursor_day = start_day
+        guard = 0
+        while remaining > 0 and guard < max(60, len(pending) + 30):
+            cap = max(0, _cap_for_day(cursor_day))
+            if cap <= 0:
+                cursor_day += timedelta(days=1)
+                guard += 1
+                continue
+            take = min(remaining, cap)
+            day_counts.append((cursor_day, take))
+            remaining -= take
+            cursor_day += timedelta(days=1)
+            guard += 1
+
+        allocated = assign_franja_slots(
             franjas,
-            [(start_day, len(pending))],
+            day_counts,
             tz=tz,
             earliest=earliest,
-            min_gap_minutes=min_gap,
             daily_cap=_cap_for_day,
+            busy=busy_dt,
+            day_usage=day_usage,
+            soft_busy=True,
+            soft_gap=True,
+            busy_spacing_minutes=_global_spacing_minutes(self._db),
         )
 
         # Calcular todos los destinos ANTES de tocar la tabla. Actualizar en
         # caliente chocaba con el target antiguo de otra fila `pending` aún no
         # procesada (UNIQUE index uq_active_planned_public_target) y abortaba
         # el replan completo (bug oct 2026, canal5).
-        assignments: list[tuple[int, str, datetime]] = []
-        last_dt = None
-        for row, target_dt in zip(pending, allocated):
-            # Evitar chocar con un target ya ocupado (running/vídeo): pasa
-            # al mismo horario del día siguiente, conservando el gap.
-            while True:
-                iso = target_dt.astimezone(dt_timezone.utc).isoformat()
-                gap_ok = last_dt is None or (
-                    (target_dt - last_dt).total_seconds() / 60 >= min_gap
-                )
-                if iso not in occupied and gap_ok:
-                    break
-                target_dt += timedelta(days=1)
-            iso = target_dt.astimezone(dt_timezone.utc).isoformat()
-            assignments.append((int(row["id"]), iso, target_dt))
-            occupied.add(iso)
-            last_dt = target_dt
+        assignments: list[tuple[int, str, datetime, int]] = []
+        for row, slot in zip(pending, allocated):
+            iso = slot.when.astimezone(dt_timezone.utc).isoformat()
+            assignments.append((
+                int(row["id"]), iso, slot.when, int(slot.duplicate_index),
+            ))
 
         updated = 0
         with self._db._connect() as conn:
@@ -886,24 +923,25 @@ class OptimalSlotsCalculator:
                     + timedelta(minutes=int(row["id"]))
                 ).isoformat()
                 conn.execute(
-                    """UPDATE planned_slots SET target_public_at = ?
+                    """UPDATE planned_slots
+                       SET target_public_at = ?, franja_dup_index = 0
                        WHERE id = ? AND status = 'pending'""",
                     (placeholder, row["id"]),
                 )
 
             # Fase 2: escribir los targets definitivos.
-            for slot_id, iso, _target_dt in assignments:
+            for slot_id, iso, _target_dt, dup_index in assignments:
                 conn.execute(
                     """UPDATE planned_slots
-                       SET target_public_at = ?
+                       SET target_public_at = ?, franja_dup_index = ?
                        WHERE id = ? AND status = 'pending'""",
-                    (iso, slot_id),
+                    (iso, dup_index, slot_id),
                 )
                 updated += 1
 
             # Si el asignador no cubrió alguna fila (caso excepcional), se
             # restaura su target original para no dejarla sin programar.
-            assigned_ids = {slot_id for slot_id, _iso, _dt in assignments}
+            assigned_ids = {slot_id for slot_id, _iso, _dt, _dup in assignments}
             for row in pending:
                 if int(row["id"]) not in assigned_ids and row["target_public_at"]:
                     conn.execute(

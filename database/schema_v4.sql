@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS shorts_planned_slots (
     job_id INTEGER,                          -- FK → generation_jobs
     short_id INTEGER,                        -- FK → shorts
     slot_position INTEGER DEFAULT 0,         -- order within the day
+    franja_dup_index INTEGER DEFAULT 0,      -- 0=first in franja, 1+=sequential overlap
     error_message TEXT,                      -- error details if failed
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

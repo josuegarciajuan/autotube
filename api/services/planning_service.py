@@ -26,7 +26,8 @@ import pytz
 from api.time_utils import local_to_utc, sqlite_utc, MADRID, UTC
 from api.services.publish_allocator import (
     Franja,
-    allocate_publish_times,
+    FranjaSlot,
+    assign_franja_slots,
     group_by_day,
 )
 from config.settings import effective_max_concurrent_longform_jobs
@@ -1227,7 +1228,15 @@ def _franjas_for_channel(
     return franjas
 
 
-def _distribute_slots(
+def _global_upload_spacing_minutes(db) -> int:
+    try:
+        from api.services.pacing_profile import get_pacing_value
+        return max(0, int(get_pacing_value("global_upload_spacing_min", 45, db) or 0))
+    except Exception:
+        return 45
+
+
+def _distribute_franja_slots(
     videos_per_day: int,
     day_seed: int,
     channel_id: int,
@@ -1235,12 +1244,13 @@ def _distribute_slots(
     scheduled_cfg: dict = None,
     db=None,
     date_str: str = None,
-) -> list[datetime]:
-    """Distribuye N publicaciones del canal respetando cap, gap y ranking.
+    busy: list | None = None,
+) -> list[FranjaSlot]:
+    """Reparte N elementos del canal entre sus franjas (franja-first).
 
-    Returns datetimes locales *aware* (Europe/Madrid por defecto). Si el día
-    solicitado no admite todos los slots, los sobrantes pasan al día siguiente
-    en vez de recortarse a las 23:xx.
+    - N <= F: N franjas distintas (máxima separación, desempate por rank).
+    - N > F: todas las franjas y los extras comparten franja con offset.
+    - El gap same-channel es preferencia, no veto: nunca manda al día siguiente.
     """
     if videos_per_day <= 0:
         return []
@@ -1263,22 +1273,55 @@ def _distribute_slots(
 
     if is_scheduled:
         daily_cap = _publish_cap_per_day(db, channel_id, cfg, day=date_str)
-        min_gap = _publish_gap_minutes(channel_id, db=db, config=cfg)
+        requested = min(videos_per_day, daily_cap) if daily_cap > 0 else videos_per_day
     else:
-        # Immediate: no publication cap/gap beyond the requested count.
         daily_cap = videos_per_day
-        min_gap = 0
+        requested = videos_per_day
 
     start_day = date.fromisoformat(date_str)
     earliest = datetime.combine(start_day, datetime.min.time(), tzinfo=tz)
-    return allocate_publish_times(
+    # HOY: no apilar N elementos en la única franja que queda. El exceso de
+    # hoy no se publica; el horizonte planifica los días siguientes.
+    reachable = [
+        f for f in franjas
+        if datetime.combine(start_day, datetime.min.time(), tzinfo=tz).replace(
+            hour=int(f.hour), minute=int(f.minute)
+        ) >= earliest
+    ]
+    if not reachable:
+        return []
+    requested = min(requested, len(reachable))
+    return assign_franja_slots(
         franjas,
-        [(start_day, videos_per_day)],
+        [(start_day, requested)],
         tz=tz,
         earliest=earliest,
-        min_gap_minutes=min_gap,
         daily_cap=daily_cap,
+        busy=busy or [],
+        soft_busy=True,
+        soft_gap=True,
+        busy_spacing_minutes=_global_upload_spacing_minutes(db),
     )
+
+
+def _distribute_slots(
+    videos_per_day: int,
+    day_seed: int,
+    channel_id: int,
+    is_scheduled: bool = False,
+    scheduled_cfg: dict = None,
+    db=None,
+    date_str: str = None,
+    busy: list | None = None,
+) -> list[datetime]:
+    """Compat: devuelve las datetimes del reparto franja-first."""
+    return [
+        slot.when for slot in _distribute_franja_slots(
+            videos_per_day, day_seed, channel_id,
+            is_scheduled=is_scheduled, scheduled_cfg=scheduled_cfg,
+            db=db, date_str=date_str, busy=busy,
+        )
+    ]
 
 
 def compute_daily_slots(
@@ -1307,6 +1350,7 @@ def compute_daily_slots(
     """
     day_seed = _day_seed(date_str)
     all_slots = []
+    assigned_global: list[datetime] = []
 
     # ── Quota-aware: cupo por proyecto para la fecha ──
     alloc = {}
@@ -1335,21 +1379,24 @@ def compute_daily_slots(
         # _distribute_slots returns local aware datetimes. For a single-day
         # planner only today's slots are stored; overflow (cap/gap) is produced
         # by the allocator for the horizon planner, not double-booked here.
-        raw_slots = _distribute_slots(
+        raw_slots = _distribute_franja_slots(
             n, day_seed, ch["channel_id"],
             is_scheduled=is_scheduled,
             scheduled_cfg=ch if is_scheduled else None,
             db=db,
             date_str=date_str,
+            busy=assigned_global,
         )
         raw_slots = [
-            dt for dt in raw_slots
-            if dt.date().isoformat() == date_str
+            s for s in raw_slots
+            if s.when.date().isoformat() == date_str
         ]
         if not raw_slots:
             continue
+        assigned_global.extend(s.when for s in raw_slots)
 
-        for pos, target_dt in enumerate(raw_slots, 1):
+        for pos, franja_slot in enumerate(raw_slots, 1):
+            target_dt = franja_slot.when
             # target_upload_at: for scheduled = public peak time; for immediate = upload time
             target_str = target_dt.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1376,6 +1423,7 @@ def compute_daily_slots(
                 "channel_name": ch.get("name", ""),
                 "channel_slug": ch.get("slug", ""),
                 "source_mode": slot_mode,
+                "franja_dup_index": franja_slot.duplicate_index,
                 "publish_mode": ch.get("publish_mode", "immediate"),
                 "publish_timezone": ch.get("publish_timezone", "Europe/Madrid"),
                 "publish_warmup_min": warmup_min,
@@ -1725,16 +1773,17 @@ def _horizon_scheduled_allocations(
     today: date,
     horizon_days: int,
     db=None,
-) -> dict[int, dict[str, list[datetime]]]:
-    """Reparte TODO el horizonte por canal antes de construir los slots.
+) -> dict[int, dict[str, list[FranjaSlot]]]:
+    """Reparte TODO el horizonte por canal con la regla franja-first.
 
-    Planificar cada día por separado y luego "empujar" el segundo slot al día
-    siguiente duplicaba horarios (el día siguiente ya tenía su propio plan).
-    Aquí se hace una sola asignación por canal con cap y gap reales; los slots
-    que no caben en el horizonte se descartan (se replanificarán más adelante).
+    Cada día se resuelve con sus propias franjas: N elementos usan N franjas
+    distintas; si N supera F, los extras comparten franja. El espaciado global
+    entre canales se aplica como preferencia de selección (busy), nunca
+    cambiando de día. El gap same-channel tampoco manda al día siguiente.
     """
     end_day = today + timedelta(days=max(0, horizon_days - 1))
-    result: dict[int, dict[str, list[datetime]]] = {}
+    result: dict[int, dict[str, list[FranjaSlot]]] = {}
+    global_busy: list[datetime] = []
 
     for ch in channel_configs:
         if ch.get("publish_mode") != "scheduled":
@@ -1745,10 +1794,22 @@ def _horizon_scheduled_allocations(
         if not ch_id:
             continue
 
+        daily_caps = {
+            today + timedelta(days=offset):
+            _publish_cap_per_day(
+                db, ch_id, ch, day=(today + timedelta(days=offset)).isoformat(),
+            )
+            for offset in range(horizon_days)
+        }
         day_counts: list[tuple[date, int]] = []
         for offset in range(horizon_days):
             d = today + timedelta(days=offset)
             n = _resolve_generation_per_day(ch, d.isoformat(), db=db)
+            cap = int(daily_caps.get(d, 0) or 0)
+            # El plan PÚBLICO no debe superar el cap; el buffer de generación
+            # es un objetivo distinto y no ocupa franja pública.
+            if cap > 0:
+                n = min(n, cap)
             if n > 0:
                 day_counts.append((d, n))
         if not day_counts:
@@ -1766,37 +1827,46 @@ def _horizon_scheduled_allocations(
             tz = ZoneInfo(tz_name)
         except Exception:
             tz = ZoneInfo("Europe/Madrid")
-        # Para HOY, la publicación debe quedar al menos warmup+buffer por delante
-        # de "ahora": así la subida puede moverse antes sin empujar la
-        # publicación (y sin romper el gap que garantiza el asignador).
         warmup_head = int(ch.get("publish_warmup_min", 120) or 120) + 60
         earliest = max(
             datetime.combine(today, datetime.min.time(), tzinfo=tz),
             datetime.now(tz) + timedelta(minutes=warmup_head),
         )
-        busy, day_usage = _occupied_publish_targets(db, ch_id, tz)
-        # Cap variable por día: la fase rotativa cambia el objetivo de cada
-        # fecha. Un escalar aplicaría el bonus de hoy a todo el horizonte.
-        daily_caps = {
-            d: _publish_cap_per_day(db, ch_id, ch, day=d.isoformat())
-            for d, _ in day_counts
-        }
-        times = allocate_publish_times(
+        # HOY: limitar a las franjas aún alcanzables; no apilar el día entero
+        # en la última franja que queda.
+        reachable_today = sum(
+            1 for f in franjas
+            if datetime.combine(today, datetime.min.time(), tzinfo=tz).replace(
+                hour=int(f.hour), minute=int(f.minute)
+            ) >= earliest
+        )
+        if reachable_today <= 0:
+            continue
+        day_counts = [
+            (d, min(n, reachable_today) if d == today else n)
+            for d, n in day_counts
+        ]
+        own_busy, day_usage = _occupied_publish_targets(db, ch_id, tz)
+        assigned = assign_franja_slots(
             franjas,
             day_counts,
             tz=tz,
             earliest=earliest,
-            min_gap_minutes=_publish_gap_minutes(ch_id, db=db, config=ch),
             daily_cap=daily_caps,
-            busy=busy,
+            busy=list(own_busy) + list(global_busy),
             day_usage=day_usage,
+            soft_busy=True,
+            soft_gap=True,
+            busy_spacing_minutes=_global_upload_spacing_minutes(db),
         )
 
-        by_day: dict[str, list[datetime]] = {}
-        for d, values in group_by_day(times).items():
+        by_day: dict[str, list[FranjaSlot]] = {}
+        for slot in assigned:
+            d = slot.when.date()
             if d < today or d > end_day:
                 continue
-            by_day[d.isoformat()] = values
+            by_day.setdefault(d.isoformat(), []).append(slot)
+            global_busy.append(slot.when)
         result[ch_id] = by_day
 
     return result
@@ -1868,14 +1938,14 @@ def compute_horizon_slots(
                 raw_peaks = scheduled_allocations.get(ch_id, {}).get(date_str, [])
             else:
                 raw_peaks = [
-                    dt for dt in _distribute_slots(
+                    slot for slot in _distribute_franja_slots(
                         n, _day_seed(date_str), ch_id,
                         is_scheduled=False,
                         scheduled_cfg=None,
                         db=db,
                         date_str=date_str,
                     )
-                    if dt.date().isoformat() == date_str
+                    if slot.when.date().isoformat() == date_str
                 ]
             if not raw_peaks:
                 continue
@@ -1887,7 +1957,8 @@ def compute_horizon_slots(
                 if n > 0 else ["original"] * daily_n
             )
             
-            for pos, peak_dt in enumerate(raw_peaks, 1):
+            for pos, franja_slot in enumerate(raw_peaks, 1):
+                peak_dt = franja_slot.when
                 peak_h, peak_m = peak_dt.hour, peak_dt.minute
                 pub_day = peak_dt.date().isoformat()
                 target_public_at = peak_dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -1960,6 +2031,7 @@ def compute_horizon_slots(
                     "channel_name": ch.get("name", ""),
                     "channel_slug": ch.get("slug", ""),
                     "source_mode": mode_sequence[pos - 1] if (pos - 1) < len(mode_sequence) else "original",
+                    "franja_dup_index": franja_slot.duplicate_index,
                     "publish_mode": ch.get("publish_mode", "immediate"),
                     "publish_timezone": ch.get("publish_timezone", "Europe/Madrid"),
                     "publish_warmup_min": int(ch.get("publish_warmup_min", 120) or 120),
@@ -2614,9 +2686,11 @@ def compute_and_store_horizon(
     try:
         with db._connect() as _conn:
             _active_targets = {
-                (int(_r["channel_id"]), str(_r["target_public_at"]))
+                (int(_r["channel_id"]), str(_r["target_public_at"]),
+                 int(_r["franja_dup_index"] or 0))
                 for _r in _conn.execute(
-                    "SELECT channel_id, target_public_at FROM planned_slots "
+                    "SELECT channel_id, target_public_at, franja_dup_index "
+                    "FROM planned_slots "
                     "WHERE status IN ('pending','running') AND target_public_at IS NOT NULL"
                 ).fetchall()
             }
@@ -2625,7 +2699,10 @@ def compute_and_store_horizon(
         for _s in slots:
             _t = _s.get("target_public_at")
             if _t:
-                _key = (int(_s.get("channel_id") or 0), str(_t))
+                _key = (
+                    int(_s.get("channel_id") or 0), str(_t),
+                    int(_s.get("franja_dup_index", 0) or 0),
+                )
                 if _key in _active_targets or _key in _seen:
                     continue
                 _seen.add(_key)
