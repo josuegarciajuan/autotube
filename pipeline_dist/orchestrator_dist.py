@@ -575,7 +575,9 @@ class DistributedOrchestrator(PipelineOrchestrator):
                 # (`_auto_retry_if_transient`): el subproceso distribuido delegado
                 # falló tras agotar las rondas de reparación → el llamante caerá a
                 # local y, si éste también falla, el vídeo se reintenta desde cero.
-                logger.error(
+                # La ruta local sigue inmediatamente; solo es crítico si esa
+                # ruta también falla (el worker emitirá entonces el error real).
+                logger.warning(
                     "[%s] %s: reparación distribuida agotada tras %d rondas (%s) — "
                     "dist_repair_exhausted; fallback local y, si falla, re-encolado.",
                     canal, phase, attempt, err[:200],

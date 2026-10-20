@@ -466,7 +466,8 @@ def test_stale_info_alerts_are_retired_after_retention(tmp_path):
         )
         conn.commit()
 
-    assert INFO_ALERT_RETENTION_DAYS == 7
+    # c167ecbb redujo la retención de info de 7 a 2 días (anti-cascada).
+    assert INFO_ALERT_RETENTION_DAYS == 2
     assert _auto_resolve_stale_info(db) == 2
     with db._connect() as conn:
         rows = {

@@ -129,3 +129,33 @@ def test_kill_switch_disables_check(monkeypatch, tmp_path):
     db = _build_db(tmp_path)
     monkeypatch.setattr(lm, "GENERATION_STALL_WATCH", False)
     assert lm._check_generation_progress_freeze(db) == 0
+
+
+def test_media_phase_uses_higher_threshold_and_warning(monkeypatch, tmp_path):
+    """Las fases de media son lentas por diseño: 60 min y severidad warning."""
+    from api.services import lifecycle_monitor as lm
+
+    db = _build_db(tmp_path)
+    with db._connect() as conn:
+        conn.execute(
+            "UPDATE generation_jobs SET phase='media', pipeline_phase='prep', progress=55 "
+            "WHERE id=10"
+        )
+        conn.commit()
+
+    clock = {"now": datetime(2026, 10, 6, 12, 0, 0)}
+    monkeypatch.setattr(lm, "_utcnow", lambda: clock["now"])
+    assert lm._check_generation_progress_freeze(db) == 0
+
+    # 26 min: antes generaba un crítico; ahora debe seguir en silencio.
+    clock["now"] = clock["now"] + timedelta(minutes=26)
+    assert lm._check_generation_progress_freeze(db) == 0
+
+    # 61 min: alerta, pero warning (no crítico).
+    clock["now"] = clock["now"] + timedelta(minutes=35)
+    assert lm._check_generation_progress_freeze(db) == 1
+    with db._connect() as conn:
+        row = conn.execute(
+            "SELECT severity FROM pipeline_alerts WHERE alert_type='generation_stalled'"
+        ).fetchone()
+    assert row["severity"] == "warning"

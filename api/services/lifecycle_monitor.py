@@ -161,6 +161,17 @@ STUCK_HEARTBEAT_STALE_MIN = 15
 # Aquí se compara phase+pipeline_phase+progress contra un snapshot en
 # `system_state` y se alerta si no cambia en GENERATION_STALL_MIN minutos.
 GENERATION_STALL_MIN = int(os.environ.get("GENERATION_STALL_MIN", "25") or 25)
+# Las fases de descarga/producción de media pueden tardar legítimamente más de
+# 25 min (cientos de assets, proveedores externos). Un umbral único generaba
+# falsos críticos que luego se auto-resolvían; el render conserva el umbral
+# estricto porque ahí sí indica un subproceso encallado.
+GENERATION_STALL_MIN_BY_PHASE = {
+    "media": 60,
+    "images": 60,
+    "script": 45,
+    "prep": 60,
+}
+GENERATION_STALL_WARNING_PHASES = frozenset({"media", "images", "prep", "script"})
 GENERATION_STALL_WATCH = os.environ.get(
     "GENERATION_STALL_WATCH", "true"
 ).strip().lower() not in ("0", "false", "no", "off")
@@ -988,10 +999,18 @@ def _check_generation_progress_freeze(db) -> int:
                 except (ValueError, TypeError, KeyError):
                     since = now
                 stalled_min = (now - since).total_seconds() / 60.0
-                if stalled_min >= GENERATION_STALL_MIN and row["video_id"]:
+                phase_key = str(row["phase"] or "").lower()
+                stall_threshold = GENERATION_STALL_MIN_BY_PHASE.get(
+                    phase_key, GENERATION_STALL_MIN,
+                )
+                severity = (
+                    "warning" if phase_key in GENERATION_STALL_WARNING_PHASES
+                    else "critical"
+                )
+                if stalled_min >= stall_threshold and row["video_id"]:
                     created += _maybe_create_alert(
                         db, conn, "video", row["video_id"], row["channel_id"],
-                        "generation_stalled", "critical",
+                        "generation_stalled", severity,
                         f"Video #{row['video_id']} sin avanzar {int(stalled_min)} min",
                         (f"Job #{row['job_id']} fase '{row['phase']}/"
                          f"{row['pipeline_phase']}' congelada en {row['progress']}% "
