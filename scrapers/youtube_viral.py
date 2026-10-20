@@ -361,15 +361,28 @@ class YouTubeViralScraper(BaseScraper):
                             reasoning = _extract_reasoning_content(resp)
                             if reasoning and reasoning.strip():
                                 content = reasoning.strip()
-                        if content:
-                            content = content.strip()
-                            if not self._is_spanish_text(content):
-                                logger.warning("[%s] LLM returned non-Spanish text (attempt %d) — discarding",
-                                               self.canal, attempt)
-                                if attempt < self.max_retries:
-                                    continue
-                                return None
-                        return content if content else None
+                        if not content:
+                            # Empty response is retryable: previously returned
+                            # None immediately and skipped the rest of the pool
+                            # ("Translation returned empty" alert).
+                            last_error = ValueError("LLM returned empty content")
+                            logger.warning(
+                                "[%s] LLM empty response (attempt %d/%d) — retrying/failover",
+                                self.canal, attempt, self.max_retries,
+                            )
+                            if attempt < self.max_retries:
+                                time.sleep(2 ** attempt)
+                                continue
+                            break
+                        content = content.strip()
+                        if not self._is_spanish_text(content):
+                            logger.warning("[%s] LLM returned non-Spanish text (attempt %d) — discarding",
+                                           self.canal, attempt)
+                            last_error = ValueError("LLM returned non-Spanish text")
+                            if attempt < self.max_retries:
+                                continue
+                            break
+                        return content
                     except Exception as e:  # noqa: BLE001
                         last_error = e
                         if is_non_retryable_error(e):
@@ -414,13 +427,17 @@ class YouTubeViralScraper(BaseScraper):
                     reasoning = _extract_reasoning_content(resp)
                     if reasoning and reasoning.strip():
                         content = reasoning.strip()
-                if content:
-                    content = content.strip()
-                    if not self._is_spanish_text(content):
-                        if attempt < self.max_retries:
-                            continue
-                        return None
-                return content if content else None
+                if not content:
+                    if attempt < self.max_retries:
+                        time.sleep(2 ** attempt)
+                        continue
+                    return None
+                content = content.strip()
+                if not self._is_spanish_text(content):
+                    if attempt < self.max_retries:
+                        continue
+                    return None
+                return content
             except Exception as e:  # noqa: BLE001
                 if is_non_retryable_error(e):
                     logger.warning("[%s] LLM proveedor no disponible (definitivo): %s",
@@ -450,13 +467,24 @@ class YouTubeViralScraper(BaseScraper):
                            ' this ', ' they ', ' will ', ' what ', ' when ', ' about ',
                            ' your ', ' our ', ' join ', ' subscribe ', ' which ', ' there ',
                            ' would ', ' could ', ' should ', ' their ']
+        # Spanish stopwords: text without accents (very common in LLM output)
+        # used to be classified as English by the ASCII heuristic, discarding
+        # perfectly valid Spanish scripts.
+        spanish_markers_text = [' que ', ' de ', ' la ', ' el ', ' los ', ' las ',
+                                ' un ', ' una ', ' para ', ' con ', ' por ', ' del ',
+                                ' se ', ' su ', ' sus ', ' como ', ' pero ', ' más ',
+                                ' mas ', ' este ', ' esta ', ' estos ', ' son ', ' fue ',
+                                ' ha ', ' han ', ' al ', ' lo ', ' le ', ' les ', ' y ']
         english_hits = sum(1 for m in english_markers if m in t)
-        if english_hits >= 3:
+        spanish_hits = sum(1 for m in spanish_markers_text if m in t)
+        if english_hits >= 3 and english_hits > spanish_hits:
             return "en"
+        if spanish_hits >= 3:
+            return "es"
         words = t.split()
         if len(words) >= 10:
             ascii_words = sum(1 for w in words if w.isascii() and all(c.isascii() for c in w))
-            if ascii_words / len(words) > 0.85 and spanish_chars == 0:
+            if ascii_words / len(words) > 0.85 and spanish_chars == 0 and spanish_hits == 0:
                 return "en"
         return "es"
 

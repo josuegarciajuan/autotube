@@ -158,9 +158,11 @@ class TestIsBugCrash:
 
     # ── edge cases ───────────────────────────────────────────────
 
-    def test_none_row_returns_true_safe(self):
+    @patch("api.services.generation_service._get_db")
+    def test_none_row_returns_true_safe(self, mock_get_db):
         """video_row=None → True (can't determine, be safe)."""
         from api.services.generation_service import _is_bug_crash
+        mock_get_db.return_value.get_video.return_value = None
         assert _is_bug_crash(99, None) is True
 
     @patch("api.services.generation_service._glob.glob")
@@ -251,6 +253,7 @@ class TestAutoRecoverOnStartup:
                 channel_id INTEGER, video_id INTEGER,
                 action TEXT DEFAULT 'generate',
                 status TEXT DEFAULT 'queued',
+                worker_pid INTEGER,
                 error_msg TEXT,
                 started_at TIMESTAMP, finished_at TIMESTAMP,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -392,6 +395,36 @@ class TestAutoRecoverOnStartup:
             "SELECT status, progress_phase FROM videos WHERE id=60").fetchone()
         assert row["status"] == "error"
         assert row["progress_phase"] == "interrupted"
+
+    def test_does_not_reset_video_with_old_failed_job_but_live_worker(self, recovery_db):
+        """Un vídeo puede tener un job antiguo failed y otro running vivo.
+
+        Regresión oct 2026 (vídeo 2710): el reset de arranque hacía JOIN con
+        CUALQUIER job del vídeo y encontraba el failed antiguo, marcando el
+        vídeo como error mientras el worker actual seguía renderizando.
+        """
+        conn = recovery_db._conn
+        conn.execute(
+            "INSERT INTO generation_jobs (id, channel_id, video_id, action, status, worker_pid) "
+            "VALUES (1, 1, 70, 'generate_only', 'failed', 111)"
+        )
+        conn.execute(
+            "INSERT INTO generation_jobs (id, channel_id, video_id, action, status, worker_pid) "
+            "VALUES (2, 1, 70, 'generate_only', 'running', 222)"
+        )
+        conn.execute(
+            "INSERT INTO videos (id, canal, channel_id, status, progress_phase) "
+            "VALUES (70, 'canal2', 1, 'generating', 'video')"
+        )
+        conn.commit()
+
+        # pgrep responds with a live pid for the current job.
+        _db, conn = self._run_recovery(recovery_db, worker_stdout="222")
+
+        row = conn.execute(
+            "SELECT status, progress_phase FROM videos WHERE id=70").fetchone()
+        assert row["status"] == "generating"
+        assert row["progress_phase"] == "video"
 
     def test_skips_bug_crashes(self, recovery_db):
         """Bug-crash videos are skipped (no reassemble job created)."""

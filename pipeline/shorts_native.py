@@ -402,7 +402,8 @@ NADA MAS fuera del JSON."""
                 max_tokens=1800,
             )
             if result:
-                return result
+                from pipeline.shorts_tts import normalize_short_script
+                return normalize_short_script(result)
             return None
 
         except Exception as e:

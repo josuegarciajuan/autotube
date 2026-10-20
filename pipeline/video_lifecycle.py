@@ -224,14 +224,12 @@ class VideoLifecycleManager:
             logger.warning("[%s] No target_public_at — skipping lifecycle scheduling", self.slug)
             return 0
 
-        from api.services.publication_policy import validate_manual_publication
-        try:
-            validate_manual_publication(
-                publish_mode="scheduled", target_public_at=target_public_at,
-            )
-        except ValueError as exc:
-            logger.error("[%s] Refusing unsafe lifecycle publication target: %s", self.slug, exc)
-            return 0
+        # NOTA: este método solo AGENDA acciones posteriores a la publicación
+        # (playlist, end screens). No publica nada, así que no debe aplicar la
+        # política de transición manual: con un target futuro rechazaba todas
+        # las acciones y llenaba el log de errores críticos (bug oct 2026).
+        # La validación manual se mantiene en los endpoints/vías que sí hacen
+        # público un vídeo antes de su target.
 
         # ── Parse target_public_at for relative scheduling ──
         from datetime import datetime as _dt, timedelta as _td

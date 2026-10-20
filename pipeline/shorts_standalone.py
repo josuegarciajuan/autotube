@@ -187,8 +187,25 @@ def run_standalone_short(
         }
 
         # ── Script generation ─────────────────────────────
-        script = pipeline._phase_script_short(short_content)
-        if not script or not script.get("bloques"):
+        # Validate the schema BEFORE TTS/media. The model sometimes returns
+        # list-valued fields (e.g. search_query_en), which used to crash with
+        # "'list' object has no attribute 'strip'" after paying for TTS.
+        from pipeline.shorts_tts import normalize_short_script, validate_short_script
+        script = None
+        for _attempt in range(2):
+            candidate = pipeline._phase_script_short(short_content)
+            if not candidate or not candidate.get("bloques"):
+                continue
+            candidate = normalize_short_script(candidate)
+            errors = validate_short_script(candidate)
+            if not errors:
+                script = candidate
+                break
+            logger.warning(
+                "[standalone] Invalid script for %s (attempt %d/2): %s",
+                channel_slug, _attempt + 1, errors[:3],
+            )
+        if not script:
             logger.error("[standalone] Script generation failed for %s", channel_slug)
             return None
 

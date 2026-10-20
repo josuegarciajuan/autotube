@@ -150,3 +150,13 @@ def test_fetch_transcript_last_resort_title_description(scraper, monkeypatch):
         "description": "description " * 20,
     })
     assert out and "A very long documentary title" in out
+
+
+def test_language_detection_accepts_spanish_without_accents():
+    from scrapers.youtube_viral import YouTubeViralScraper
+    text = (
+        "El hombre que vivio en la selva durante anos conto que la noche "
+        "se volvio tan oscura que no pudo ver a sus companeros y camino "
+        "hacia el rio con la esperanza de encontrar ayuda"
+    )
+    assert YouTubeViralScraper._detect_language(text) == "es"

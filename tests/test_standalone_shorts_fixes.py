@@ -97,3 +97,37 @@ def test_trim_harder_budget():
     bloques = _blocks()
     trim_blocks_to_word_budget(bloques, max_words=72)
     assert _word_count(bloques) <= 72
+
+
+# ── Normalización defensiva del script (listas del LLM) ──────────
+
+def test_normalize_short_script_coerces_list_valued_fields():
+    from pipeline.shorts_tts import normalize_short_script, validate_short_script
+    script = {
+        "tema": ["tema", "compuesto"],
+        "titulo": "Título",
+        "bloques": [
+            {"tipo": "hook", "texto": ["Hola", "mundo"],
+             "search_query_en": ["dark", "forest"]},
+            {"tipo": "desarrollo1", "texto": "texto uno"},
+            {"tipo": "desarrollo2", "texto": "texto dos"},
+            {"tipo": "climax", "texto": "texto tres"},
+            {"tipo": "cierre", "texto": "texto cuatro"},
+        ],
+    }
+    normalize_short_script(script)
+    assert script["tema"] == "tema compuesto"
+    assert script["bloques"][0]["texto"] == "Hola mundo"
+    assert script["bloques"][0]["search_query_en"] == "dark forest"
+    assert isinstance(script["bloques"][0]["texto"], str)
+
+
+def test_build_query_pool_accepts_list_search_query():
+    from pipeline.shorts_media import _build_query_pool
+    pool = _build_query_pool({
+        "tipo": "hook",
+        "texto": "una escena",
+        "search_query_en": ["dark", "forest", "night"],
+    })
+    assert pool, "el pool no puede quedar vacío con una lista coercible"
+    assert any("dark forest night" in q for q in pool)

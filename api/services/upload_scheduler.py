@@ -1612,8 +1612,11 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
                     )
                     packaging = retry
         if not packaging.valid:
-            logger.error("[%s] Video #%d held: unsafe packaging (%s)",
-                         slug, video_id, ", ".join(packaging.reasons))
+            # Retención deliberada del gate anti-spam (no es un fallo del
+            # sistema). La alerta específica `packaging_invalid` ya se emite
+            # abajo; un ERROR aquí duplicaba una alerta crítica por vídeo.
+            logger.warning("[%s] Video #%d held: unsafe packaging (%s)",
+                           slug, video_id, ", ".join(packaging.reasons))
             db.update_video(video_id, status="validation_failed", progress_phase="upload")
             from api.services.lifecycle_monitor import emit_alert
             emit_alert(db, entity_type="video", entity_id=video_id,

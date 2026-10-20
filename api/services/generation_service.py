@@ -3591,11 +3591,18 @@ async def auto_recover_on_startup():
     # 'reassembling' videos must NOT be reset — they are pending work for the
     # queue consumer, and an 'error' status would make the orphan detector
     # (running job + error video) kill them as soon as they start.
+    # A video can accumulate several job rows (failed retries + the current
+    # running attempt). Join on the *video*, never on an arbitrary job row:
+    # otherwise an old failed row makes us reset a video whose current worker
+    # is alive (bug oct 2026, video 2710: startup marked it error while job
+    # 15119 kept rendering, then the orphan sweep killed the worker).
     stuck_rows = conn.execute(
         "SELECT v.id, v.canal FROM videos v "
-        "JOIN generation_jobs j ON j.video_id = v.id "
         "WHERE v.status IN ('generating','reassembling') "
-        "AND j.status NOT IN ('running', 'queued')"
+        "AND NOT EXISTS ("
+        "  SELECT 1 FROM generation_jobs j "
+        "  WHERE j.video_id = v.id AND j.status IN ('running','queued')"
+        ")"
     ).fetchall()
     stuck = 0
     skipped_alive = 0
