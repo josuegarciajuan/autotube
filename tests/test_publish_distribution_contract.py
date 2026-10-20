@@ -56,12 +56,10 @@ def _local_date(value: str) -> dt.date:
 # ── Fase 1/2: asignador único y rollover ────────────────────────
 
 
-def test_longform_overflow_rolls_to_next_day(monkeypatch):
-    """Con un gap de 24 h y dos slots, el segundo debe caer en otro día.
+def test_longform_uses_two_distinct_franjas_same_day(monkeypatch):
+    """2 largos/día usan 2 franjas distintas el MISMO día aunque el gap no quepa.
 
-    Las ventanas se fuerzan al final del día para provocar el overflow. El
-    asignador debe mover el segundo slot al día siguiente (antes se recortaba
-    a las 23:xx, dejando <24 h entre ambos).
+    El gap same-channel es preferencia, no veto: manda la franja.
     """
     import api.services.planning_service as ps
 
@@ -73,7 +71,7 @@ def test_longform_overflow_rolls_to_next_day(monkeypatch):
         ],
     )
     monkeypatch.setattr(ps, "_publish_gap_minutes", lambda *a, **k: 24 * 60)
-    monkeypatch.setattr(ps, "_publish_cap_per_day", lambda *a, **k: 1)
+    monkeypatch.setattr(ps, "_publish_cap_per_day", lambda *a, **k: 2)
 
     slots = ps._distribute_slots(
         2,
@@ -88,8 +86,8 @@ def test_longform_overflow_rolls_to_next_day(monkeypatch):
     assert len(slots) == 2
     first, second = slots
     assert second > first
-    assert (second - first) >= dt.timedelta(hours=24)
-    assert second.date() > first.date()
+    assert second.date() == first.date() == dt.date(2026, 10, 18)
+    assert len({(s.hour, s.minute) for s in slots}) == 2
 
 
 def test_optimize_franjas_replan_respects_daily_cap(monkeypatch):
@@ -141,10 +139,15 @@ def test_optimize_franjas_replan_respects_daily_cap(monkeypatch):
                 )
                 return _Cursor([{"1": 1}] if hit else [])
             if norm.startswith("UPDATE planned_slots SET target_public_at"):
-                ts, slot_id = params
+                if "franja_dup_index = 0" in norm:
+                    ts, slot_id = params
+                    dup = 0
+                else:
+                    ts, dup, slot_id = params
                 for row in self.rows:
                     if row["id"] == slot_id:
                         row["target_public_at"] = ts
+                        row["franja_dup_index"] = dup
                 return _Cursor([])
             return _Cursor([])
 

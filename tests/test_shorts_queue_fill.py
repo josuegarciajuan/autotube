@@ -47,6 +47,7 @@ def _db(tmp_path):
                 scheduled_at TIMESTAMP NOT NULL,
                 target_upload_at TIMESTAMP,
                 target_publish_at TIMESTAMP,
+                franja_dup_index INTEGER DEFAULT 0,
                 short_type TEXT NOT NULL DEFAULT 'native',
                 status TEXT NOT NULL DEFAULT 'pending',
                 job_id INTEGER, short_id INTEGER,

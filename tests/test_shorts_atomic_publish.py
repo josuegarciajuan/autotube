@@ -149,6 +149,7 @@ def test_builder_derives_scheduled_at_from_channel_lead(monkeypatch):
 
     monkeypatch.setattr(db_ext, "ExtendedDatabase", lambda *a, **k: _FakeDB())
     monkeypatch.setattr(ss, "_channel_lead_minutes", lambda db, cid: 60)
+    monkeypatch.setattr(ss, "_short_schedule_lead_minutes", lambda db, cid: 60)
     monkeypatch.setattr(
         "config.config_bridge.get_channel_config",
         lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("sin config")),
@@ -195,41 +196,78 @@ def test_gate_blocks_when_channel_target_already_met(monkeypatch):
 # ── 5. Reparto global entre canales ──────────────────────────────
 
 
-def test_global_spacing_moves_second_channel_to_next_franja(monkeypatch):
-    class _DB:
+def test_global_spacing_prefers_another_franja_same_day(monkeypatch):
+    """Entre canales se evita el solape si hay otra franja libre, sin cambiar de día."""
+    import database.db_extended as db_ext
+
+    class _FakeDB:
         def get_optimal_slots(self, channel_id, content_type):
             return [
                 {"slot_rank": 1, "target_hour": 10, "target_minute": 0},
                 {"slot_rank": 2, "target_hour": 13, "target_minute": 0},
+                {"slot_rank": 3, "target_hour": 18, "target_minute": 0},
             ]
 
-        def get_channel_planning_config(self, channel_id):
-            return {}
+        def record_slot_usage(self, *a, **k):
+            return True
 
-    monkeypatch.setattr(ss, "_same_type_gap_minutes", lambda: 120)
-    monkeypatch.setattr(ss, "_global_publish_spacing_minutes", lambda db: 45)
-    monkeypatch.setattr(ss, "_channel_lead_minutes", lambda db, cid: 60)
+    monkeypatch.setattr(db_ext, "ExtendedDatabase", lambda *a, **k: _FakeDB())
+    monkeypatch.setattr(ss, "_short_schedule_lead_minutes", lambda db, cid: 60)
     monkeypatch.setattr(
         "config.config_bridge.get_channel_config",
         lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("sin config")),
     )
-
-    slots = [
-        {"channel_id": 1, "channel_slug": "one", "slot_rank": 1,
-         "target_publish_at": "2026-10-18 08:00:00",
-         "target_upload_at": "2026-10-18 08:00:00",
-         "scheduled_at": "2026-10-18 07:00:00", "schedule_lead_min": 60},
-        {"channel_id": 2, "channel_slug": "two", "slot_rank": 1,
-         "target_publish_at": "2026-10-18 08:00:00",
-         "target_upload_at": "2026-10-18 08:00:00",
-         "scheduled_at": "2026-10-18 07:00:00", "schedule_lead_min": 60},
+    channel = {"id": 2, "slug": "two", "name": "Two"}
+    busy = [
+        datetime(2026, 10, 18, 8, 0, tzinfo=timezone.utc),  # 10:00 Madrid
     ]
-    out = ss._spread_shorts_globally(slots, _DB())
-    moved = [s for s in out if s.get("globally_retimed")]
-    assert len(moved) == 1
-    # 10:00 → 13:00 Madrid = 11:00 UTC; start 10:00 UTC.
-    assert moved[0]["target_publish_at"] == "2026-10-18 11:00:00"
-    assert moved[0]["scheduled_at"] == "2026-10-18 10:00:00"
+    slots, _ = ss._build_shorts_slots_for_channel(
+        channel, "2026-10-18", native_count=2,
+        clips_per_long=0, long_video_count=0,
+        long_target_hours=[], global_start_pos=0,
+        global_busy=busy,
+    )
+    # Evita las 10:00 y usa dos franjas distintas del mismo día.
+    publish = [s_["target_publish_at"] for s_ in slots]
+    assert all(p.startswith("2026-10-18") for p in publish)
+    assert "2026-10-18 08:00:00" not in publish
+
+
+def test_overlap_is_allowed_when_all_franjas_busy(monkeypatch):
+    """Si no hay franja libre, se permite el solape (no se cambia de día)."""
+    import database.db_extended as db_ext
+
+    class _FakeDB:
+        def get_optimal_slots(self, channel_id, content_type):
+            return [
+                {"slot_rank": 1, "target_hour": 10, "target_minute": 0},
+                {"slot_rank": 2, "target_hour": 13, "target_minute": 0},
+                {"slot_rank": 3, "target_hour": 18, "target_minute": 0},
+            ]
+
+        def record_slot_usage(self, *a, **k):
+            return True
+
+    monkeypatch.setattr(db_ext, "ExtendedDatabase", lambda *a, **k: _FakeDB())
+    monkeypatch.setattr(ss, "_short_schedule_lead_minutes", lambda db, cid: 60)
+    monkeypatch.setattr(
+        "config.config_bridge.get_channel_config",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("sin config")),
+    )
+    busy = [
+        datetime(2026, 10, 18, 8, 0, tzinfo=timezone.utc),
+        datetime(2026, 10, 18, 11, 0, tzinfo=timezone.utc),
+        datetime(2026, 10, 18, 16, 0, tzinfo=timezone.utc),
+    ]
+    channel = {"id": 2, "slug": "two", "name": "Two"}
+    slots, _ = ss._build_shorts_slots_for_channel(
+        channel, "2026-10-18", native_count=3,
+        clips_per_long=0, long_video_count=0,
+        long_target_hours=[], global_start_pos=0,
+        global_busy=busy,
+    )
+    assert len(slots) == 3
+    assert all(s_["target_publish_at"].startswith("2026-10-18") for s_ in slots)
 
 
 # ── 6. Backlog heredado intacto ─────────────────────────────────
@@ -310,6 +348,7 @@ def test_normalize_aligns_existing_pending_start(tmp_path, monkeypatch):
         )
         conn.commit()
     monkeypatch.setattr(ss, "_channel_lead_minutes", lambda db, cid: 60)
+    monkeypatch.setattr(ss, "_short_schedule_lead_minutes", lambda db, cid: 60)
 
     assert ss.normalize_pending_shorts_starts(db) == 1
     with db._connect() as conn:
@@ -319,3 +358,172 @@ def test_normalize_aligns_existing_pending_start(tmp_path, monkeypatch):
         ).fetchone()
     assert row["scheduled_at"] == "2026-10-21 07:00:00", "publicación intacta, inicio −60m"
     assert row["target_publish_at"] == "2026-10-21 08:00:00"
+
+
+# ── 9. Franja-first: N items vs F franjas ────────────────────────
+
+
+def test_four_shorts_three_franjas_stay_same_day(monkeypatch):
+    """4 shorts y 3 franjas: 4 slots el mismo día, uno duplicado con offset."""
+    import database.db_extended as db_ext
+
+    class _FakeDB:
+        def get_optimal_slots(self, channel_id, content_type):
+            return [
+                {"slot_rank": 1, "target_hour": 10, "target_minute": 0},
+                {"slot_rank": 2, "target_hour": 13, "target_minute": 0},
+                {"slot_rank": 3, "target_hour": 18, "target_minute": 0},
+            ]
+
+        def record_slot_usage(self, *a, **k):
+            return True
+
+    monkeypatch.setattr(db_ext, "ExtendedDatabase", lambda *a, **k: _FakeDB())
+    monkeypatch.setattr(ss, "_short_schedule_lead_minutes", lambda db, cid: 60)
+    monkeypatch.setattr(
+        "config.config_bridge.get_channel_config",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("sin config")),
+    )
+    channel = {"id": 2, "slug": "two", "name": "Two"}
+    slots, _ = ss._build_shorts_slots_for_channel(
+        channel, "2026-10-18", native_count=4,
+        clips_per_long=0, long_video_count=0,
+        long_target_hours=[], global_start_pos=0,
+    )
+    assert len(slots) == 4
+    assert {s_["target_publish_at"][:10] for s_ in slots} == {"2026-10-18"}
+    dups = [s_ for s_ in slots if s_.get("franja_dup_index", 0) > 0]
+    assert len(dups) == 1
+    # El duplicado cae 3 min después del primero de su franja.
+    first = next(s_ for s_ in slots if s_.get("slot_rank") == dups[0]["slot_rank"]
+                 and s_.get("franja_dup_index", 0) == 0)
+    delta = (
+        datetime.strptime(dups[0]["target_publish_at"], "%Y-%m-%d %H:%M:%S")
+        - datetime.strptime(first["target_publish_at"], "%Y-%m-%d %H:%M:%S")
+    )
+    assert delta.total_seconds() == 180
+
+
+def test_two_shorts_three_franjas_use_max_separation(monkeypatch):
+    import database.db_extended as db_ext
+
+    class _FakeDB:
+        def get_optimal_slots(self, channel_id, content_type):
+            return [
+                {"slot_rank": 1, "target_hour": 6, "target_minute": 0},
+                {"slot_rank": 2, "target_hour": 10, "target_minute": 0},
+                {"slot_rank": 3, "target_hour": 20, "target_minute": 0},
+            ]
+
+        def record_slot_usage(self, *a, **k):
+            return True
+
+    monkeypatch.setattr(db_ext, "ExtendedDatabase", lambda *a, **k: _FakeDB())
+    monkeypatch.setattr(ss, "_short_schedule_lead_minutes", lambda db, cid: 60)
+    monkeypatch.setattr(
+        "config.config_bridge.get_channel_config",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("sin config")),
+    )
+    channel = {"id": 2, "slug": "two", "name": "Two"}
+    slots, _ = ss._build_shorts_slots_for_channel(
+        channel, "2026-10-18", native_count=2,
+        clips_per_long=0, long_video_count=0,
+        long_target_hours=[], global_start_pos=0,
+    )
+    ranks = sorted(s_["slot_rank"] for s_ in slots)
+    assert ranks == [1, 3], "debe elegir 06:00 y 20:00, no 06:00 y 10:00"
+
+
+def test_intentional_duplicate_allows_same_franja_execution(tmp_path, monkeypatch):
+    db = _timing_db(tmp_path)
+    with db._connect() as conn:
+        for dup in (0, 1):
+            conn.execute(
+                """INSERT INTO shorts_planned_slots
+                   (channel_id, date_key, scheduled_at, target_upload_at,
+                    target_publish_at, short_type, status, slot_rank,
+                    franja_dup_index)
+                   VALUES (1, '2026-10-21', '2026-10-21 07:00:00',
+                           '2026-10-21 08:00:00', '2026-10-21 08:00:00',
+                           'native', 'pending', 1, ?)""",
+                (dup,),
+            )
+        conn.commit()
+        ids = [r[0] for r in conn.execute(
+            "SELECT id FROM shorts_planned_slots ORDER BY id")]
+    assert ss._intentional_franja_duplicate(ids[0], db) is True
+    assert ss._intentional_franja_duplicate(ids[1], db) is True
+
+
+def test_gate_skips_spacing_for_intentional_duplicate(monkeypatch):
+    monkeypatch.setattr(ss, "_channel_shorts_spam_blocked", lambda *a, **k: False)
+    monkeypatch.setattr(ss, "_youtube_quota_blocked", lambda *a, **k: False)
+    monkeypatch.setattr(ss, "_channel_hard_daily_short_cap_reached", lambda *a, **k: False)
+    monkeypatch.setattr(ss, "_global_shorts_daily_cap_reached", lambda *a, **k: False)
+    monkeypatch.setattr(
+        "api.services.channel_policy.resolve_channel_policy_values",
+        lambda *a, **k: {"native_shorts_per_day": 3},
+    )
+    called = {"n": 0}
+
+    def _spacing(*a, **k):
+        called["n"] += 1
+        return False, 7200
+
+    monkeypatch.setattr(ss, "_channel_short_spacing_ok", _spacing)
+
+    class _DB:
+        def count_native_shorts_published_today(self, cid):
+            return 0
+
+    ok, reason = ss._planned_native_gate(
+        1, "canal2", _DB(), allow_same_franja=True,
+    )
+    assert ok is True and called["n"] == 0
+
+
+# ── 10. Migración v70: duplicados por franja ─────────────────────
+
+
+def test_migration_v70_allows_duplicate_target_per_franja(tmp_path):
+    from database.db_extended import _migrate_v70
+    import logging
+
+    path = tmp_path / "mig70.db"
+    with sqlite3.connect(path) as conn:
+        conn.executescript("""
+            CREATE TABLE planned_slots (
+                id INTEGER PRIMARY KEY,
+                channel_id INTEGER,
+                target_public_at TEXT,
+                status TEXT DEFAULT 'pending'
+            );
+            CREATE UNIQUE INDEX uq_active_planned_public_target
+                ON planned_slots(channel_id, target_public_at)
+                WHERE status IN ('pending','running') AND target_public_at IS NOT NULL;
+            CREATE TABLE shorts_planned_slots (
+                id INTEGER PRIMARY KEY,
+                channel_id INTEGER,
+                target_publish_at TEXT
+            );
+        """)
+        _migrate_v70(conn, logging.getLogger("test"))
+        pos_cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info('planned_slots')")}
+        sps_cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info('shorts_planned_slots')")}
+        assert "franja_dup_index" in pos_cols
+        assert "franja_dup_index" in sps_cols
+
+        # Dos filas con el mismo target y distinto índice de duplicado.
+        conn.execute(
+            "INSERT INTO planned_slots (channel_id, target_public_at, status, franja_dup_index) "
+            "VALUES (1, '2026-10-21 08:00:00', 'pending', 0)"
+        )
+        conn.execute(
+            "INSERT INTO planned_slots (channel_id, target_public_at, status, franja_dup_index) "
+            "VALUES (1, '2026-10-21 08:00:00', 'pending', 1)"
+        )
+        conn.commit()
+
+        _migrate_v70(conn, logging.getLogger("test"))  # idempotente
