@@ -70,9 +70,11 @@ def test_transient_short_outcomes_are_non_terminal():
     assert short_job_status_for_outcome("terminal") == "failed"
 
 
-def test_media_phase_longform_defers_shorts():
+def test_media_phase_longform_defers_shorts(monkeypatch):
     from api.services.shorts_scheduler import should_defer_shorts_for_longform_load
 
+    # Sin imágenes distribuidas: SD local pina cores (comportamiento conservador).
+    monkeypatch.delenv("AUTOTUBE_DIST_IMAGES", raising=False)
     # cpu_count=10 -> threshold=8. Media-phase weight: first job = cpu//2 = 5,
     # each extra = cpu//4 = 2 (the extra block is capped at the first).
     # 1 media: 5 < 8 -> shorts may coexist.
@@ -95,6 +97,27 @@ def test_media_phase_longform_defers_shorts():
     # Con carga de render extra, 2 media sí difieren (7 + 2 = 9 >= 8).
     assert should_defer_shorts_for_longform_load(
         longform_active=True, autotube_render_load=2, cpu_count=10,
+        longform_media_jobs=2,
+    ) is True
+
+
+def test_media_phase_with_distributed_images_does_not_starve_shorts(monkeypatch):
+    """En producción (AUTOTUBE_DIST_IMAGES=1) 2 long-forms en images no bloquean.
+
+    El trabajo de SD corre en la flota; el worker local espera I/O. Antes, los
+    2 workers + el peso de 2 jobs media superaban el umbral y los shorts
+    atómicos quedaban diferidos SIEMPRE (120 defers / 2 dispatches).
+    """
+    from api.services.shorts_scheduler import should_defer_shorts_for_longform_load
+
+    monkeypatch.setenv("AUTOTUBE_DIST_IMAGES", "1")
+    assert should_defer_shorts_for_longform_load(
+        longform_active=True, autotube_render_load=2, cpu_count=10,
+        longform_media_jobs=2,
+    ) is False
+    # El gate sigue actuando si hay carga de render real (ffmpeg/otros workers).
+    assert should_defer_shorts_for_longform_load(
+        longform_active=True, autotube_render_load=7, cpu_count=10,
         longform_media_jobs=2,
     ) is True
 
