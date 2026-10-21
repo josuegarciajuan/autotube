@@ -207,13 +207,14 @@ def should_defer_shorts_for_longform_load(
     machine does not starve shorts dispatch. The memory gate and the global
     concurrency guard still protect against OOM/CPU contention.
 
-    ``longform_media_jobs`` covers the local-SD/image phase: it pins every core
-    from pure Python (no ffmpeg to count), so the first such long-form is charged
-    as half the machine and each extra as a quarter (the extra block is capped at
-    the first one). Otherwise a short render dispatched during local SD times out
-    from CPU contention (oct 2026). The quarter-weight (instead of one full half
-    each) lets 2 concurrent renders with distributed render
-    (``AUTOTUBE_DIST_RENDER_V2``) coexist with shorts, while 3+ still defer.
+    ``longform_media_jobs`` covers the image phase. With distributed images
+    (``AUTOTUBE_DIST_IMAGES=1``, production) the work runs on the SuperServer
+    fleet and each local job is charged as ~1 core (mostly I/O wait). Without
+    distribution it pins every core from pure Python (no ffmpeg to count), so
+    the first job is charged as half the machine and each extra as a quarter
+    (extra block capped at the first). This keeps a short render from timing out
+    under local SD contention (oct 2026) without starving shorts forever when 2
+    concurrent long-forms run with distributed render.
     """
     if not longform_active:
         return False
@@ -221,13 +222,21 @@ def should_defer_shorts_for_longform_load(
     threshold = max(1, int(cpus * 0.85))
     media_jobs = max(0, int(longform_media_jobs))
     if media_jobs:
-        # El primer job media paga media máquina; cada extra, un cuarto, y el
-        # bloque extra nunca supera al primero. Así 2 renders simultáneos con
-        # render distribuido (AUTOTUBE_DIST_RENDER_V2) no bloquean SIEMPRE los
-        # shorts, pero 3+ siguen difiriendo.
-        first_weight = max(1, cpus // 2)
-        extra_weight = max(0, media_jobs - 1) * max(1, cpus // 4)
-        media_weight = first_weight + min(extra_weight, first_weight)
+        # Con imágenes distribuidas (AUTOTUBE_DIST_IMAGES=1) la fase images
+        # corre en la flota: el worker local solo espera I/O, así que cada job
+        # se cobra como ~1 core. Sin distribución pina todos los cores (SD
+        # local): el primero paga media máquina y cada extra un cuarto (tope
+        # media máquina). Así 2 renders concurrentes en producción no bloquean
+        # SIEMPRE los shorts, pero 3+ (o 2 con SD local) siguen difiriendo.
+        _dist_images = str(os.getenv("AUTOTUBE_DIST_IMAGES", "0")).strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        if _dist_images:
+            media_weight = min(media_jobs, 2)
+        else:
+            first_weight = max(1, cpus // 2)
+            extra_weight = max(0, media_jobs - 1) * max(1, cpus // 4)
+            media_weight = first_weight + min(extra_weight, first_weight)
     else:
         media_weight = 0
     effective_load = autotube_render_load + media_weight
