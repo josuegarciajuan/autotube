@@ -412,10 +412,18 @@ capado histórico.
 - Planificación única: `reconcile_shorts_schedule()` (horizonte, panel,
   rotación, franjas óptimas, recuperación). La hora de inicio puede caer el
   día anterior a la publicación.
-- `_spawn_background_short_upload` y `_fill_native_short_queue` ya **no** se
-  ejecutan en el tick normal. Los shorts `status='generated'` existentes se
-  conservan y se suben SOLO manualmente
-  (`POST /api/planning/shorts-queue/upload/{id}`).
+- **Válvula de la cola heredada (reactivada oct 2026):** `dispatch_next_due_shorts_slot`
+  lanza `_spawn_background_short_upload(db, max_per_pass=SHORTS_QUEUE_VALVE_MAX_PER_PASS)`
+  al inicio de cada tick (thread daemon, no bloquea el `schedule_checker`). Drena
+  los shorts `status='generated'` FIFO aplicando TODOS los gates (cuota, tope duro
+  por canal, tope global, cooldown/espaciado y locks de subida). Rollback:
+  `SHORTS_QUEUE_VALVE_ENABLED=false`. La subida manual
+  (`POST /api/planning/shorts-queue/upload/{id}`) sigue disponible.
+  `_fill_native_short_queue` continúa sin ejecutarse en el tick normal.
+- **Gate de carga de shorts:** el primer long-form en fase `images/media` se cobra
+  como media máquina y cada extra como un cuarto (con tope); así 2 renders
+  concurrentes con `AUTOTUBE_DIST_RENDER_V2` ya no difieren shorts para siempre.
+  3+ siguen difiriendo. La válvula de subida NO pasa por este gate (es red, no CPU).
 - **Reparto franja-first:** cada día usa sus franjas (3 por canal/tipo). Si
   hay N elementos y N <= F, N franjas distintas (máxima separación); si N > F,
   los extras comparten franja con offset de 3 min y se suben en secuencia. El
@@ -635,6 +643,19 @@ tocar las subidas. Es el interruptor operativo para liberar potencia de cálculo
 - **"Reprogramar Ahora"** = `POST /api/planning/full-replan/authoritative`
   (`authoritative_replan`): borra la programación pendiente, reasigna pendientes
   y calentando, fuerza `publishAt` y regenera el plan. Idempotente.
+- **Inventario primero (oct 2026):** el replan autoritativo llama a
+  `apply_publish_repack(..., prioritize_awaiting=True)`: ordena los ya subidos
+  primero y, entre los pendientes de subir, por `target_public_at` (compromiso
+  más urgente) y nunca conserva un target POSTERIOR al hueco más temprano. El
+  walk del repack usa la primera franja que aún queda HOY (antes saltaba a
+  mañana si la primera del día ya había pasado). Así los `awaiting_upload` se
+  despachan hoy en vez de quedar a días vista.
+- **Cupo resuelto SIEMPRE con `db` + `day`:** `sync_midday`, `smart_replan`,
+  `full_replan`, `_score_priority_slot` y `recovery_planner` deben llamar a
+  `_resolve_generation_per_day(..., db=db)`. Sin `db` caen al perfil global (1
+  long/día) en vez del override del panel + bonus de rotación y cancelan el plan
+  del día cada 5 min. `sync_midday` compara contra GENERACIÓN de hoy
+  (`count_videos_generated_today + pending`), no contra publicados.
 - **Maratones = "rueda" con separación mínima de 48h/canal**: mientras el
   backlog **real** supere el umbral, se encola **un maratón a la vez** siguiendo
   el round-robin de canales. El check corre cada 10 min (`api/main.py`).
