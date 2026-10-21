@@ -154,6 +154,89 @@ def test_prioritize_awaiting_puts_oldest_first_and_earlier(tmp_path, repack_poli
     ]
 
 
+def test_prioritize_awaiting_orders_by_committed_target_not_creation(tmp_path, repack_policy):
+    """El vídeo con compromiso más temprano va primero, aunque sea más nuevo.
+
+    Ordenar solo por ``created_at`` podía EMPUJAR más tarde un vídeo cuya
+    publicación ya estaba comprometida antes (se le adelantaba otro con target
+    posterior y gastaba el hueco del día).
+    """
+    from pipeline.publish_scheduler import repack_channel_publish_times
+    from api.time_utils import parse_utc
+
+    db = _db(tmp_path)
+    now = datetime.now(timezone.utc)
+    older_created = _add_video(
+        db, created_at=_utc_naive(now - timedelta(days=4)),
+        scheduled_upload_at=_utc_naive(now + timedelta(days=4)),
+        target_public_at=_utc_naive(now + timedelta(days=5)),
+        video_path="/older.mp4",
+    )
+    urgent_newer = _add_video(
+        db, created_at=_utc_naive(now - timedelta(days=1)),
+        scheduled_upload_at=_utc_naive(now + timedelta(days=1)),
+        target_public_at=_utc_naive(now + timedelta(days=2)),
+        video_path="/urgent.mp4",
+    )
+
+    plan = repack_channel_publish_times(
+        db, 1, "one", gap_hours=24, prioritize_awaiting=True,
+    )
+
+    assert [p["video_id"] for p in plan] == [urgent_newer, older_created], plan
+    first = parse_utc(plan[0]["new_target"])
+    assert first < now + timedelta(days=2), "el urgente debe adelantarse"
+    # El más antiguo por creación también se adelanta, pero NUNCA pasa por
+    # delante del compromiso más urgente.
+    assert parse_utc(plan[1]["new_target"]) > first
+
+
+def test_repack_uses_later_peak_today_instead_of_jumping_to_tomorrow(
+    tmp_path, repack_policy, monkeypatch,
+):
+    """A media mañana el repack debe usar las franjas que quedan HOY.
+
+    Antes arrancaba siempre en la franja más temprana del día y, si ya había
+    pasado, saltaba al día siguiente ignorando las franjas posteriores: el
+    inventario se empujaba a días futuros aunque hoy hubiera hueco.
+    """
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+    from pipeline import publish_scheduler as ps
+    from api.time_utils import parse_utc
+
+    tz = ZoneInfo("Europe/Madrid")
+    now_local = _dt.now(tz)
+    later_local = now_local + timedelta(hours=3)
+    if later_local.date() != now_local.date():
+        pytest.skip("cerca de medianoche: no hay franja posterior hoy")
+
+    db = _db(tmp_path)
+    now = datetime.now(timezone.utc)
+    _add_video(
+        db, created_at=_utc_naive(now - timedelta(days=2)),
+        scheduled_upload_at=_utc_naive(now + timedelta(hours=1)),
+        target_public_at=_utc_naive(now + timedelta(days=3)),
+        video_path="/today.mp4",
+    )
+    # La franja más temprana ya pasó; la segunda aún queda hoy.
+    monkeypatch.setattr(
+        ps, "_channel_peak_hours",
+        lambda *a, **k: [now_local.hour, later_local.hour],
+    )
+
+    plan = ps.repack_channel_publish_times(
+        db, 1, "one", gap_hours=24, prioritize_awaiting=True,
+    )
+
+    assert len(plan) == 1
+    target_local = parse_utc(plan[0]["new_target"]).astimezone(tz)
+    assert target_local.date() == now_local.date(), (
+        f"debería usar hoy ({now_local.date()}), no {target_local.date()}"
+    )
+    assert target_local.hour == later_local.hour
+
+
 def test_adjusted_upload_at_consistent_with_final_target(tmp_path, repack_policy):
     from pipeline.publish_scheduler import repack_channel_publish_times
     from api.time_utils import parse_utc

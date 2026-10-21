@@ -1531,7 +1531,9 @@ def repack_channel_publish_times(
                    ORDER BY
                      CASE WHEN v.status IN ('uploaded_private','warming','scheduled') THEN 0 ELSE 1 END,
                      CASE WHEN v.status IN ('awaiting_upload','ready')
-                          THEN COALESCE(v.created_at,'')
+                          THEN COALESCE(datetime(v.target_public_at),
+                                        datetime(v.scheduled_upload_at),
+                                        v.created_at)
                           ELSE COALESCE(v.uploaded_at, v.scheduled_upload_at, v.created_at) END
         """
     else:
@@ -1676,13 +1678,22 @@ def repack_channel_publish_times(
         tz = pytz.timezone(tz_str)
     except pytz.UnknownTimeZoneError:
         tz = pytz.UTC
-    # Primer slot: primera franja pico HH:00 (>= floor). Con 2+/día se usa la
-    # más temprana (peak_hours ya ordenado); con 1/día, el pico principal.
-    first_hour = peak_hours[0] if max_per_day >= 2 else peak_hour
+    # Primer slot: primera franja pico HH:00 que todavía quede HOY (>= floor).
+    # Antes se tomaba siempre la franja más temprana del día y, si ya había
+    # pasado, se saltaba a mañana ignorando las franjas posteriores de hoy: con
+    # 2+/día a media mañana el repack no colocaba NADA hoy y empujaba todo el
+    # inventario a días posteriores (oct 2026). Si no queda ninguna franja hoy,
+    # se arranca en la primera del día siguiente.
     local_floor = floor.astimezone(tz)
-    cursor_local = local_floor.replace(hour=first_hour, minute=0, second=0, microsecond=0)
-    if cursor_local < local_floor:
-        cursor_local += _td(days=1)
+    _today_candidates = sorted(
+        local_floor.replace(hour=h, minute=0, second=0, microsecond=0)
+        for h in peak_hours
+    )
+    _next_today = next((c for c in _today_candidates if c >= local_floor), None)
+    if _next_today is not None:
+        cursor_local = _next_today
+    else:
+        cursor_local = _today_candidates[0] + _td(days=1)
     cursor_utc = cursor_local.astimezone(_tz.utc)
 
     # ── Política explícita por canal (ago 2026) ──────────────────────────
