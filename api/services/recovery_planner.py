@@ -254,7 +254,7 @@ def _auto_recover_missing_publications_impl(db=None) -> dict:
         cfg = db.get_channel_planning_config(channel_id)
         if not cfg.get("planning_enabled", True):
             continue
-        target = _resolve_generation_per_day(cfg, today)
+        target = _resolve_generation_per_day(cfg, today, db=db)
         if target <= 0:
             continue
 

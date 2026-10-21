@@ -361,6 +361,13 @@ YT_AUTOMATIC_BUDGET_UNITS = int(os.getenv("YT_AUTOMATIC_BUDGET_UNITS", "0"))  # 
 # Completion chaining caused burst uploads that bypassed the normal scheduler.
 SHORTS_CHAIN_DISPATCH_ENABLED = os.getenv("SHORTS_CHAIN_DISPATCH_ENABLED", "false").lower() == "true"
 
+# ── Válvula de goteo de la cola de shorts (rollback, oct 2026) ─────
+# Rollback kill-switch: SHORTS_QUEUE_VALVE_ENABLED=false desactiva el drenaje
+# automático de shorts `status='generated'` desde el dispatch del scheduler.
+# MAX_PER_PASS acota cuántos shorts sube cada pasada de fondo.
+SHORTS_QUEUE_VALVE_ENABLED = os.getenv("SHORTS_QUEUE_VALVE_ENABLED", "true").strip().lower() not in ("0", "false", "no", "off")
+SHORTS_QUEUE_VALVE_MAX_PER_PASS = max(1, int(os.getenv("SHORTS_QUEUE_VALVE_MAX_PER_PASS", "1")))
+
 # ── Collaboration engine (comentarios en canales nicho) ───────────
 # v2 (ago 2026): descubrimiento de canales vía navegador (0 cuota API) —
 # los searches de Data API (100 ud/call) estaban agotando el presupuesto.

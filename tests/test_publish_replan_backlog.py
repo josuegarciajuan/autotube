@@ -116,24 +116,32 @@ def test_repack_schedules_upload_close_to_publication(tmp_path, repack_policy):
 
 
 def test_apply_repack_aborts_invalid_plan_before_youtube(tmp_path, monkeypatch):
-    """Un plan con gap < policy no debe llamar a YouTube ni escribir en DB."""
+    """Un plan con gap < policy no debe llamar a YouTube ni escribir en DB.
+
+    Nota (oct 2026): los errores POR-ÍTEM (publicar antes de subida+warmup o
+    warmup fuera de ventana) ya no abortan el canal: se excluyen y se aplican
+    los válidos (ver tests/test_scheduler_inventory_first.py). Este test cubre
+    los errores SISTÉMICOS (gap/cap), que siguen abortando el repack completo.
+    """
     import api.services.publish_repack as pr
 
     db = _db(tmp_path)
     base = datetime.now(timezone.utc) + timedelta(days=1)
+    # Uploads suficientemente antiguos: cada ítem es válido por sí mismo; solo
+    # el gap entre ambos (10 min < 24 h) y el cap diario son inválidos.
     invalid_plan = [
         {
             "video_id": 1, "status": "uploaded_private", "yt_video_id": "yt-1",
             "old_target": "", "new_target": base.isoformat(),
             "requires_yt_update": True, "adjusted_upload_at": None,
-            "uploaded_at": (base - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S"),
+            "uploaded_at": (base - timedelta(hours=10)).strftime("%Y-%m-%d %H:%M:%S"),
             "scheduled_upload_at": None, "is_marathon": False, "preserved": False,
         },
         {
             "video_id": 2, "status": "warming", "yt_video_id": "yt-2",
             "old_target": "", "new_target": (base + timedelta(minutes=10)).isoformat(),
             "requires_yt_update": True, "adjusted_upload_at": None,
-            "uploaded_at": (base - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S"),
+            "uploaded_at": (base - timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S"),
             "scheduled_upload_at": None, "is_marathon": False, "preserved": False,
         },
     ]

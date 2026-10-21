@@ -1488,6 +1488,7 @@ def repack_channel_publish_times(
     warmup_min: int = 60,
     gap_hours: int | None = None,
     safety_ahead_hours: int = MAX_PUBLISH_AHEAD_SAFETY_HOURS,
+    prioritize_awaiting: bool = False,
 ) -> list[dict]:
     """Repack ALL pending publish times of a channel with >= gap_hours spacing.
 
@@ -1504,6 +1505,9 @@ def repack_channel_publish_times(
     - Walk: cursor arranca en el siguiente pico (>= now + warmup) y avanza en
       pasos de gap_hours. Cada vídeo recibe el cursor; para awaiting_upload se
       garantiza publish >= scheduled_upload_at + warmup + buffer 60min.
+    - ``prioritize_awaiting`` (inventario primero): reordena los candidatos y
+      evita conservar targets posteriores al hueco más temprano para los
+      vídeos que aún hay que subir.
     - NUNCA escribe en DB: devuelve la lista de cambios propuestos.
 
     Returns:
@@ -1517,6 +1521,23 @@ def repack_channel_publish_times(
         gap_hours = _same_channel_publish_gap_hours(db, channel_id)
 
     # ── 1. Candidatos ──
+    # ``prioritize_awaiting=True`` (reprogramación autoritativa / inventario
+    # primero): los ya subidos/listos van primero (0) y, entre los que hay que
+    # subir, el más antiguo por ``created_at``. Así el inventario acumulado
+    # (240 shorts / backlog de long-forms) recibe los huecos más tempranos en
+    # lugar de que los vídeos recién generados se les adelanten.
+    if prioritize_awaiting:
+        _order_sql = """
+                   ORDER BY
+                     CASE WHEN v.status IN ('uploaded_private','warming','scheduled') THEN 0 ELSE 1 END,
+                     CASE WHEN v.status IN ('awaiting_upload','ready')
+                          THEN COALESCE(v.created_at,'')
+                          ELSE COALESCE(v.uploaded_at, v.scheduled_upload_at, v.created_at) END
+        """
+    else:
+        _order_sql = """
+                   ORDER BY COALESCE(v.uploaded_at, v.scheduled_upload_at, v.created_at)
+        """
     try:
         with db._connect() as conn:
             rows = conn.execute(
@@ -1527,8 +1548,8 @@ def repack_channel_publish_times(
                      AND v.status IN ('uploaded_private','warming','scheduled',
                                       'awaiting_upload','ready')
                      AND v.publish_mode = 'scheduled'
-                   ORDER BY COALESCE(v.uploaded_at, v.scheduled_upload_at, v.created_at)
-                """, (channel_id,),
+                """ + _order_sql,
+                (channel_id,),
             ).fetchall()
     except Exception as exc:
         logger.debug("[%s] repack scan skipped: %s", slug, exc)
@@ -1761,26 +1782,12 @@ def repack_channel_publish_times(
         # (upload + warmup + buffer) y dentro de la ventana máxima de calentando.
         # Antes solo se adelantaba la subida si la existente era más tardía, lo
         # que dejaba vídeos subidos con días de antelación (>48 h de warmup).
-        adjusted_upload_at = None
+        # awaiting_upload/ready: el `adjusted_upload_at` se calcula AL FINAL
+        # (justo antes de construir el plan), con el `slot` definitivo. Si se
+        # calculaba antes de la preservación/gap/hard-cap, un target preservado
+        # anterior dejaba `target < upload + warmup` y `_validate_repack_plan`
+        # abortaba TODO el canal (#2724). Ver más abajo.
         up_raw = row["scheduled_upload_at"]
-        up_dt = _parse_target_public_at(str(up_raw), tz_str) if up_raw else None
-        if status in ("awaiting_upload", "ready"):
-            # No se puede publicar antes de subir + calentar.
-            earliest_public = now_utc + _td(minutes=warmup + 60)
-            if slot < earliest_public:
-                slot = earliest_public
-            desired_up = slot - _td(minutes=warmup + 60)
-            # Nunca en el pasado, nunca antes de la ventana de 48 h.
-            earliest_up = slot - _td(hours=max_warmup_h)
-            if desired_up < earliest_up:
-                desired_up = earliest_up
-            if desired_up < now_utc + _td(minutes=5):
-                desired_up = now_utc + _td(minutes=5)
-            latest_up = slot - _td(minutes=warmup)
-            if desired_up > latest_up:
-                desired_up = latest_up
-            if up_dt is None or abs((desired_up - up_dt).total_seconds()) >= 60:
-                adjusted_upload_at = desired_up.strftime("%Y-%m-%d %H:%M:%S")
 
         # ── Espaciado mínimo (fix ago 2026): TODO vídeo (maratón incluida) debe
         # quedar >= gap_hours después del último slot asignado en este walk. Sin
@@ -1827,7 +1834,17 @@ def repack_channel_publish_times(
                 abs((old_dt - a).total_seconds()) >= gap_hours * 3600
                 for a in assigned_slots
             )
-            if min_public_ok and gap_ok and unique_ok and day_cap_ok:
+            # Inventario primero: en modo ``prioritize_awaiting`` un vídeo que
+            # aún hay que subir solo conserva su target si NO es POSTERIOR al
+            # hueco más temprano calculado (tolerancia 1 min). Si se conservara
+            # un target más tardío, el vídeo más antiguo no se adelantaría y el
+            # backlog seguiría sin drenar. Al exigir ``old_dt <= slot + 1min``
+            # el inventario se adelanta sin romper la idempotencia (un target ya
+            # correcto, igual o más temprano, se mantiene).
+            prioritize_ok = True
+            if prioritize_awaiting and status in ("awaiting_upload", "ready"):
+                prioritize_ok = old_dt <= slot + _td(minutes=1)
+            if min_public_ok and gap_ok and unique_ok and day_cap_ok and prioritize_ok:
                 slot = old_dt
                 preserved = True
 
@@ -1867,6 +1884,32 @@ def repack_channel_publish_times(
             # el plan marcaría `requires_yt_update=False` con un target distinto
             # al real de YouTube → DB y YouTube quedarían desincronizados.
             preserved = False
+
+        # ── Subida consistente con el target FINAL (#2724) ──────────────
+        # Se recalcula con el `slot` definitivo (ya pasados preservación, gap,
+        # hard-cap y safety bound) para que SIEMPRE se cumpla
+        # `target >= adjusted_upload_at + warmup`. Antes se calculaba con el
+        # slot previo a la preservación y un target preservado anterior rompía
+        # la validación y abortaba el repack de TODO el canal por un ítem.
+        adjusted_upload_at = None
+        if status in ("awaiting_upload", "ready"):
+            earliest_public = now_utc + _td(minutes=warmup + 60)
+            if slot < earliest_public:
+                slot = earliest_public
+                preserved = False
+            desired_up = slot - _td(minutes=warmup + 60)
+            # Nunca antes de la ventana máxima de calentamiento ni en el pasado.
+            earliest_up = slot - _td(hours=max_warmup_h)
+            if desired_up < earliest_up:
+                desired_up = earliest_up
+            if desired_up < now_utc + _td(minutes=5):
+                desired_up = now_utc + _td(minutes=5)
+            latest_up = slot - _td(minutes=warmup)
+            if desired_up > latest_up:
+                desired_up = latest_up
+            up_dt = _parse_target_public_at(str(up_raw), tz_str) if up_raw else None
+            if up_dt is None or abs((desired_up - up_dt).total_seconds()) >= 60:
+                adjusted_upload_at = desired_up.strftime("%Y-%m-%d %H:%M:%S")
 
         requires_yt = status in ("uploaded_private", "warming", "scheduled") and bool(yt_id)
 
