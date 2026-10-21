@@ -73,17 +73,30 @@ def test_transient_short_outcomes_are_non_terminal():
 def test_media_phase_longform_defers_shorts():
     from api.services.shorts_scheduler import should_defer_shorts_for_longform_load
 
-    # cpu_count=10 -> threshold=8. Two long-forms in the local-SD/media phase
-    # pin every core, so each charges cpu//2=5: 2 + 10 >= 8 -> defer.
+    # cpu_count=10 -> threshold=8. Media-phase weight: first job = cpu//2 = 5,
+    # each extra = cpu//4 = 2 (the extra block is capped at the first).
+    # 1 media: 5 < 8 -> shorts may coexist.
+    assert should_defer_shorts_for_longform_load(
+        longform_active=True, autotube_render_load=0, cpu_count=10,
+        longform_media_jobs=1,
+    ) is False
+    # 2 media: 5 + 2 = 7 < 8 -> no longer defers (was 10 with the old
+    # half-machine-per-job charge, which always blocked shorts under
+    # AUTOTUBE_DIST_RENDER_V2 with 2 concurrent renders).
+    assert should_defer_shorts_for_longform_load(
+        longform_active=True, autotube_render_load=0, cpu_count=10,
+        longform_media_jobs=2,
+    ) is False
+    # 3 media: 5 + min(2*2, 5) = 9 >= 8 -> still defers.
+    assert should_defer_shorts_for_longform_load(
+        longform_active=True, autotube_render_load=0, cpu_count=10,
+        longform_media_jobs=3,
+    ) is True
+    # Con carga de render extra, 2 media sí difieren (7 + 2 = 9 >= 8).
     assert should_defer_shorts_for_longform_load(
         longform_active=True, autotube_render_load=2, cpu_count=10,
         longform_media_jobs=2,
     ) is True
-    # One media-phase long-form is below the bar: shorts may still coexist.
-    assert should_defer_shorts_for_longform_load(
-        longform_active=True, autotube_render_load=2, cpu_count=10,
-        longform_media_jobs=1,
-    ) is False
 
 
 def test_pollinations_circuit_breaker_opens_on_402():

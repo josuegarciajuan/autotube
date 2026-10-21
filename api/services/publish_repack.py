@@ -141,6 +141,7 @@ def apply_publish_repack(
     force_yt: bool = False,
     gap_hours: int | None = None,
     safety_ahead_hours: int | None = None,
+    prioritize_awaiting: bool = False,
 ) -> dict:
     """Repack y (opcionalmente) aplicar el nuevo horario de publicación.
 
@@ -163,6 +164,10 @@ def apply_publish_repack(
         safety_ahead_hours: horizonte máximo de reprogramación (None → 120h).
             Con gaps grandes y backlogs densos hay que subirlo (p. ej. 720h)
             o el cap recorta y vuelve a apilar vídeos en el mismo instante.
+        prioritize_awaiting: si True, el repack ordena primero los ya subidos y,
+            entre los que hay que subir, los `awaiting_upload`/`ready` más
+            antiguos por `created_at` (inventario primero). Además no conserva
+            targets posteriores al hueco más temprano calculado.
 
     Returns:
         dict con {channel_id, slug, total, rescheduled, no_change, yt_failed,
@@ -247,6 +252,7 @@ def apply_publish_repack(
         timezone_str=tz_str, warmup_min=warmup,
         gap_hours=gap_hours if gap_hours is not None else _policy(db, channel_id)["same_channel_publish_gap_h"],
         safety_ahead_hours=safety_ahead_hours if safety_ahead_hours is not None else MAX_PUBLISH_AHEAD_SAFETY_HOURS,
+        prioritize_awaiting=prioritize_awaiting,
     )
     if not plan:
         return {
@@ -304,25 +310,68 @@ def apply_publish_repack(
                 _cap_cache[key] = cap_eff
         return int(_cap_cache[key])
 
-    validation_errors = _validate_repack_plan(
-        changes,
-        gap_hours=gap_eff,
-        max_per_day=cap_eff,
-        max_warmup_hours=warmup_cap,
-        warmup_min=warmup,
-        timezone_str=tz_str,
-        daily_cap_fn=_cap_for_validation,
-    )
+    def _validate(plan_items: list[dict]) -> list[str]:
+        return _validate_repack_plan(
+            plan_items,
+            gap_hours=gap_eff,
+            max_per_day=cap_eff,
+            max_warmup_hours=warmup_cap,
+            warmup_min=warmup,
+            timezone_str=tz_str,
+            daily_cap_fn=_cap_for_validation,
+        )
+
+    validation_errors = _validate(changes)
     result["plan_valid"] = not validation_errors
     result["validation_errors"] = validation_errors
+    result["skipped_invalid"] = []
+
+    # ── Errores por-ítem: NO abortar el canal entero (#2724) ─────────
+    # Un solo vídeo con `target < subida + warmup` (o fuera de la ventana de
+    # calentamiento) hacía que se descartara el repack COMPLETO del canal. Se
+    # excluyen SOLO esos ítems, se revalida el resto y se aplican los válidos.
+    # Si quedan errores sistémicos (gap/cap) o la revalidación falla, se aborta
+    # como antes (no se toca YouTube ni la DB).
     if validation_errors:
-        logger.warning(
-            "[%s] repack ABORTADO: plan inválido (%d error(es)) — no se toca "
-            "YouTube ni la DB: %s",
-            slug, len(validation_errors), "; ".join(validation_errors[:5]),
+        import re as _re
+        _item_err_re = _re.compile(
+            r"^#(\d+): (?:publica antes de subida\+calentamiento|warmup )"
         )
-        if not dry_run:
-            return result
+        invalid_ids = {
+            int(m.group(1))
+            for m in (_item_err_re.match(err) for err in validation_errors)
+            if m
+        }
+        if invalid_ids:
+            valid_changes = [
+                c for c in changes if int(c.get("video_id") or 0) not in invalid_ids
+            ]
+            remaining_errors = _validate(valid_changes)
+            if not remaining_errors:
+                result["skipped_invalid"] = sorted(invalid_ids)
+                result["plan_valid"] = True
+                result["validation_errors"] = []
+                validation_errors = []
+                changes = valid_changes
+                logger.warning(
+                    "[%s] repack: %d ítem(s) inválido(s) excluido(s) "
+                    "(#%s) — se aplican los %d válidos",
+                    slug, len(invalid_ids),
+                    ", #".join(str(i) for i in sorted(invalid_ids)),
+                    len(valid_changes),
+                )
+            else:
+                validation_errors = remaining_errors
+        if validation_errors:
+            logger.warning(
+                "[%s] repack ABORTADO: plan inválido (%d error(es)) — no se toca "
+                "YouTube ni la DB: %s",
+                slug, len(validation_errors), "; ".join(validation_errors[:5]),
+            )
+            result["plan_valid"] = False
+            result["validation_errors"] = validation_errors
+            if not dry_run:
+                return result
 
     if dry_run:
         logger.info("[%s] repack DRY-RUN: %d cambios propuestos (%d sin cambio)",

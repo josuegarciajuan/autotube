@@ -208,15 +208,29 @@ def should_defer_shorts_for_longform_load(
     concurrency guard still protect against OOM/CPU contention.
 
     ``longform_media_jobs`` covers the local-SD/image phase: it pins every core
-    from pure Python (no ffmpeg to count), so each such long-form is charged as
-    half the machine. Otherwise a short render dispatched during local SD times
-    out from CPU contention (oct 2026).
+    from pure Python (no ffmpeg to count), so the first such long-form is charged
+    as half the machine and each extra as a quarter (the extra block is capped at
+    the first one). Otherwise a short render dispatched during local SD times out
+    from CPU contention (oct 2026). The quarter-weight (instead of one full half
+    each) lets 2 concurrent renders with distributed render
+    (``AUTOTUBE_DIST_RENDER_V2``) coexist with shorts, while 3+ still defer.
     """
     if not longform_active:
         return False
     cpus = max(int(cpu_count or 1), 1)
     threshold = max(1, int(cpus * 0.85))
-    effective_load = autotube_render_load + max(0, int(longform_media_jobs)) * max(1, cpus // 2)
+    media_jobs = max(0, int(longform_media_jobs))
+    if media_jobs:
+        # El primer job media paga media máquina; cada extra, un cuarto, y el
+        # bloque extra nunca supera al primero. Así 2 renders simultáneos con
+        # render distribuido (AUTOTUBE_DIST_RENDER_V2) no bloquean SIEMPRE los
+        # shorts, pero 3+ siguen difiriendo.
+        first_weight = max(1, cpus // 2)
+        extra_weight = max(0, media_jobs - 1) * max(1, cpus // 4)
+        media_weight = first_weight + min(extra_weight, first_weight)
+    else:
+        media_weight = 0
+    effective_load = autotube_render_load + media_weight
     return effective_load >= threshold
 
 
@@ -2974,11 +2988,26 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
         logger.info("Shorts dispatch: shorts pausados por kill-switch (shorts_paused)")
         return None
 
-    # ── Cola heredada: SOLO subida manual ─────────────────────────────
+    # ── Válvula de goteo PRIMERO: drena la cola de shorts en todos los ticks.
+    # Único punto de subida de la cola. Respeta internamente TODOS los topes
+    # (cuota por proyecto, tope duro por canal, tope global, cooldown, caps de
+    # planning) y el lock de subida por canal. Se lanza en un thread daemon:
+    # la subida puede esperar `global_upload_spacing` (sleep de hasta 3600 s) y
+    # bloquearía el heartbeat del schedule_checker.
+    try:
+        from config.settings import SHORTS_QUEUE_VALVE_ENABLED, SHORTS_QUEUE_VALVE_MAX_PER_PASS
+        if SHORTS_QUEUE_VALVE_ENABLED:
+            _spawn_background_short_upload(db, max_per_pass=SHORTS_QUEUE_VALVE_MAX_PER_PASS)
+    except Exception as exc:
+        logger.warning("Shorts dispatch: queued upload pasada falló: %s", exc)
+
+    # ── Cola heredada: drenada por la VÁLVULA FIFO de fondo ───────────
     # Los shorts nuevos son trabajos atómicos (render → upload en el mismo
     # worker) y NUNCA entran en la cola. Los shorts `status='generated'` que
-    # ya existían se conservan intactos y se suben manualmente desde el panel
-    # (POST /api/planning/shorts-queue/upload/{id}); el scheduler no los drena.
+    # ya existían se drenan con `_spawn_background_short_upload` (arriba), que
+    # aplica TODOS los gates (cuota, tope duro por canal, tope global, cooldown
+    # y caps de planning) y el lock de subida por canal. La subida manual sigue
+    # disponible desde el panel (POST /api/planning/shorts-queue/upload/{id}).
 
     # ── Modo drenaje POR CANAL: la válvula YA subió arriba (nunca se frena).
     # Ya NO se corta TODA la generación: solo se suprimen los slots de canales

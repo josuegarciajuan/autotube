@@ -326,25 +326,34 @@ def test_valve_cooldown_passes_after_gap(patch_database_path, fake_uploader):
 
 # ── 5. La válvula corre aunque el tope global esté alcanzado ─────
 
-def test_dispatch_does_not_drain_legacy_queue_automatically(tmp_path, monkeypatch):
-    """La cola heredada (`status='generated'`) NO se drena desde el scheduler.
+def test_dispatch_drains_legacy_queue_through_valve(tmp_path, monkeypatch):
+    """La cola heredada (`status='generated'`) SÍ se drena desde el scheduler.
 
-    Se conserva para subida manual; el flujo nuevo es atómico (render→upload)
-    y no crea ni consume esa cola.
+    (oct 2026) El commit af44e539 eliminó la llamada a la válvula y dejó 240
+    shorts `generated` atascados (60/canal). Se restaura al inicio del dispatch
+    como thread de fondo (no bloquea el heartbeat del schedule_checker); los
+    gates se aplican dentro de `_upload_queued_shorts` y el kill-switch
+    `SHORTS_QUEUE_VALVE_ENABLED=false` permite el rollback.
     """
     db, path = _db(tmp_path)
     import config.settings as settings
     monkeypatch.setattr(settings, "DATABASE_PATH", __import__("pathlib").Path(path))
-    calls = {"n": 0}
-
-    def _spy(*a, **kw):
-        calls["n"] += 1
-        return 0
-
-    monkeypatch.setattr(ss, "_upload_queued_shorts", _spy)
+    monkeypatch.setattr(settings, "SHORTS_QUEUE_VALVE_ENABLED", True)
+    monkeypatch.setattr(settings, "SHORTS_QUEUE_VALVE_MAX_PER_PASS", 2)
+    calls = []
+    monkeypatch.setattr(
+        ss, "_spawn_background_short_upload",
+        lambda db=None, max_per_pass=2: calls.append(max_per_pass),
+    )
     monkeypatch.setattr(ss, "_youtube_quota_blocked", lambda *a, **kw: False)
+
     ss.dispatch_next_due_shorts_slot(db=db)
-    assert calls["n"] == 0, "el scheduler no debe drenar la cola heredada"
+    assert calls == [2], "el scheduler debe lanzar la válvula FIFO en cada tick"
+
+    # Rollback: con el flag apagado no se drena la cola heredada.
+    monkeypatch.setattr(settings, "SHORTS_QUEUE_VALVE_ENABLED", False)
+    ss.dispatch_next_due_shorts_slot(db=db)
+    assert calls == [2]
 
 
 # ── 6. Slot native due → generate_only ───────────────────────────

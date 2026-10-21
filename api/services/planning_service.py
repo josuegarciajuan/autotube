@@ -2170,8 +2170,11 @@ def compute_horizon_slots(
     # ── 4. Sort final output by scheduled_at ────────────────────
     all_raw_slots.sort(key=lambda s: s["scheduled_at"])
     
-    for pos, s in enumerate(all_raw_slots, 1):
-        s["slot_position"] = pos
+    _pos_by_day: dict = {}
+    for s in all_raw_slots:
+        key = (s.get("channel_id"), s.get("date_key"))
+        _pos_by_day[key] = _pos_by_day.get(key, 0) + 1
+        s["slot_position"] = _pos_by_day[key]
     
     # ── 5. Convert target_public_at from naive local → ISO8601 UTC ──
     for s in all_raw_slots:
@@ -2811,21 +2814,19 @@ def sync_midday(db=None) -> dict:
     for ch in channels:
         cfg = db.get_channel_planning_config(ch["id"])
         ch_id = ch["id"]
-        target = _resolve_generation_per_day(cfg, today) if cfg.get("planning_enabled", True) else 0
+        target = _resolve_generation_per_day(cfg, today, db=db) if cfg.get("planning_enabled", True) else 0
         # Cap de cuota: nunca planificar más longs de los que el proyecto admite
         target = _resolve_long_cap(alloc, ch.get("slug", ""), target)
         
         # Current slots for this channel today
         ch_slots = [s for s in existing if s["channel_id"] == ch_id]
         
-        # Count real publications (includes manual videos) + active slots only.
-        # NOT counting "completed" slots — they may be error videos (pre-fix)
-        # or already accounted for via published_today (avoiding double count).
-        published_today = db.get_videos_published_today(ch_id)
-        running = sum(1 for s in ch_slots if s["status"] == "running")
+        generated_today = db.count_videos_generated_today(ch_id)
         pending = [s for s in ch_slots if s["status"] == "pending"]
-        
-        current_planned = published_today + running + len(pending)
+        # El cupo es de GENERACIÓN/día (desacoplado de subida): comparar contra
+        # lo generado hoy + slots pendientes. NO contra los ya publicados, o un
+        # vídeo de ayer publicado hoy cancela la generación de hoy.
+        current_planned = generated_today + len(pending)
         target_planned = target
         
         if current_planned == target_planned:
@@ -3200,7 +3201,7 @@ def smart_replan(db=None) -> dict:
         except (_json.JSONDecodeError, TypeError):
             cfg = {}
         
-        vpd = _resolve_generation_per_day({**cfg, "channel_id": ch_id}, today)
+        vpd = _resolve_generation_per_day({**cfg, "channel_id": ch_id}, today, db=db)
         planning_enabled = cfg.get("planning_enabled", True)
         
         # ── v26: skip channels paused by the circuit breaker ──
@@ -3267,11 +3268,11 @@ def smart_replan(db=None) -> dict:
                     (ch_id, tomorrow_str),
                 ).fetchone()
                 tcnt = tomorrow_cnt["cnt"] if tomorrow_cnt else 0
-            if tcnt > 0 and tcnt != _resolve_generation_per_day({**cfg, "channel_id": ch_id}, tomorrow_str):
+            if tcnt > 0 and tcnt != _resolve_generation_per_day({**cfg, "channel_id": ch_id}, tomorrow_str, db=db):
                 logger.warning(
                     "Config mismatch for %s: tomorrow has %d slots but resolved_vpd=%d. "
                     "Triggering horizon replan.",
-                    slug, tcnt, _resolve_generation_per_day({**cfg, "channel_id": ch_id}, tomorrow_str),
+                    slug, tcnt, _resolve_generation_per_day({**cfg, "channel_id": ch_id}, tomorrow_str, db=db),
                 )
                 if not horizon_replanned:
                     result = compute_and_store_horizon(horizon_days=7, db=db, force_replan=True)
@@ -3382,7 +3383,7 @@ def _score_priority_slot(slot: dict, db, today_str: str) -> int:
     try:
         generated_today = db.count_videos_generated_today(ch_id)
         if generated_today == 0:
-            vpd = _resolve_generation_per_day({**cfg_json, "channel_id": ch_id}, today_str)
+            vpd = _resolve_generation_per_day({**cfg_json, "channel_id": ch_id}, today_str, db=db)
             if vpd > 0:
                 score += 30  # channel needs content today
     except Exception:
@@ -5715,6 +5716,7 @@ def authoritative_replan(db=None, horizon_days: int = 7) -> dict:
             rep = apply_publish_repack(
                 db, ch_id, slug,
                 dry_run=False, quota_gate=False, force_yt=True,
+                prioritize_awaiting=True,
             )
             repacked = int((rep or {}).get("rescheduled", 0) or 0)
         except Exception as exc:
@@ -5897,7 +5899,7 @@ def full_replan(db=None) -> dict:
             "name": ch["name"],
             "videos_committed": videos_committed,
             "shorts_committed": shorts_committed,
-            "videos_per_day": _resolve_generation_per_day(cfg, today.isoformat()),
+            "videos_per_day": _resolve_generation_per_day(cfg, today.isoformat(), db=db),
         }
 
     # ═══════════════════════════════════════════════════════════
@@ -5998,7 +6000,7 @@ def full_replan(db=None) -> dict:
                 state = channel_states.get(ch_id, {"videos_committed": 0, "videos_per_day": 2})
                 vpd = max(0, state["videos_per_day"] - state["videos_committed"])
             else:
-                vpd = _resolve_generation_per_day({**cfg, "channel_id": ch_id}, day_str)
+                vpd = _resolve_generation_per_day({**cfg, "channel_id": ch_id}, day_str, db=db)
             daily_quotas[(ch_id, day_str)] = vpd
 
     # Build interleaved slot queue: one round = one slot per channel that still has quota
