@@ -4584,6 +4584,44 @@ class ExtendedDatabase(Database):
                      AND expires_at <= ?""",
                 (account, date_key, now.isoformat()),
             )
+            # ── Reservas huérfanas (oct 2026) ──────────────────────────
+            # Un hilo daemon (válvula de shorts) o un worker que muere con un
+            # reinicio deja la reserva 'reserved' hasta el TTL (180 min):
+            # bloquea el mismo content_key y consume cupo, lo que se reporta
+            # como un falso "daily upload cap" y deja la cola atascada. Si el
+            # claimant es `uploader:<pid>:...` y ese PID ya no existe, se
+            # libera. Margen de 5 min para no tocar reservas recién creadas.
+            _stale_before = (now - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+            for _row in conn.execute(
+                """SELECT id, claimant, content_key FROM account_upload_reservations
+                   WHERE account=? AND date_key=? AND state='reserved'
+                     AND datetime(reserved_at) <= datetime(?)""",
+                (account, date_key, _stale_before),
+            ).fetchall():
+                _claimant = str(_row[1] or "")
+                _parts = _claimant.split(":")
+                if (len(_parts) < 2 or _parts[0] != "uploader"
+                        or not _parts[1].isdigit()):
+                    continue
+                try:
+                    os.kill(int(_parts[1]), 0)
+                    _alive = True
+                except ProcessLookupError:
+                    _alive = False
+                except PermissionError:
+                    _alive = True
+                except Exception:
+                    continue
+                if not _alive:
+                    logger.warning(
+                        "Liberando reserva huérfana de subida: account=%s key=%s "
+                        "claimant=%s (proceso muerto)",
+                        account, _row[2], _claimant,
+                    )
+                    conn.execute(
+                        "DELETE FROM account_upload_reservations WHERE id=?",
+                        (_row[0],),
+                    )
             # Solo una reserva EN VUELO (state='reserved') del mismo contenido
             # debe bloquear: evita el doble dispatch simultáneo. Una reserva ya
             # 'consumed' NO bloquea un reintento (su subida ya se contabiliza en

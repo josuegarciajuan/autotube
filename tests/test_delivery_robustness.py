@@ -235,6 +235,37 @@ def test_account_upload_reservation_is_idempotent_per_content(tmp_path):
     assert db.reserve_account_upload_slot("shared-account", "video-1", "worker-b", content_type="long") is False
 
 
+def test_orphan_upload_reservation_from_dead_process_is_released(tmp_path):
+    """Una reserva de un proceso muerto no debe bloquear la cola hasta el TTL.
+
+    (oct 2026) La válvula de shorts corre en un hilo daemon: un reinicio de la
+    API lo mata con una reserva 'reserved' viva. El siguiente intento recibía
+    el falso "daily upload cap" durante 180 min y la cola quedaba atascada.
+    """
+    import os
+    from datetime import datetime, timezone
+    from api.time_utils import madrid_date
+
+    db = _db(tmp_path)
+    today = madrid_date(datetime.now(timezone.utc)).isoformat()
+    with db._connect() as conn:
+        conn.execute(
+            """INSERT INTO account_upload_reservations
+               (account, date_key, content_key, claimant, reserved_at,
+                expires_at, content_type, state)
+               VALUES ('shared-account', ?, 'video-1', 'uploader:999999:1',
+                       datetime('now','-10 minutes'), datetime('now','+170 minutes'),
+                       'long', 'reserved')""",
+            (today,),
+        )
+        conn.commit()
+
+    claimant = f"uploader:{os.getpid()}:2"
+    assert db.reserve_account_upload_slot(
+        "shared-account", "video-1", claimant, content_type="long",
+    ) is True
+
+
 def test_account_upload_reservation_can_be_released(tmp_path):
     db = _db(tmp_path)
 
