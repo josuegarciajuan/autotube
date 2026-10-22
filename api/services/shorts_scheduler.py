@@ -2925,89 +2925,6 @@ def _intentional_franja_duplicate(slot_id: int, db) -> bool:
         return False
 
 
-_CAP_GATE_REASONS = frozenset({
-    "tope duro diario del canal",
-    "tope global diario de shorts",
-    "objetivo diario de nativos alcanzado",
-    "canal con 0 shorts/día",
-})
-
-
-def _is_cap_gate_reason(reason: str) -> bool:
-    return str(reason or "").strip() in _CAP_GATE_REASONS
-
-
-def _defer_cap_blocked_slot(db, slot_id: int, reason: str) -> None:
-    """Move a slot +1 day when the daily cap/spacing makes it unrenderable today.
-
-    The planned path is atomic (render only if it can be uploaded), so a
-    cap-blocked slot must be deferred, not retried every tick.  Before this,
-    force-dispatch bypassed the gate, failed, and emitted
-    ``shorts_dispatch_exhausted`` in a loop (slots #40365/#40366).
-    """
-    import sqlite3
-    from config.settings import DATABASE_PATH
-    try:
-        with sqlite3.connect(str(DATABASE_PATH), timeout=30) as conn:
-            conn.execute("PRAGMA busy_timeout=30000")
-            conn.execute(
-                """UPDATE shorts_planned_slots
-                   SET status='pending',
-                       date_key=date(date_key, '+1 day'),
-                       scheduled_at=datetime(scheduled_at, '+1 day'),
-                       target_upload_at=CASE WHEN target_upload_at IS NOT NULL
-                           THEN datetime(target_upload_at, '+1 day') ELSE NULL END,
-                       target_publish_at=CASE WHEN target_publish_at IS NOT NULL
-                           THEN datetime(target_publish_at, '+1 day') ELSE NULL END,
-                       job_id=NULL,
-                       error_message=?,
-                       updated_at=CURRENT_TIMESTAMP
-                   WHERE id=? AND status='pending'""",
-                (f"deferred +1 day: {reason}"[:250], int(slot_id)),
-            )
-            conn.commit()
-        logger.info(
-            "Shorts slot #%d diferido +1 día por tope (%s)", slot_id, reason,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("No se pudo diferir el slot #%d: %s", slot_id, exc)
-
-
-def _resolve_shorts_dispatch_exhausted(db=None) -> int:
-    """Close the exhaustion alert once a short is dispatched successfully."""
-    import sqlite3
-    from config.settings import DATABASE_PATH
-    try:
-        with sqlite3.connect(str(DATABASE_PATH), timeout=10) as conn:
-            cur = conn.execute(
-                """UPDATE pipeline_alerts SET resolved=1, resolved_at=datetime('now'),
-                       acknowledged=1
-                   WHERE alert_type='shorts_dispatch_exhausted' AND resolved=0"""
-            )
-            conn.commit()
-            return cur.rowcount
-    except Exception:
-        return 0
-
-
-def _resolve_standalone_short_failed(channel_id: int) -> int:
-    import sqlite3
-    from config.settings import DATABASE_PATH
-    try:
-        with sqlite3.connect(str(DATABASE_PATH), timeout=10) as conn:
-            cur = conn.execute(
-                """UPDATE pipeline_alerts SET resolved=1, resolved_at=datetime('now'),
-                       acknowledged=1
-                   WHERE alert_type='standalone_short_failed'
-                     AND channel_id=? AND resolved=0""",
-                (int(channel_id),),
-            )
-            conn.commit()
-            return cur.rowcount
-    except Exception:
-        return 0
-
-
 def _planned_native_gate(channel_id: int, slug: str, db, *,
                          for_upload: bool = False,
                          allow_same_franja: bool = False) -> tuple[bool, str]:
@@ -3223,7 +3140,6 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
     _MAX_CLIP_RETRIES = 3  # max effective retries (only counts hard failures)
     _skipped_slot_ids: set[int] = set()  # slots skipped due to cooldown/conflict
     _failed_force_ids: set[int] = set()  # force-dispatch: clip slots without source
-    _cap_deferred_ids: set[int] = set()  # force-dispatch: deferred by daily cap
     _retry_count = 0  # effective retry counter (only incremented on actual dispatch)
 
     # ── Pre-filter: cache which channels have completed long videos today ──
@@ -3453,17 +3369,11 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                             allow_same_franja=_allow_dup_f,
                         )
                     if not _gate_ok_f:
-                        if _is_cap_gate_reason(_gate_reason_f):
-                            # No es un agotamiento real: el canal ya cubrió su
-                            # tope. Se aplaza al día siguiente sin alertar.
-                            _defer_cap_blocked_slot(db, slot_id, _gate_reason_f)
-                            _cap_deferred_ids.add(slot_id)
-                        else:
-                            logger.info(
-                                "Force dispatch: slot #%d (%s) blocked by gate: %s",
-                                slot_id, slug, _gate_reason_f,
-                            )
-                            _failed_force_ids.add(slot_id)
+                        logger.info(
+                            "Force dispatch: slot #%d (%s) blocked by gate: %s",
+                            slot_id, slug, _gate_reason_f,
+                        )
+                        _failed_force_ids.add(slot_id)
                         continue
 
                     db.update_shorts_slot_status(slot_id, "running",
@@ -3506,7 +3416,6 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                         else:
                             import asyncio as _asyncio_f
                             _asyncio_f.create_task(_short_async_coro)
-                    _resolve_shorts_dispatch_exhausted(db)
                     return {
                         "slot_id": slot_id, "job_id": job_id_f,
                         "channel_slug": slug, "short_type": short_type_f,
@@ -3514,14 +3423,11 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
 
                 logger.warning("Force dispatch: exhausted %d attempts", _MAX_CLIP_RETRIES)
                 _LAST_ALL_EXHAUSTED_AT = time.time()
-                # Si todos los bloqueos fueron por tope diario, no es un
-                # agotamiento: los slots se aplazaron y no hay que alertar.
-                if _failed_force_ids or not _cap_deferred_ids:
-                    _alert_shorts_dispatch_exhausted(
-                        f"Force dispatch agotó sus {_MAX_CLIP_RETRIES} intentos (todos los "
-                        f"slots bloqueados por guards o sin fuente). Slots intentados: "
-                        f"{list(sorted(_failed_force_ids))[:20] or 'ninguno'}."
-                    )
+                _alert_shorts_dispatch_exhausted(
+                    f"Force dispatch agotó sus {_MAX_CLIP_RETRIES} intentos (todos los "
+                    f"slots bloqueados por guards o sin fuente). Slots intentados: "
+                    f"{list(sorted(_failed_force_ids))[:20] or 'ninguno'}."
+                )
                 return None
             else:
                 # Check if there are any pending slots at all (even outside window)
@@ -3732,16 +3638,11 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                 channel_id, slug, db, allow_same_franja=_allow_dup,
             )
         if not _gate_ok:
-            if _is_cap_gate_reason(_gate_reason):
-                # Atómico + tope diario: se mueve al día siguiente en vez de
-                # reintentarse cada tick y acabar en shorts_dispatch_exhausted.
-                _defer_cap_blocked_slot(db, slot_id, _gate_reason)
-            else:
-                logger.info(
-                    "Shorts slot #%d (%s) bloqueado por gate: %s — queda pendiente",
-                    slot_id, slug, _gate_reason,
-                )
-                _skipped_slot_ids.add(slot_id)
+            logger.info(
+                "Shorts slot #%d (%s) bloqueado por gate: %s — queda pendiente",
+                slot_id, slug, _gate_reason,
+            )
+            _skipped_slot_ids.add(slot_id)
             continue
 
         # All guards passed — this is a dispatchable slot. Only NOW do we
@@ -3797,7 +3698,6 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
                 import asyncio
                 asyncio.create_task(_short_async_coro)
 
-        _resolve_shorts_dispatch_exhausted(db)
         return {
             "slot_id": slot_id,
             "job_id": job_id,
@@ -4049,8 +3949,6 @@ def _finalize_short_dispatch(slot_id, job_id, channel_id, short_id=None,
             conn.close()
         logger.info("Short dispatch finalized: job=%d slot=%s short_id=%s (%s)",
                     job_id, slot_id or "-", short_id, _slot_status)
-        if not slot_id:
-            _resolve_standalone_short_failed(channel_id)
         return
 
     # ── 2. Spam removal — NEVER retry ───────────────────────────

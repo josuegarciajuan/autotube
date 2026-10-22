@@ -150,10 +150,7 @@ class LocalSDProvider:
         try:
             pipe = self._load_pipe()
         except Exception as exc:
-            # Non-fatal: the media chain falls back to the next provider.
-            # ERROR here emitted a critical alert during a SIGTERM even though
-            # the next attempt loaded SD successfully (video #2712).
-            logger.warning("Failed to load SD pipeline (fallback provider will be used): %s", exc)
+            logger.error("Failed to load SD pipeline: %s", exc)
             return None
 
         try:

@@ -90,38 +90,6 @@ def glass_box_recover_orphaned_videos(db=None, dry_run: bool = False) -> dict:
         if size_mb < 10:
             continue  # too small, likely corrupted
 
-        # — Safety gate 1b: never race an active/manual retry —
-        # A queued/running generation job owns this video; recovering it to
-        # awaiting_upload can upload a stale render before the retry finishes.
-        with db._connect() as conn:
-            _active_retry = conn.execute(
-                "SELECT 1 FROM generation_jobs "
-                "WHERE video_id=? AND status IN ('queued','running') LIMIT 1",
-                (vid,),
-            ).fetchone()
-        if _active_retry:
-            skipped += 1
-            continue
-
-        # — Safety gate 1c: never bypass a post-validation/render-gate failure —
-        # These videos have an mp4 on disk but failed the black-frame/quality
-        # gate. Glass Box used to recover them (progress >=87, large mp4) and
-        # upload the bad render (video #2723). They must be re-rendered/re-gated,
-        # never sent straight to awaiting_upload.
-        with db._connect() as conn:
-            _blocked_validation = conn.execute(
-                """SELECT 1 FROM generation_jobs
-                   WHERE video_id=? AND status='failed'
-                     AND (LOWER(COALESCE(error_msg,'')) LIKE '%render_gate%'
-                       OR LOWER(COALESCE(error_msg,'')) LIKE '%post-validation%'
-                       OR LOWER(COALESCE(error_msg,'')) LIKE '%post_validate%')
-                   LIMIT 1""",
-                (vid,),
-            ).fetchone()
-        if _blocked_validation:
-            skipped += 1
-            continue
-
         # — Safety gate 2: skip special error types —
         err_msg = (video.get("error_message") or "").lower()
         if any(term in err_msg for term in ("quality_issue", "auth_stuck", "abandoned_intentionally")):

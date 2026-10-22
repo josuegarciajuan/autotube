@@ -1,9 +1,8 @@
 """Test de la guardia de estancamiento del orquestador distribuido.
 
-Regresión: la guardia no debe cancelar mientras haya unidades inflight/pending
-(pueden estar esperando capacidad y el motor ya gobierna su timeout). Solo
-cancela si el motor no publica estado o si no queda trabajo en vuelo; el
-timeout global de la ejecución sigue siendo el cinturón de seguridad.
+Regresión: un worker colgado deja ``inflight>0`` indefinidamente; antes eso se
+interpretaba como "progreso vivo" y podía colgar el vídeo hasta el timeout
+completo. Ahora el latido es la salida real (accepted/generated).
 """
 from __future__ import annotations
 
@@ -35,12 +34,7 @@ def _call(eid="exec-1", timeout=1e9, stall_sec=300.0, progress_cb=None):
     )
 
 
-def test_stuck_inflight_waits_for_overall_timeout(monkeypatch):
-    """Un worker inflight puede estar esperando capacidad.
-
-    La guardia de 300 s ya no lo mata: el motor gobierna el timeout por unidad
-    y, si de verdad está colgado, se corta al timeout global de la ejecución.
-    """
+def test_stuck_inflight_cancels(monkeypatch):
     cancelled: list[str] = []
     monkeypatch.setattr(orch, "time", _FakeTime())
     monkeypatch.setattr(
@@ -51,19 +45,7 @@ def test_stuck_inflight_waits_for_overall_timeout(monkeypatch):
     )
     monkeypatch.setattr(orch.dsl_client, "cancel", lambda eid: cancelled.append(eid))
 
-    with pytest.raises(ScenePlanError, match="timeout"):
-        _call(timeout=1000.0, stall_sec=300.0)
-    assert cancelled == ["exec-1"]
-
-
-def test_no_status_cancels_by_stall(monkeypatch):
-    """Si el motor nunca publica estado, sí se corta por estancamiento."""
-    cancelled: list[str] = []
-    monkeypatch.setattr(orch, "time", _FakeTime())
-    monkeypatch.setattr(orch.dsl_client, "status", lambda eid: None)
-    monkeypatch.setattr(orch.dsl_client, "cancel", lambda eid: cancelled.append(eid))
-
-    with pytest.raises(ScenePlanError, match="sin progreso"):
+    with pytest.raises(ScenePlanError):
         _call(stall_sec=300.0)
     assert cancelled == ["exec-1"]
 
@@ -130,7 +112,7 @@ def test_render_v2_stall_cancels(monkeypatch, tmp_path):
         FakeSelf()._pre_render_scenes_v2(
             {"id": 1}, {"timestamps": []}, media_assets, 7,
         )
-    assert set(cancelled) == {"eid-r2"}
+    assert cancelled == ["eid-r2"]
 
 
 def test_concat_stall_cancels(monkeypatch, tmp_path):
@@ -171,4 +153,4 @@ def test_concat_stall_cancels(monkeypatch, tmp_path):
         FakeSelf()._dist_concat_body_batched(
             segs, [(0, 1), (1, 2)], str(tmp_path / "out.mp4"), batch_size=1,
         )
-    assert set(cancelled) == {"eid-cc"}
+    assert cancelled == ["eid-cc"]

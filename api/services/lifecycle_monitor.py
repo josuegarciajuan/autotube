@@ -982,8 +982,7 @@ def _check_generation_progress_freeze(db) -> int:
                     # Avanzó (o es la primera vez): reinicia el reloj y cierra
                     # cualquier alerta de estancamiento previa de este vídeo.
                     snap[jid] = {"sig": sig,
-                                 "since": now.strftime("%Y-%m-%d %H:%M:%S"),
-                                 "video_id": row["video_id"]}
+                                 "since": now.strftime("%Y-%m-%d %H:%M:%S")}
                     if row["video_id"]:
                         conn.execute(
                             """UPDATE pipeline_alerts SET resolved = 1,
@@ -1023,36 +1022,10 @@ def _check_generation_progress_freeze(db) -> int:
                          "stalled_minutes": int(stalled_min)},
                     )
 
-            # Olvida jobs que ya no están running y cierra su alerta de
-            # estancamiento. Antes solo se borraba la entrada: si el job fallaba
-            # o terminaba, 'generation_stalled' quedaba abierta para siempre
-            # (video #2738, 22-oct-2026).
+            # Olvida jobs que ya no están running.
             for jid in list(snap.keys()):
-                if jid in active_ids:
-                    continue
-                vid = (snap.get(jid) or {}).get("video_id")
-                if not vid:
-                    try:
-                        _jr = conn.execute(
-                            "SELECT video_id FROM generation_jobs WHERE id=?",
-                            (int(jid),),
-                        ).fetchone()
-                        vid = _jr["video_id"] if _jr else None
-                    except Exception:
-                        vid = None
-                if vid:
-                    try:
-                        conn.execute(
-                            """UPDATE pipeline_alerts SET resolved = 1,
-                                   resolved_at = datetime('now')
-                               WHERE entity_type = 'video' AND entity_id = ?
-                                 AND alert_type = 'generation_stalled'
-                                 AND resolved = 0""",
-                            (vid,),
-                        )
-                    except Exception:
-                        pass
-                snap.pop(jid, None)
+                if jid not in active_ids:
+                    snap.pop(jid, None)
 
             conn.execute(
                 "INSERT OR REPLACE INTO system_state(key, value, updated_at) "

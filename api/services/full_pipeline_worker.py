@@ -42,8 +42,6 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-logger = logging.getLogger("autotube.worker")
-
 # ── Lifecycle monitoring (import AFTER sys.path fix) ──
 from api.services.lifecycle_monitor import (
     log_event as log_lifecycle,
@@ -858,110 +856,6 @@ def _load_checkpoint(video_id: int, db) -> tuple[dict, str, int]:
     return cp, last_phase, last_idx
 
 
-def _restore_tts_checkpoint(tts_cp):
-    """Restore TTS data from a checkpoint, loading timestamps when needed.
-
-    Older checkpoints stored only ``audio_path`` / ``timestamps_path`` (not the
-    timestamp list).  Resuming at the video phase with an ``audio_data`` dict
-    that lacks ``timestamps`` made ``phase_video`` abort with
-    "guion por bloques sin audio/timestamps" (video #2714).  Rehydrate the
-    timestamps from disk; if they are gone, return ``None`` so the caller
-    regresses to the TTS phase instead of rendering without timings.
-    """
-    if not isinstance(tts_cp, dict):
-        return None
-    audio_path = str(tts_cp.get("audio_path") or "")
-    if not audio_path or not Path(audio_path).exists():
-        if audio_path:
-            logger.warning("TTS audio file missing: %s — will re-generate", audio_path)
-        return None
-
-    data = dict(tts_cp)
-    timestamps = data.get("timestamps")
-    if not isinstance(timestamps, list) or not timestamps:
-        ts_path = str(data.get("timestamps_path") or "")
-        if not ts_path:
-            ts_path = str(Path(audio_path).with_name(
-                f"{Path(audio_path).stem}_timestamps.json"
-            ))
-        try:
-            if ts_path and Path(ts_path).exists():
-                loaded = json.loads(Path(ts_path).read_text(encoding="utf-8"))
-                if isinstance(loaded, list) and loaded:
-                    timestamps = loaded
-        except Exception as exc:  # noqa: BLE001 — checkpoint recovery must not crash
-            logger.warning("Could not load TTS timestamps from %s: %s", ts_path, exc)
-    if not isinstance(timestamps, list) or not timestamps:
-        logger.warning(
-            "TTS timestamps missing for %s — will re-generate instead of "
-            "rendering without timings", audio_path,
-        )
-        return None
-    data["timestamps"] = timestamps
-    if not data.get("timestamps_path"):
-        data["timestamps_path"] = str(Path(audio_path).with_name(
-            f"{Path(audio_path).stem}_timestamps.json"
-        ))
-    return data
-
-
-# Patrones de fallo recuperables (mismo criterio que
-# generation_service._auto_retry_if_transient). El worker subprocess también
-# debe reencolar: antes solo la ruta in-process lo hacía, así que un OOM o un
-# fallo distribuido dejaba el vídeo en 'error' definitivo.
-_TRANSIENT_ERROR_PATTERNS = (
-    "timeout", "memory guard", "broken pipe", "brokenpipe",
-    "orphaned: process lost", "abortado: memoria", "ram insuficiente",
-    "dist_repair_exhausted", "local_fallback_deferred",
-    "interrupted", "server restarted", "sigterm",
-)
-
-
-def _maybe_requeue_transient(db, job_id: int, video_id: int,
-                             error_msg: str | None) -> bool:
-    """Requeue a failed subprocess job when its failure is recoverable.
-
-    Bounded by ``MAX_RETRY_ATTEMPTS``; the queue consumer still applies the
-    global concurrency and RAM gates, so a retry never starts under pressure.
-    """
-    try:
-        job = db.get_job(job_id)
-        if not job or job.get("status") != "failed":
-            return False
-        reason = error_msg or job.get("error_msg") or ""
-        low = reason.lower()
-        if not any(p in low for p in _TRANSIENT_ERROR_PATTERNS):
-            return False
-
-        from config.settings import MAX_RETRY_ATTEMPTS
-        max_retries = max(1, int(MAX_RETRY_ATTEMPTS))
-        retries = db.increment_retry(job_id)
-        if retries >= max_retries:
-            logger.warning(
-                "Job #%d: %d/%d reintentos agotados — no se reencola. Error: %s",
-                job_id, retries, max_retries, reason[:200],
-            )
-            return False
-
-        note = f" [retry {retries}/{max_retries} queued]"
-        db.update_job_requeue(job_id, error_msg=(reason[:480] + note))
-        try:
-            db.update_video(
-                video_id, status="error", progress_phase="queued_retry",
-                error_message=(reason[:450] + note),
-            )
-        except Exception:
-            pass
-        logger.info(
-            "Job #%d reencolado tras fallo transitorio (retry %d/%d): %s",
-            job_id, retries, max_retries, reason[:200],
-        )
-        return True
-    except Exception as exc:  # noqa: BLE001 — nunca romper el finally
-        logger.warning("No se pudo reencolar el job #%d: %s", job_id, exc)
-        return False
-
-
 def _required_resume_idx(start_idx: int, *, has_audio: bool, has_media: bool,
                          has_video: bool) -> int | None:
     """Índice de fase mínima desde la que se puede reanudar con seguridad.
@@ -1208,10 +1102,13 @@ def run_job(
             logger.info("Script re-hydrated from DB: %d words", 
                         len(script.get("guion", "").split()))
     
-    # Restore TTS data AND its timestamp list.  A checkpoint that only has
-    # audio_path/timestamps_path must not be treated as "TTS complete": the
-    # render phase needs the timestamps to build block ranges.
-    audio_data = _restore_tts_checkpoint(checkpoint.get("tts"))
+    audio_data = checkpoint.get("tts")
+    if audio_data and isinstance(audio_data, dict):
+        # Verify audio files still exist
+        ap = audio_data.get("audio_path", "")
+        if ap and not Path(ap).exists():
+            logger.warning("TTS audio file missing: %s — will re-generate", ap)
+            audio_data = None
     
     media_cp = checkpoint.get("media", {})
     media_assets = None
@@ -2678,11 +2575,6 @@ def run_job(
             ctypes.CDLL("libc.so.6").malloc_trim(0)
         except Exception:
             pass
-        # ── Requeue transient failures LAST (OOM, timeout, dist repair,
-        # SIGTERM). Doing it after cleanup prevents the queue consumer from
-        # spawning the retry while this process is still releasing resources.
-        if not success:
-            _maybe_requeue_transient(db, job_id, video_id, error_msg)
         logger.info("Worker exiting: success=%s, job=%d, video=%d", success, job_id, video_id)
 
     return success

@@ -1063,12 +1063,7 @@ class YouTubeBrowser:
                     page = self._context.new_page()
                     ok, reason = self._do_mark(page, youtube_video_id)
                 except Exception as e:
-                    # A closed context (Chromium crash/OOM) is transient: retry
-                    # rebuilds it. Logging ERROR on every intermediate attempt
-                    # emitted a critical observability alert even when the next
-                    # attempt succeeded (short MIra04qlMWM, oct 2026).
-                    _log = logger.error if attempt >= max_attempts else logger.warning
-                    _log(
+                    logger.error(
                         "mark_altered_content failed for %s (attempt %d/%d): %s",
                         youtube_video_id, attempt, max_attempts, e,
                     )
@@ -1344,15 +1339,12 @@ class YouTubeBrowser:
             page.close()
             return True, "ok"
         except PlaywrightTimeout as e:
-            # Transient: mark_altered_content retries and only alerts when all
-            # attempts fail. ERROR here emitted a critical alert even when the
-            # next attempt succeeded (short MIra04qlMWM).
-            logger.warning("Timeout for %s (transient): %s", video_id, e)
+            logger.error("Timeout for %s: %s", video_id, e)
             try: page.close()
             except Exception: pass
             return False, "timeout"
         except Exception as e:
-            logger.warning("Error for %s (transient): %s", video_id, e)
+            logger.error("Error for %s: %s", video_id, e)
             try: page.close()
             except Exception: pass
             return False, "exception"
@@ -1662,12 +1654,12 @@ class YouTubeBrowser:
             page.close()
             return True
         except PlaywrightTimeout as e:
-            logger.warning("[HOLD] Timeout for %s (transient): %s", video_id, e)
+            logger.error("[HOLD] Timeout for %s: %s", video_id, e)
             try: page.close()
             except Exception: pass
             return False
         except Exception as e:
-            logger.warning("[HOLD] Error for %s (transient): %s", video_id, e)
+            logger.error("[HOLD] Error for %s: %s", video_id, e)
             try: page.close()
             except Exception: pass
             return False

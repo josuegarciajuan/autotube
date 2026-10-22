@@ -41,21 +41,6 @@ from config.settings import (TOKENS_DIR, DATABASE_PATH, STATS_ENABLED, STATS_AUT
 
 logger = logging.getLogger("autotube.main")
 
-# ── Playwright sync API must not run on the asyncio event loop ──
-# One dedicated worker thread keeps the browser/Playwright greenlet affinity
-# stable across lifecycle cycles (the sync API is bound to its owner thread).
-_lifecycle_executor = None
-
-
-def _get_lifecycle_executor():
-    global _lifecycle_executor
-    if _lifecycle_executor is None:
-        from concurrent.futures import ThreadPoolExecutor
-        _lifecycle_executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="lifecycle-actions",
-        )
-    return _lifecycle_executor
-
 # ── Lifespan ─────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -3581,13 +3566,7 @@ async def _process_lifecycle_actions():
                 continue
             try:
                 mgr = VideoLifecycleManager(slug)
-                # sync Playwright inside an async function raises
-                # "Playwright Sync API inside the asyncio loop" (action #307).
-                # Run it in the dedicated thread; never on the event loop.
-                loop = asyncio.get_running_loop()
-                result = await loop.run_in_executor(
-                    _get_lifecycle_executor(), mgr.process_due_actions,
-                )
+                result = mgr.process_due_actions()
                 grand_total["processed"] += result.get("processed", 0)
                 grand_total["succeeded"] += result.get("succeeded", 0)
                 grand_total["failed"] += result.get("failed", 0)
