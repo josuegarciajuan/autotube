@@ -61,6 +61,15 @@ def _setup_logging(job_id: int | None = None, channel_slug: str = "unknown"):
     logger.handlers.clear()
     logger.addHandler(handler)
     logger.propagate = False
+    # Los loggers de los módulos que ejecuta el worker (p. ej.
+    # ``autotube.standalone``) no tienen handler propio: sin esto sus
+    # warnings/errores se perdían y un fallo de standalone quedaba como
+    # "No short_id returned" sin causa. El handler del worker se adjunta al
+    # root solo si no hay uno; el logger del worker no propaga (sin duplicar).
+    _root = logging.getLogger()
+    if not _root.handlers:
+        _root.addHandler(handler)
+        _root.setLevel(logging.INFO)
     # Structured correlated observability (JSONL). Fail-open: the short's own
     # stdout log is captured by the spawner; this only adds obs + context.
     try:
