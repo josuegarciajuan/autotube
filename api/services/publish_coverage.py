@@ -176,11 +176,14 @@ def _maybe_alert_deficit(db, slug: str, channel_id: int | None,
     try:
         today = datetime.now().date().isoformat()
         key = f"{_ALERT_DEFICIT_PREFIX}{slug}"
-        if db.get_system_state(key) == today:
-            return False
-        db.set_system_state(key, today)
+        # Keep the once-per-day marker for alert creation, but ALWAYS refresh
+        # the unresolved alert: the deficit days change as videos are published
+        # or reprogrammed, and an old "22,23" message stayed frozen for days.
+        already = db.get_system_state(key) == today
+        if not already:
+            db.set_system_state(key, today)
         from api.services.lifecycle_monitor import create_alert
-        create_alert(
+        created = create_alert(
             db,
             entity_type="channel", entity_id=channel_id, channel_id=channel_id,
             alert_type="publish_coverage_deficit",
@@ -193,7 +196,7 @@ def _maybe_alert_deficit(db, slug: str, channel_id: int | None,
             ),
             metadata={"slug": slug, "deficit_days": deficit_days},
         )
-        return True
+        return created is not None
     except Exception as exc:
         logger.debug("[%s] deficit alert skip: %s", slug, exc)
         return False

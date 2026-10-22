@@ -1063,7 +1063,12 @@ class YouTubeBrowser:
                     page = self._context.new_page()
                     ok, reason = self._do_mark(page, youtube_video_id)
                 except Exception as e:
-                    logger.error(
+                    # A closed context (Chromium crash/OOM) is transient: retry
+                    # rebuilds it. Logging ERROR on every intermediate attempt
+                    # emitted a critical observability alert even when the next
+                    # attempt succeeded (short MIra04qlMWM, oct 2026).
+                    _log = logger.error if attempt >= max_attempts else logger.warning
+                    _log(
                         "mark_altered_content failed for %s (attempt %d/%d): %s",
                         youtube_video_id, attempt, max_attempts, e,
                     )
