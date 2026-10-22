@@ -3482,7 +3482,11 @@ async def auto_recover_on_startup():
         "UPDATE generation_jobs SET status='failed', "
         "error_msg='Server restarted — old process no longer exists' "
         "WHERE status = 'queued' AND action != 'reassemble' "
-        "AND video_id NOT IN (SELECT id FROM videos WHERE is_marathon=1)"
+        "AND video_id NOT IN (SELECT id FROM videos WHERE is_marathon=1) "
+        # Requeues manuales/transitorios: el vídeo queda en 'queued_retry' y
+        # debe sobrevivir al reinicio (antes se perdían y el vídeo seguía en
+        # error; pasó con #2729/#2734/#2738/#2723).
+        "AND video_id NOT IN (SELECT id FROM videos WHERE progress_phase='queued_retry')"
     ).rowcount
     if queued_killed:
         log.info("Marked %d queued job(s) as failed (server restart)", queued_killed)
