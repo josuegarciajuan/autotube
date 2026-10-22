@@ -96,6 +96,24 @@ def _dist_excluded_nodes() -> list:
 AI_IMAGES_CACHE = "_dist_cache"
 
 
+def _dist_stall_is_fatal(*, status_seen: bool, inflight: int, pending: int,
+                         elapsed: float, stall_sec: float) -> bool:
+    """Decide whether a distributed execution is truly stalled.
+
+    A unit that is ``inflight`` may simply be queued for capacity on a busy
+    node; the engine already enforces per-unit timeouts and its own deadline.
+    Cancelling at 900 s just because ``accepted`` did not grow truncated valid
+    86-scene renders and 4-batch concats (videos #2734/#2738), forcing a local
+    fallback under memory pressure.  Only cancel when the engine publishes no
+    status at all, or when it has no work in flight/pending.
+    """
+    if elapsed <= stall_sec:
+        return False
+    if not status_seen:
+        return True
+    return inflight <= 0 and pending <= 0
+
+
 class DistributedOrchestrator(PipelineOrchestrator):
     """Pipeline clásico + render de escenas repartido en la flota."""
 
@@ -137,6 +155,11 @@ class DistributedOrchestrator(PipelineOrchestrator):
                     "Se renderiza en local como hasta ahora.",
                     self.canal, type(exc).__name__, exc,
                 )
+        if dist_failed and "dist_repair_exhausted" in dist_failed:
+            # El fallback local solo es seguro si no hay otro long-form pesado
+            # en curso y hay RAM. Si no, se propaga un error retryable para
+            # reencolar el vídeo en vez de morir por OOM.
+            self._assert_local_fallback_allowed("render", dist_failed)
         if _env_flag("AUTOTUBE_DIST_CONCAT", False):
             self._install_dist_concat()
         try:
@@ -483,11 +506,16 @@ class DistributedOrchestrator(PipelineOrchestrator):
                     last_progress = time.time()
                     last_accepted = accepted
                     last_generated = generated
-            # Guardia de estancamiento FUERA de `if st is not None`: si el motor
-            # nunca publica `results/<eid>.json` (nodo no elegible, engine caído),
-            # `status()` devuelve None y antes solo aplicaba el ceiling completo
-            # (hasta 25 h con 150 escenas). Ahora se cancela y cae a local.
-            if (time.time() - last_progress) > stall_sec:
+            # Guardia de estancamiento. No cancela mientras el motor tenga
+            # unidades inflight/pending: pueden estar esperando capacidad y el
+            # motor ya gobierna su timeout/deadline. Antes se cancelaba a los
+            # 900 s aunque 81/86 escenas ya estuvieran aceptadas, forzando el
+            # fallback local y el OOM posterior.
+            _elapsed = time.time() - last_progress
+            if _dist_stall_is_fatal(
+                status_seen=(st is not None), inflight=inflight,
+                pending=pending, elapsed=_elapsed, stall_sec=stall_sec,
+            ):
                 dsl_client.cancel(eid)
                 try:
                     from pipeline.observability import obs_event
@@ -507,6 +535,45 @@ class DistributedOrchestrator(PipelineOrchestrator):
             time.sleep(2.0)
         dsl_client.cancel(eid)
         raise ScenePlanError(f"{phase} timeout {timeout:.0f}s; cancelado")
+
+    def _assert_local_fallback_allowed(self, phase: str, reason: str) -> None:
+        """Guard the local fallback against memory over-commit.
+
+        When the fleet fails after its repair rounds, falling back to a local
+        render while another long-form is in media/render is what turned a
+        distributed hiccup into an OOM (#2734/#2738).  Requeue instead of
+        forcing a second heavy local phase; the queue consumer will run it when
+        resources are free.
+        """
+        try:
+            from pipeline.ram_governor import available_mb
+            from config.settings import MIN_FREE_FOR_RENDER_MB
+
+            avail = available_mb()
+            if avail >= 0 and avail < int(MIN_FREE_FOR_RENDER_MB):
+                raise ScenePlanError(
+                    f"local_fallback_deferred: {phase}: solo {avail} MB libres "
+                    f"(< {MIN_FREE_FOR_RENDER_MB} MB); {reason[:180]}"
+                )
+            others = 0
+            try:
+                if getattr(self, "db", None) is not None:
+                    others = max(0, int(self.db.count_running_longform_jobs()) - 1)
+            except Exception:
+                others = 0
+            if others > 0:
+                raise ScenePlanError(
+                    f"local_fallback_deferred: {phase}: {others} long-form(s) "
+                    f"en curso; no se lanza otro render local ({reason[:180]})"
+                )
+            logger.warning(
+                "[%s] Fallback local autorizado (%s) — RAM=%s MB, sin otros "
+                "long-forms activos", self.canal, phase, avail,
+            )
+        except ScenePlanError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — fail-open ante fallo del gate
+            logger.debug("[%s] local fallback gate skipped: %s", self.canal, exc)
 
     # ── Render v2: mismo código, estado congelado, todo-o-nada ──────────────
     @staticmethod
@@ -758,6 +825,10 @@ class DistributedOrchestrator(PipelineOrchestrator):
                     "[%s] Concat distribuido no aplicable (%s: %s); local.",
                     self.canal, type(exc).__name__, exc,
                 )
+            if dist_exc is not None and "dist_repair_exhausted" in str(dist_exc):
+                # No ejecutar el concat local si otro long-form está activo o
+                # falta RAM: se reencola en vez de provocar un OOM.
+                self._assert_local_fallback_allowed("concat", str(dist_exc))
             try:
                 return orig(segment_paths, block_ranges, output_path, batch_size)
             except Exception as local_exc:  # noqa: BLE001 — escalada
