@@ -5638,6 +5638,29 @@ def safe_full_replan_apply(confirmation_token: str, db=None) -> dict:
             time.sleep(delay)
 
 
+def _cancel_queued_jobs_for_replan(conn) -> int:
+    """Cancel stale queued jobs without destroying deliberate retries.
+
+    ``authoritative_replan`` clears the plan, but a video in
+    ``progress_phase='queued_retry'`` has an explicit manual/transient retry
+    queued.  Cancelling it here (as happened with #2712/#2714/#2723/#2729/
+    #2734/#2738) discarded the retry and left the video stranded in error.
+    Marathons are likewise independent of the normal plan.
+    """
+    return conn.execute(
+        "UPDATE generation_jobs SET status='cancelled', "
+        "error_msg='Reprogramación total (operador)', "
+        "finished_at=datetime('now') WHERE status='queued' "
+        # Los maratones NO se cancelan: la "rueda" de maratones es
+        # independiente del plan normal; el _queue_consumer los despacha.
+        "AND video_id NOT IN (SELECT id FROM videos WHERE is_marathon=1) "
+        # Los reencolados manuales/transitorios deben sobrevivir al replan:
+        # su vídeo está en 'queued_retry' y el _queue_consumer los lanzará.
+        "AND video_id NOT IN ("
+        "SELECT id FROM videos WHERE progress_phase='queued_retry')"
+    ).rowcount
+
+
 @_replan_locked
 def authoritative_replan(db=None, horizon_days: int = 7) -> dict:
     """Reprogramación TOTAL autoritativa — botón "Reprogramar Ahora".
@@ -5690,14 +5713,7 @@ def authoritative_replan(db=None, horizon_days: int = 7) -> dict:
         conn.execute(
             "DELETE FROM shorts_planned_slots WHERE status IN ('pending','cancelled')"
         )
-        summary["jobs_cancelled"] = conn.execute(
-            "UPDATE generation_jobs SET status='cancelled', "
-            "error_msg='Reprogramación total (operador)', "
-            "finished_at=datetime('now') WHERE status='queued' "
-            # Los maratones NO se cancelan: la "rueda" de maratones es
-            # independiente del plan normal; el _queue_consumer los despacha.
-            "AND video_id NOT IN (SELECT id FROM videos WHERE is_marathon=1)"
-        ).rowcount
+        summary["jobs_cancelled"] = _cancel_queued_jobs_for_replan(conn)
         conn.commit()
     logger.info(
         "authoritative_replan: cleared %d slots, cancelled %d queued jobs",
