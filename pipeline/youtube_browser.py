@@ -1344,12 +1344,15 @@ class YouTubeBrowser:
             page.close()
             return True, "ok"
         except PlaywrightTimeout as e:
-            logger.error("Timeout for %s: %s", video_id, e)
+            # Transient: mark_altered_content retries and only alerts when all
+            # attempts fail. ERROR here emitted a critical alert even when the
+            # next attempt succeeded (short MIra04qlMWM).
+            logger.warning("Timeout for %s (transient): %s", video_id, e)
             try: page.close()
             except Exception: pass
             return False, "timeout"
         except Exception as e:
-            logger.error("Error for %s: %s", video_id, e)
+            logger.warning("Error for %s (transient): %s", video_id, e)
             try: page.close()
             except Exception: pass
             return False, "exception"
@@ -1659,12 +1662,12 @@ class YouTubeBrowser:
             page.close()
             return True
         except PlaywrightTimeout as e:
-            logger.error("[HOLD] Timeout for %s: %s", video_id, e)
+            logger.warning("[HOLD] Timeout for %s (transient): %s", video_id, e)
             try: page.close()
             except Exception: pass
             return False
         except Exception as e:
-            logger.error("[HOLD] Error for %s: %s", video_id, e)
+            logger.warning("[HOLD] Error for %s (transient): %s", video_id, e)
             try: page.close()
             except Exception: pass
             return False
