@@ -1,10 +1,13 @@
 # Fase 1 — Diagnóstico de packaging: matriz de fallos reproducidos
 
 > Fecha: **2026-10-23**. Suite de reproducción: `tests/test_packaging_repro_fase1.py`
-> (**9 tests**: 2 anti-regresión verdes + 7 `xfail(strict=True)` que la Fase 2
-> debe convertir en XPASS). Suites existentes verificadas: **77 passed**
-> (`test_packaging_brief`, `test_thumbnail_packaging`, `test_title_engine`,
-> `test_thumbnail_tema_primero`).
+> (**9 tests**). Estado: **los 6 fallos reproducidos quedaron corregidos en la
+> Fase 2** — los 7 tests que eran `xfail(strict=True)` pasan en verde; las
+> suites relacionadas suman **168 passed**.
+> Suites existentes verificadas: **77 passed** en la Fase 1 (antes del fix).
+>
+> Fallo preexistente ajeno a esta fase: `test_preflight_cleanup_preserves_recent_files`
+> (stub `_FakeDB` sin `get_oldest_active_job_start_epoch`; también falla en producción).
 
 Cada fallo está reproducido con las **funciones reales** del pipeline y mapeado
 a su etapa y causa raíz. «Esperado» = comportamiento que la Fase 2 implementará.

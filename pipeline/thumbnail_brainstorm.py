@@ -699,6 +699,20 @@ Genera el texto superpuesto para esta variante."""
             else:
                 best_text = _derive_hook_from_title(title) if title else "FUE REAL | La verdad oculta"
         
+        # ── Fase 2 (curiosidad oscura): el sujeto principal debe anclar al
+        # TEMA del título. Si el agente no lo define, se deriva del término
+        # saliente del título — nunca se deja un concepto genérico que pueda
+        # derivar en una imagen ajena (caso de la camiseta en el vídeo 2733).
+        primary_subject = str(psych.get("primary_subject", "") or "").strip()
+        if not primary_subject:
+            try:
+                from pipeline.packaging_brief import salient_subject
+                primary_subject = salient_subject(title)
+            except Exception:  # noqa: BLE001
+                primary_subject = ""
+        if not primary_subject:
+            primary_subject = str(psych.get("visual_concept", "") or "")
+
         return ThumbnailBrief(
             image_concept=psych.get("visual_concept", ""),
             visual_focus=psych.get("visual_concept", "")[:80],
@@ -714,7 +728,7 @@ Genera el texto superpuesto para esta variante."""
             layout=marketing.get("layout", style.get("base_composition", "topic_hero")),
             # ── v3 tema-primero ──
             subject_type=psych.get("subject_type", ""),
-            primary_subject=psych.get("primary_subject", psych.get("visual_concept", ""))[:160],
+            primary_subject=primary_subject[:160],
             provider_main=psych.get("provider_main", ""),
             provider_face=psych.get("provider_face", ""),
             emphasis_word=marketing.get("emphasis_word", ""),

@@ -643,7 +643,33 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
             # antes del truncado. Opt-in por canal.
             if getattr(self.config, "TITLE_HARDEN_ENABLED", False):
                 title = _harden_title(title, self.config)
-            title = truncate_title_at_word(title, self.title_max_chars)
+            # ── Fase 2 (curiosidad oscura): título COMPLETO o re-elección ──
+            # Antes, truncate_title_at_word() re-cortaba a mitad de cláusula
+            # títulos que el motor ya había seleccionado completos, y
+            # validate_title solo lo anotaba en observabilidad. Ahora, si el
+            # seleccionado no cabe o no es completo, se reelige entre
+            # candidatos completos dentro de presupuesto; nunca se publica
+            # un corte a medias.
+            from pipeline.title_tokens import is_complete_title as _is_complete_title
+            if len(title) > self.title_max_chars or not _is_complete_title(title)[0]:
+                repick = self._pick_complete_title(
+                    [str(c.get("title", "")) for c in title_candidates if isinstance(c, dict)]
+                    + [result.get("title", "")]
+                    + self._fallback_titles(script),
+                    self.title_max_chars,
+                )
+                if repick:
+                    logger.warning(
+                        "Title re-picked (complete, in-budget): %r → %r",
+                        title[:70], repick[:70],
+                    )
+                    title = repick
+                elif len(title) > self.title_max_chars:
+                    from pipeline.packaging_brief import finalize_title
+                    repaired = finalize_title(title, self.title_max_chars)
+                    if repaired and _is_complete_title(repaired)[0]:
+                        title = repaired
+            title = self._ensure_complete_title(title, script)
             title_check = validate_title(title, self.config)
 
             description = result.get("description", "")
@@ -726,6 +752,36 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
             logger.error("MetadataGenerator: LLM call failed after retries: %s", e)
             return self._fallback_metadata(script)
 
+    def _pick_complete_title(self, candidates: list, max_chars: int) -> str:
+        """Primer candidato COMPLETO y dentro de *max_chars* (Fase 2).
+
+        Nunca corta: un candidato cabe entero o se descarta. Así, cuando el
+        título seleccionado supera el presupuesto, se reelige en vez de
+        truncarlo a mitad de cláusula.
+        """
+        from pipeline.title_tokens import is_complete_title
+        for cand in candidates or []:
+            text = " ".join(str(cand or "").split())
+            if not text:
+                continue
+            if len(text) <= int(max_chars) and is_complete_title(text)[0]:
+                return text
+        return ""
+
+    def _ensure_complete_title(self, title: str, script: dict) -> str:
+        """Devuelve *title* si es completo; si no, el fallback determinista.
+
+        Fase 2 (curiosidad oscura): ninguna ruta puede emitir un corte a
+        mitad de cláusula — ni siquiera el último recurso.
+        """
+        from pipeline.title_tokens import is_complete_title
+        if is_complete_title(title or "")[0]:
+            return title
+        fallback = self._fallback_titles(script)[0]
+        if is_complete_title(fallback)[0]:
+            return fallback
+        return "La historia que nadie esperaba"
+
     def _validate_tags(self, tags: list[str]) -> list[str]:
         """Validate tags fit within YouTube's 500-char limit."""
         prohibited_generic = {"misterio", "historia", "documental", "real", "2025", "video viral"}
@@ -792,7 +848,18 @@ IMPORTANTE: Responde SOLO con el objeto JSON, sin markdown, sin texto adicional.
 
         # ── Antiban: quitar sufijos clickbait (REAL) también en fallback ──
         title = _strip_clickbait_suffix(title)
-        title = truncate_title_at_word(title, self.title_max_chars)
+        # ── Fase 2: completo o re-elección (nunca un corte a medias) ──
+        from pipeline.title_tokens import is_complete_title as _is_complete_title
+        if len(title) > self.title_max_chars or not _is_complete_title(title)[0]:
+            _cands = (engine_result or {}).get("candidates", []) or []
+            repick = self._pick_complete_title(
+                [str(c.get("title", "")) for c in _cands if isinstance(c, dict)]
+                + self._fallback_titles(script),
+                self.title_max_chars,
+            )
+            if repick:
+                title = repick
+        title = self._ensure_complete_title(title, script)
 
         # ── Unique keyword selection per video ─────────────────────
         # Even in fallback, avoid using the same static keyword set
@@ -948,12 +1015,17 @@ Mantén MISMA longitud. NO uses las mismas power words."""
                     # Enforce power words on the new title
                     alt_title = enforce_power_words(
                         alt_title, power_words, max_chars=self.title_max_chars
-                    ) if power_words else alt_title[:self.title_max_chars]
+                    ) if power_words else truncate_title_at_word(alt_title, self.title_max_chars)
                     elapsed = time.time() - start
                     logger.info(
                         "Alternative title generated in %.1fs: '%s' → '%s' (CTR %.1f%%)",
                         elapsed, title_v1[:40], alt_title[:60], ctr_v1,
                     )
+                    # Fase 2: una alternativa cortada a medias es peor que
+                    # conservar el título original.
+                    from pipeline.title_tokens import is_complete_title as _ict
+                    if not _ict(alt_title[:100])[0]:
+                        return title_v1
                     return alt_title[:100]
             
         except Exception as exc:

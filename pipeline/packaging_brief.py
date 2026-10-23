@@ -29,6 +29,17 @@ _STOPWORDS = frozenset(normalize(w) for w in (
     "entre", "desde", "hacia", "su", "sus", "al", "se", "lo", "ni",
     "pero", "porque", "cuando", "donde", "si", "no", "mas", "muy", "tan",
     "como", "the", "of", "to", "in", "and", "or", "es", "fue", "son",
+    # Fase 2 (curiosidad oscura): interrogativos y adverbios NUNCA son
+    # términos de contenido — evita salientes tipo "QUIÉN" / "CÓMO".
+    "quien", "quienes", "cual", "cuales", "cuanto", "cuanta", "cuantos",
+    "cuantas", "adonde", "cuanta", "cuando", "como", "donde",
+))
+
+# Tokens sin carga semántica propia: nunca son elegibles como término
+# saliente (prefijos navales, tratamientos, marcadores genéricos).
+_WEAK_SALIENT = frozenset(normalize(w) for w in (
+    "hms", "uss", "rms", "ss", "mv", "sr", "sra", "dr", "dra", "mr", "mrs",
+    "caso", "casos", "historia", "historias", "video", "videos",
 ))
 
 _DEFAULT_CLICHES = (
@@ -116,18 +127,43 @@ def title_terms(title: str) -> list[str]:
 
 
 def _salient_title_term(title: str, terms: list[str]) -> str:
-    """Pick the most informative title term (digit > proper noun > longest)."""
+    """Pick the most informative title term (digit > proper noun > longest).
+
+    Fase 2 (curiosidad oscura): tokens sin carga semántica (prefijos navales
+    «HMS/ USS», tratamientos, «caso/historia») NO son elegibles, y todo
+    candidato debe tener ≥4 letras salvo que contenga un dígito. Si no hay
+    ningún ancla con significado se devuelve "" — el llamador conserva el
+    texto original en vez de pintar basura ("QUIÉN", "HMS").
+    """
     if not terms:
         return ""
     words = _TOKEN_RE.findall(title or "")
     originals = {normalize(w): w for w in words}
-    with_digits = [t for t in terms if any(c.isdigit() for c in t)]
+
+    def _eligible(t: str) -> bool:
+        return t not in _WEAK_SALIENT and (len(t) >= 4 or any(c.isdigit() for c in t))
+
+    candidates = [t for t in terms if _eligible(t)]
+    if not candidates:
+        return ""
+    with_digits = [t for t in candidates if any(c.isdigit() for c in t)]
     if with_digits:
         return originals.get(with_digits[0], with_digits[0])
-    proper = [t for t in terms if originals.get(t, "").strip("¿?¡!.,;:()«»\"'")[:1].isupper()]
+    proper = [t for t in candidates if originals.get(t, "").strip("¿?¡!.,;:()«»\"'")[:1].isupper()]
     if proper:
         return originals.get(proper[0], proper[0])
-    return originals.get(max(terms, key=len), max(terms, key=len))
+    return originals.get(max(candidates, key=len), max(candidates, key=len))
+
+
+def salient_subject(title: str) -> str:
+    """Mejor ancla de sujeto derivada del título ("" si no hay ninguna).
+
+    Punto público usado por metadata (subject_noun del overlay) y por el
+    brainstorm de miniaturas (fallback de ``primary_subject``) para que la
+    imagen y el texto nunca deriven hacia un concepto genérico.
+    """
+    terms = title_terms(title)
+    return _salient_title_term(title, terms)
 
 
 def split_overlay_text(text: str) -> tuple[str, str]:
@@ -186,14 +222,38 @@ def build_overlay_spec(
     terms = title_terms(title)
     l1_tokens = set(_tokens(l1))
     if terms and not (l1_tokens & set(terms)):
-        salient = _salient_title_term(title, terms)
-        if salient:
-            l1 = _truncate_words(salient.upper(), budgets["l1"])
+        # L1 no ancla al título. Sustitución en cascada (Fase 2):
+        # 1) palabras del subject_noun que SÍ aparecen en el título (ancla
+        #    al tema, no al brief genérico);
+        # 2) el término saliente de calidad (nunca "QUIÉN"/"HMS");
+        # 3) conservar el L1 original — mejor el gancho del LLM que basura.
+        anchor = ""
+        sn_words = [w for w in str(subject_noun or "").split()
+                    if normalize(w) in set(terms)]
+        if sn_words:
+            anchor = " ".join(sn_words[:2])
+        if not anchor:
+            anchor = _salient_title_term(title, terms)
+        if anchor:
+            l1 = _truncate_words(anchor.upper(), budgets["l1"])
 
-    # L2 must add information: drop title/L1 tokens from it.
-    banned_for_l2 = set(terms) | set(_tokens(l1))
-    l2_words = [w for w in l2.split() if normalize(w) not in banned_for_l2]
-    l2 = " ".join(l2_words).strip()
+    # L2 debe añadir información. Fase 2: la decisión es SOBRE LA FRASE
+    # COMPLETA — nunca poda token a token (dejaba restos gramaticales tipo
+    # "LA CALLÓ" / "LOS"). Solo se vacía cuando es una casi-copia del título
+    # o de L1 (solape de contenido > 60 %); compartir alguna palabra con el
+    # título es lícito y la frase se conserva íntegra.
+    if l2:
+        banned_for_l2 = set(terms) | set(_tokens(l1))
+        content_l2 = [t for t in _tokens(l2) if t not in _STOPWORDS]
+        overlap = (
+            sum(1 for t in content_l2 if t in banned_for_l2) / len(content_l2)
+            if content_l2 else 0.0
+        )
+        norm_l2 = normalize(l2)
+        if (norm_l2 and norm_l2 in normalize(title)) \
+                or (norm_l2 and norm_l2 == normalize(l1)) \
+                or overlap > 0.6:
+            l2 = ""
 
     if not emphasis:
         joined = _tokens(f"{l1} {l2}")
