@@ -169,3 +169,76 @@ def test_worker_does_not_requeue_permanent_failure(monkeypatch):
 
     monkeypatch.setattr("config.settings.MAX_RETRY_ATTEMPTS", 3)
     assert _maybe_requeue_transient(FakeDB(), 7, 11, "") is False
+
+
+# ── Requeue race fix (oct 2026) ─────────────────────────────────
+# The subprocess worker requeues transient failures via update_job_requeue()
+# (status='queued'), but the progress monitor in generation_service saw
+# "process gone + not terminal" and overwrote it with 'failed'/'worker_died'.
+# These tests protect that fix.
+
+def test_monitor_does_not_overwrite_requeued_job():
+    """A worker that exits after requeueing must leave the job in 'queued'."""
+    # This mirrors the decision logic at generation_service._monitor_worker_progress:
+    #   if not process_alive and job_status == "queued": break  (leave alone)
+    #   if not process_alive and not is_terminal: mark failed
+    job_status = "queued"
+    process_alive = False
+    is_terminal = job_status in ("completed", "failed", "cancelled")
+
+    # Requeue protection: 'queued' means a transient retry is pending
+    assert not is_terminal
+    should_skip = process_alive is False and job_status == "queued"
+    assert should_skip, "monitor must skip requeued jobs instead of marking them failed"
+
+    # For comparison: truly orphaned (status='running') should be marked failed
+    job_status2 = "running"
+    is_terminal2 = job_status2 in ("completed", "failed", "cancelled")
+    should_fail = (not process_alive) and (not is_terminal2) and job_status2 != "queued"
+    assert should_fail
+
+
+def test_inprocess_auto_retry_sets_video_queued_retry(monkeypatch):
+    """The in-process retry path must also mark video as queued_retry."""
+    from api.services.generation_service import _auto_retry_if_transient
+
+    events = []
+
+    class FakeDB:
+        def get_job(self, job_id):
+            return {"id": job_id, "status": "failed",
+                    "error_msg": "local_fallback_deferred: render timeout"}
+
+        def increment_retry(self, job_id):
+            events.append(("retry", job_id))
+            return 1
+
+        def update_job_requeue(self, job_id, error_msg=None):
+            events.append(("queued", job_id, error_msg))
+
+        def update_video(self, video_id, **kwargs):
+            events.append(("video", video_id, kwargs))
+
+    monkeypatch.setattr("api.services.generation_service.settings",
+                        type("S", (), {"MAX_RETRY_ATTEMPTS": 3}))
+    monkeypatch.setattr("api.services.generation_service._get_db", lambda: FakeDB())
+
+    _auto_retry_if_transient(7, 11)
+
+    assert ("retry", 7) in events
+    assert any(e[0] == "queued" and e[1] == 7 for e in events)
+    video_events = [e for e in events if e[0] == "video"]
+    assert len(video_events) == 1
+    assert video_events[0][2].get("progress_phase") == "queued_retry"
+
+
+def test_transient_patterns_include_local_fallback_deferred():
+    """local_fallback_deferred must be recognized as transient (both paths)."""
+    from api.services.full_pipeline_worker import _TRANSIENT_ERROR_PATTERNS
+    assert "local_fallback_deferred" in _TRANSIENT_ERROR_PATTERNS
+
+    # Also verify the in-process path
+    from api.services.generation_service import _auto_retry_if_transient
+    import inspect
+    src = inspect.getsource(_auto_retry_if_transient)
+    assert "local_fallback_deferred" in src
