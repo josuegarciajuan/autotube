@@ -4875,6 +4875,21 @@ def _dispatch_standalone_short(channel_id: int, channel_slug: str,
             logger.warning("[standalone] No safe topics found for %s", channel_slug)
             return None
 
+        # ── Fase 4: el standalone tiene elección editorial propia ──
+        # Ordena los temas seguros por señal de tensión del canal. Sort estable:
+        # si ningún tema tiene señal, se conserva el orden del descubrimiento.
+        try:
+            from config.config_bridge import get_channel_config as _gcc_rank
+            from pipeline.editorial_policy import editorial_score as _ed_score
+            _rank_cfg = _gcc_rank(channel_slug)
+            safe_topics.sort(
+                key=lambda t: _ed_score(
+                    f"{t.get('title', '')} {t.get('tema', '')}", _rank_cfg),
+                reverse=True,
+            )
+        except Exception as _rk_exc:  # noqa: BLE001
+            logger.debug("[standalone] editorial ranking skipped: %s", _rk_exc)
+
         # Un tema puede fallar en guion/TTS/render; probar como máximo dos
         # temas seguros antes de rendir el slot. Antes se rendía al primero y
         # dos fallos seguidos disparaban standalone_short_failed sin causa útil.

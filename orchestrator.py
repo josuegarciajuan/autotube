@@ -94,6 +94,7 @@ class PipelineOrchestrator:
         # Fase 2 (search-first): candidatos de tema por demanda de búsqueda,
         # recolectados al inicio de la generación del guion.
         self._demand_candidates: list = []
+        self._last_ranking: list = []  # Fase 4: desglose del último ranking
 
         # Load config via bridge (DB-aware) or fall back to Python module
         if canal not in CHANNEL_CONFIGS:
@@ -614,14 +615,20 @@ class PipelineOrchestrator:
             self._record_selection_provenance(_res, route="marathon")
             return _res
 
-        content_items = self.db.get_unused_content(canal=self.canal, limit=5)
+        # ── Fase 4: pool más amplio para que el ranking tenga con qué elegir ──
+        try:
+            _pool = max(5, min(30, int(getattr(
+                self.config, "TOPIC_RANKING_POOL_SIZE", 12) or 12)))
+        except (TypeError, ValueError):
+            _pool = 12
+        content_items = self.db.get_unused_content(canal=self.canal, limit=_pool)
         if not content_items:
             # Fallback por demanda de búsqueda (Fase 2, 0 cuota): cubre el caso de
             # scrapers externos bloqueados (Reddit 403/429, Atlas Obscura 403,
             # Quora 0) sin dejar el canal seco. Los candidatos están sesgados al
             # nicho por construcción (seeds + autocomplete), así que pasan el
             # niche-guard. (Fix oct 2026: canales "secos" → publish_coverage_dry.)
-            content_items = self._demand_items_as_content(limit=5)
+            content_items = self._demand_items_as_content(limit=_pool)
             if content_items:
                 logger.warning(
                     "[%s] Sin fuentes scrapeadas — usando %d candidato(s) de "
@@ -632,41 +639,44 @@ class PipelineOrchestrator:
                                  "No unused content")
             return None
 
-        # ── T1.3 + Fase 2: ordenar candidatos por DEMANDA real ──
-        # Es un ranking compuesto, no un bloqueo: combina la demanda del propio
-        # tema (autocomplete YouTube) con el solapamiento con las consultas
-        # semilla de la Fase 2. Si la red falla se conserva el orden original
-        # (fail-open). Evita guionar sobre temas que nadie busca.
+        # ── Fase 4: ranking multi-señal (orden, nunca bloqueo) ──
+        # Combina demanda real (autocomplete), afinidad de nicho, señal
+        # editorial (tensión narrativa), potencial visual, novedad frente a
+        # temas recientes y calidad de fuente. Si algo falla se conserva el
+        # orden original (fail-open). Los gates (nicho, safety, factual) se
+        # aplican aparte: esto solo decide el orden.
+        self._last_ranking = []
         try:
             from pipeline.topic_demand import rank_labels
-            from pipeline.topic_dedup import topic_tokens
-            _labels = [
-                (ci.get("title") or ci.get("text") or "")[:120]
-                for ci in content_items
-            ]
-            _demand = {lbl: sc for lbl, sc in rank_labels(_labels)}
-            _seed_tokens: set = set()
-            for _c in (getattr(self, "_demand_candidates", []) or []):
-                _seed_tokens |= topic_tokens(_c.get("query", ""))
+            from pipeline.topic_ranking import is_disabled, rank_candidates
 
-            def _composite(ci):
-                lbl = (ci.get("title") or ci.get("text") or "")[:120]
-                demand = _demand.get(lbl, 0.5)
-                overlap = 0.0
-                if _seed_tokens:
-                    toks = topic_tokens(
-                        f"{ci.get('title') or ''} {ci.get('text') or ''}"[:200]
-                    )
-                    if toks:
-                        overlap = len(_seed_tokens & toks) / max(
-                            1, min(len(_seed_tokens), len(toks))
-                        )
-                return 0.75 * demand + 0.25 * overlap
-
-            content_items.sort(key=_composite, reverse=True)
+            if not is_disabled(self.db, self.config):
+                _labels = [
+                    (ci.get("title") or ci.get("text") or "")[:120]
+                    for ci in content_items
+                ]
+                _demand = {lbl: sc for lbl, sc in rank_labels(_labels)}
+                _ranked = rank_candidates(
+                    content_items,
+                    cfg=self.config,
+                    demand_scores=_demand,
+                    recent_texts=self._recent_topic_texts(),
+                    day_key=self._ranking_day_key(),
+                    channel_slug=self.canal,
+                    route="original",
+                )
+                self._last_ranking = _ranked
+                content_items = [r.source_item for r in _ranked]
+                logger.info(
+                    "[%s] ranking: %s",
+                    self.canal,
+                    " | ".join(
+                        f"{r.label[:42]}={r.score:.2f}" for r in _ranked[:3]
+                    ),
+                )
         except Exception as _dm_exc:  # noqa: BLE001
             logger.warning(
-                f"[{self.canal}] demand ranking error (fail-open): {_dm_exc}"
+                f"[{self.canal}] topic ranking error (fail-open): {_dm_exc}"
             )
 
         # ── W4: guardia de nicho — prioriza fuentes del nicho del canal ──
@@ -687,7 +697,7 @@ class PipelineOrchestrator:
                 # si las fuentes scrapeadas eran todas fuera de nicho pero hay
                 # demanda on-niche persistida, es preferible guionar por ella que
                 # dejar el canal seco.
-                _demand_items = self._demand_items_as_content(limit=5)
+                _demand_items = self._demand_items_as_content(limit=_pool)
                 if _demand_items:
                     content_items, _ = filter_on_niche(
                         _demand_items,
@@ -872,8 +882,30 @@ class PipelineOrchestrator:
             self._record_selection_provenance(result, route="original")
         return result
 
+    def _ranking_day_key(self) -> str:
+        """Día natural de Madrid (YYYY-MM-DD) para la asignación piloto/control."""
+        try:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            return datetime.now(ZoneInfo("Europe/Madrid")).date().isoformat()
+        except Exception:  # noqa: BLE001
+            from datetime import date
+            return date.today().isoformat()
+
+    def _recent_topic_texts(self) -> list[str]:
+        """Títulos recientes del canal para novedad/diversidad (Fase 4)."""
+        try:
+            cid = self._get_channel_id()
+            if cid is None:
+                return []
+            limit = int(getattr(self.config, "TOPIC_RANKING_RECENT_WINDOW", 20) or 20)
+            return self.db.get_recent_topic_titles(cid, limit=max(1, min(50, limit)))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[%s] recent topics unavailable: %s", self.canal, exc)
+            return []
+
     def _record_selection_provenance(self, result, route: str) -> None:
-        """F3: registra por qué se eligió el tema (auditable, fail-open)."""
+        """F3/F4: registra por qué se eligió el tema (auditable, fail-open)."""
         if not result or self.db is None:
             return
         try:
@@ -906,12 +938,59 @@ class PipelineOrchestrator:
             except Exception:  # noqa: BLE001
                 pass
 
+            # Fase 4: desglose del ranking que eligió este tema (si existe).
+            ranked = None
+            try:
+                from pipeline.topic_dedup import topic_tokens as _tt
+                t_tokens = _tt(topic) if topic else set()
+                for cand in (getattr(self, "_last_ranking", None) or []):
+                    c_tokens = _tt(cand.label or "")
+                    if t_tokens and len(t_tokens & c_tokens) >= 2:
+                        ranked = cand
+                        break
+                if ranked is None and (getattr(self, "_last_ranking", None) or []):
+                    ranked = self._last_ranking[0]
+            except Exception:  # noqa: BLE001
+                ranked = None
+
+            signals_json = ""
+            editorial_label = ""
+            pilot_group = ""
+            rank_reason = ""
+            novelty_ok = True
+            if ranked is not None:
+                import json as _json
+                signals_json = _json.dumps(ranked.signals, ensure_ascii=False)
+                editorial_label = ranked.editorial_label or ""
+                pilot_group = ranked.pilot_group or ""
+                rank_reason = ranked.reason or ""
+                novelty_ok = float(ranked.signals.get("novelty", 1.0)) >= 0.5
+            elif topic:
+                # Rutas sin pool ordenado (maratón, viral explícito): se
+                # etiqueta igual el tema para que la Fase 6 pueda medirlo.
+                import json as _json
+                from pipeline.editorial_policy import (
+                    editorial_label as _ed_label,
+                    editorial_score as _ed_score,
+                    pilot_decision as _pilot,
+                )
+                _score = _ed_score(topic, self.config)
+                signals_json = _json.dumps({"editorial": _score}, ensure_ascii=False)
+                editorial_label = _ed_label(topic, self.config)
+                pilot_group = _pilot(self.canal, self._ranking_day_key(), self.config)
+                rank_reason = f"rank=n/a; editorial={_score:.2f}"
+
             self.db.record_selection_provenance(
                 channel_id=cid, entity_type="script", entity_id=result.get("id"),
                 route=route, topic=topic, demand_query=best_q,
                 source="autocomplete", demand_score=best_score, niche_fit=niche,
-                reason=f"ruta={route}; demanda={'sí' if best_q else 'no'}; "
-                       f"nicho={niche:.2f}",
+                novelty_ok=novelty_ok,
+                reason=(f"ruta={route}; demanda={'sí' if best_q else 'no'}; "
+                        f"nicho={niche:.2f}"
+                        + (f"; {rank_reason}" if rank_reason else ""))[:500],
+                signals_json=signals_json,
+                editorial_label=editorial_label,
+                pilot_group=pilot_group,
             )
             if best_q and cid:
                 self.db.mark_topic_demand_used(cid, best_q)
@@ -1012,6 +1091,46 @@ class PipelineOrchestrator:
             result["id"] = db_id
         return result
 
+    def _pick_viral_candidate(self, candidates: list[dict]) -> dict | None:
+        """Elige candidato viral con bonus editorial ACOTADO (Fase 4).
+
+        Solo puede reordenar candidatos cuyo ``viral_score`` está dentro del
+        50 % del mejor: la señal viral sigue mandando. Además deja el
+        desglose en ``self._last_ranking`` para la trazabilidad.
+        Fail-open: ante cualquier error devuelve el primero.
+        """
+        if not candidates:
+            return None
+        try:
+            from pipeline.editorial_policy import editorial_score
+            w = min(0.25, max(0.0, float(getattr(
+                self.config, "EDITORIAL_CURIOSITY_WEIGHT", 0.25))))
+            top = max(float(c.get("viral_score") or 0) for c in candidates) or 1.0
+
+            def _effective(c: dict) -> float:
+                base = float(c.get("viral_score") or 0)
+                if base < 0.5 * top:
+                    return base
+                text = f"{c.get('viral_original_title') or ''} {c.get('title') or ''}"
+                return base * (1.0 + w * editorial_score(text, self.config))
+
+            chosen = max(candidates, key=_effective)
+            try:
+                from pipeline.topic_ranking import rank_candidates
+                self._last_ranking = rank_candidates(
+                    [chosen],
+                    cfg=self.config,
+                    recent_texts=self._recent_topic_texts(),
+                    day_key=self._ranking_day_key(),
+                    channel_slug=self.canal,
+                    route="viral",
+                )
+            except Exception:  # noqa: BLE001
+                self._last_ranking = []
+            return chosen
+        except Exception:  # noqa: BLE001
+            return candidates[0]
+
     def _phase_generate_script_viral(self, start: float) -> Optional[dict]:
         """Generate script from a viral mirror candidate — two-phase approach.
 
@@ -1042,9 +1161,9 @@ class PipelineOrchestrator:
 
         # A2 — Fast path: check DB for unused candidates
         if not viral_content:
-            candidates = self.db.get_viral_candidates(self.canal, limit=3)
+            candidates = self.db.get_viral_candidates(self.canal, limit=6)
             if candidates:
-                viral_content = candidates[0]
+                viral_content = self._pick_viral_candidate(candidates)
                 self.viral_candidate_id = viral_content["id"]
                 logger.info("[%s] Fast path: DB candidate #%d '%s' (score=%.1f, views=%d)",
                             self.canal, viral_content["id"],
@@ -1285,10 +1404,36 @@ class PipelineOrchestrator:
         self.source_mode = "original"
         self._emit_progress(15, "script",
                             "⚠ Sin candidatos virales — generando guion original con IA...")
-        content_items = self.db.get_unused_content(canal=self.canal, limit=5)
+        # ── Fase 4: el fallback viral→original también ordena por señales ──
+        try:
+            _pool = max(5, min(30, int(getattr(
+                self.config, "TOPIC_RANKING_POOL_SIZE", 12) or 12)))
+        except (TypeError, ValueError):
+            _pool = 12
+        content_items = self.db.get_unused_content(canal=self.canal, limit=_pool)
         if not content_items:
             logger.error("[%s] No original content available either — pipeline cannot continue", self.canal)
             return None
+        try:
+            from pipeline.topic_demand import rank_labels
+            from pipeline.topic_ranking import is_disabled, rank_candidates
+            if not is_disabled(self.db, self.config):
+                _labels = [(ci.get("title") or ci.get("text") or "")[:120]
+                           for ci in content_items]
+                _ranked = rank_candidates(
+                    content_items,
+                    cfg=self.config,
+                    demand_scores={lbl: sc for lbl, sc in rank_labels(_labels)},
+                    recent_texts=self._recent_topic_texts(),
+                    day_key=self._ranking_day_key(),
+                    channel_slug=self.canal,
+                    route="viral_fallback",
+                )
+                self._last_ranking = _ranked
+                content_items = [r.source_item for r in _ranked]
+        except Exception as _rk_exc:  # noqa: BLE001
+            logger.warning("[%s] viral_fallback ranking error (fail-open): %s",
+                           self.canal, _rk_exc)
         return self.script_gen.generate(content_items[0])
 
     def _phase_generate_script_marathon(self, start: float) -> Optional[dict]:
