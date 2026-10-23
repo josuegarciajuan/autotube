@@ -13,29 +13,109 @@ Dos modos, combinables:
    ``--min-age-hours``.
 
 Seguridad:
-  * nunca borra material de vídeos/shorts NO subidos,
-  * nunca borra assets compartidos que otra entidad pendiente referencia,
-  * nunca borra archivos en ``media_file_locks`` ni de vídeos en ``error``
-    recientes (reensamblado),
-  * nunca borra thumbnails ni SRT/timestamps principal.
+   * nunca borra material de vídeos/shorts NO subidos,
+   * nunca borra assets compartidos que otra entidad pendiente referencia,
+   * nunca borra archivos en ``media_file_locks`` ni de vídeos en ``error``
+     recientes (reensamblado),
+   * nunca borra thumbnails ni SRT/timestamps principal,
+   * ``--read-only``: dry-run estricto — abre la BD en modo ``mode=ro`` (URI
+     SQLite) y NO escribe ni una sola vez (ni PRAGMAs WAL/optimize); la
+     purga por entidad se omite. Úsalo contra producción para inspeccionar.
 
 Uso:
   python3 scripts/cleanup_residuals_batch.py                  # dry-run de todo
   python3 scripts/cleanup_residuals_batch.py --orphans        # dry-run huérfanos
   python3 scripts/cleanup_residuals_batch.py --entity-videos  # dry-run long-forms
+  python3 scripts/cleanup_residuals_batch.py --read-only --orphans --json-out /tmp/m.json
   python3 scripts/cleanup_residuals_batch.py --execute --orphans --category audio
   python3 scripts/cleanup_residuals_batch.py --execute --json-out /tmp/manifest.json
 """
 
 import argparse
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from config import settings as _settings  # noqa: E402
 from database.db_extended import ExtendedDatabase  # noqa: E402
 from pipeline import media_retention as mr  # noqa: E402
+
+
+class ReadOnlyDB:
+    """Read-only stand-in of ExtendedDatabase for zero-write dry-runs.
+
+    Every connection is opened via ``sqlite3.connect('file:...?mode=ro',
+    uri=True)``: no data writes and no persistent PRAGMAs (no WAL/optimize
+    connection side effects either — the DB file must stay untouched).
+    Implements exactly the surface media_retention uses for classify/plan +
+    entity-purge dry-run (all reads).
+    """
+
+    def __init__(self, db_path: str):
+        self.db_path = str(db_path)
+
+    def _connect(self):
+        conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    # ── surface used by pipeline.media_retention ──
+    def get_video(self, video_id):
+        row = self._connect().execute(
+            "SELECT * FROM videos WHERE id=?", (video_id,)).fetchone()
+        return dict(row) if row else None
+
+    def get_scenes(self, video_id):
+        return [dict(r) for r in self._connect().execute(
+            "SELECT * FROM video_scenes WHERE video_id=?", (video_id,))]
+
+    def get_short(self, short_id):
+        row = self._connect().execute(
+            "SELECT * FROM shorts WHERE id=?", (short_id,)).fetchone()
+        return dict(row) if row else None
+
+    def get_locked_file_paths(self):
+        try:
+            rows = self._connect().execute(
+                "SELECT DISTINCT ml.file_path FROM media_file_locks ml "
+                "JOIN generation_jobs gj ON ml.job_id = gj.id "
+                "WHERE gj.status IN ('running', 'queued')").fetchall()
+            return {row[0] for row in rows}
+        except sqlite3.Error:
+            return set()
+
+    def get_error_video_media_paths(self, max_age_hours: int = 48):
+        # Faithful read-only mirror of ExtendedDatabase.get_error_video_media
+        # _paths (same SQL + checkpoint media.assets parsing) so the dry-run
+        # locked set matches what --execute would use.
+        paths: set = set()
+        try:
+            rows = self._connect().execute(
+                """SELECT id, checkpoint_data
+                   FROM videos
+                   WHERE status = 'error'
+                     AND created_at > datetime('now', ?)
+                   ORDER BY id DESC
+                   LIMIT 100""",
+                (f'-{max_age_hours} hours',),
+            ).fetchall()
+        except sqlite3.Error:
+            return paths
+        for row in rows:
+            cp_raw = row["checkpoint_data"] or "{}"
+            try:
+                cp = json.loads(cp_raw) if isinstance(cp_raw, str) else (cp_raw or {})
+            except (ValueError, TypeError):
+                continue
+            media = cp.get("media") or {}
+            for a in media.get("assets", []) or []:
+                p = a.get("path")
+                if p:
+                    paths.add(str(p))
+        return paths
 
 
 def format_size(bytes_val: float) -> str:
@@ -102,14 +182,26 @@ def main() -> int:
                     help="Guard de antigüedad para huérfanos (def: 24h)")
     ap.add_argument("--json-out", type=str, default=None,
                     help="Escribir manifiesto JSON")
+    ap.add_argument("--read-only", action="store_true",
+                    help="Dry-run estricto: BD abierta con sqlite mode=ro (cero "
+                         "escrituras, ni PRAGMAs). Incompatible con --execute.")
     args = ap.parse_args()
+
+    if args.read_only and args.execute:
+        print("ERROR: --read-only es incompatible con --execute", file=sys.stderr)
+        return 2
 
     # Si no se elige modo, hacer todo.
     if not (args.entity_videos or args.entity_shorts or args.orphans):
         args.entity_videos = args.entity_shorts = args.orphans = True
 
     dry_run = not args.execute
-    db = ExtendedDatabase()
+    if args.read_only:
+        db = ReadOnlyDB(_settings.DATABASE_PATH)
+        print(f"READ-ONLY: BD en mode=ro ({_settings.DATABASE_PATH}) — "
+              f"cero escrituras garantizadas")
+    else:
+        db = ExtendedDatabase()
 
     print("=" * 64)
     print(f"  MEDIA RECLAMATION — {'DRY RUN (sin borrar)' if dry_run else 'EXECUTE'}")
@@ -157,10 +249,20 @@ def main() -> int:
               f"{args.category or 'todas'})")
         plan = mr.classify_reclaim(db, args.category, args.min_age_hours)
         for cat, info in plan["categories"].items():
+            extra = ""
+            if "dirs_total" in info:
+                extra = f" dirs={info['dirs_reclaim']}/{info['dirs_total']}"
             print(f"   {cat:24s} total={format_size(info['bytes']):>10s} "
                   f"reclaim={format_size(info['reclaim_bytes']):>10s} "
-                  f"({info['reclaim_files']}/{info['files']} files)")
+                  f"({info['reclaim_files']}/{info['files']} files){extra}")
+        stale = plan.get("stale_pending_entities")
+        if stale:
+            print(f"── stale_pending_entities (REPORT-ONLY, sin borrar): "
+                  f"{stale['entities_total']} filas muertas/stale | "
+                  f"{format_size(stale['reclaimable_if_reconciled_bytes'])} "
+                  f"reclaimables si se reconcilian en BD")
         manifest["orphans_classify"] = plan
+        manifest["stale_pending_entities"] = stale
         if dry_run:
             sweep_paths = mr.plan_reclaim_paths(db, args.category, args.min_age_hours)
             manifest["orphans_planned"] = {
