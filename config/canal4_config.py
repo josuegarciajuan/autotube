@@ -588,3 +588,26 @@ EDITORIAL_RECOVERY_REVIEW = {
     "blocked_terms": ["cómo fabricar", "guía para suicidarse"],
     "required_title_keywords": [],
 }
+
+# ── Modelo editorial «curiosidad oscura» (Fase 3) ─────────────────────
+# Expediciones sin retorno: puntos de no retorno, aislamiento y
+# supervivencia extrema. El giro se aplica DENTRO del nicho de expedición.
+EDITORIAL_CURIOSITY_ENABLED = True
+EDITORIAL_CURIOSITY_PILOT_SHARE = 0.5
+EDITORIAL_CURIOSITY_WEIGHT = 0.25
+EDITORIAL_TENSION_WEIGHTS = {
+    "peligro": 1.0,
+    "supervivencia": 1.0,
+    "muerte": 0.9,
+    "colapso": 0.6,
+    "misterio_sin_resolver": 0.6,
+    "anomalia": 0.5,
+}
+# Semillas del giro (se suman a las SEO de la Fase 4; no las sustituyen).
+EDITORIAL_TENSION_SEEDS = [
+    "expediciones que terminaron en tragedia",
+    "nadie sobrevivio a la expedicion",
+    "supervivientes de expediciones extremas",
+    "la ultima expedicion sin retorno",
+    "atrapados sin salida en la montana",
+]

@@ -992,3 +992,26 @@ NICHE_KEYWORDS_ENG = [
     "paranormal true stories", "things science can't explain",
     "destiny or coincidence", "real angel encounters",
 ]
+
+# ── Modelo editorial «curiosidad oscura» (Fase 3) ─────────────────────
+# Sincronías: coincidencias inquietantes, decisiones que cambian destinos
+# y experiencias extrañas documentadas. El giro se aplica DENTRO del nicho.
+EDITORIAL_CURIOSITY_ENABLED = True
+EDITORIAL_CURIOSITY_PILOT_SHARE = 0.5
+EDITORIAL_CURIOSITY_WEIGHT = 0.25
+EDITORIAL_TENSION_WEIGHTS = {
+    "anomalia": 1.0,
+    "misterio_sin_resolver": 0.9,
+    "peligro": 0.7,
+    "supervivencia": 0.7,
+    "muerte": 0.6,
+    "colapso": 0.4,
+}
+# Semillas del giro (se suman a las SEO de la Fase 4; no las sustituyen).
+EDITORIAL_TENSION_SEEDS = [
+    "coincidencias imposibles",
+    "premoniciones que se cumplieron",
+    "decisiones que cambiaron el destino",
+    "desapariciones inexplicables",
+    "casos de sincronicidad reales",
+]
