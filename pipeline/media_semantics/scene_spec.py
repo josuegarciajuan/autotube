@@ -76,7 +76,21 @@ def build_scene_spec(
     environment = str(getattr(scene_ctx, "setting", "") or "").strip()
     visual_concept = str(getattr(scene_ctx, "visual_concept", "") or "").strip()
 
-    # Deterministic fallbacks: never invent facts, use the scene's own query.
+    # Deterministic fallbacks: never invent facts.  For a sub-scene with an
+    # inherited parent query we derive the observable action from the FINAL
+    # narration fragment, so two sub-scenes of one block cannot share the
+    # exact same intent/query (P01-B/P01-C).
+    is_subscene = bool(scene.get("is_subscene"))
+    if not action and fragment:
+        try:
+            from pipeline.scene_context import derive_scene_intent
+
+            local = derive_scene_intent({"fragment_text": fragment})
+            action = str(local.get("action") or "").strip()
+            if is_subscene and not subject:
+                subject = str(local.get("subject") or "").strip()
+        except Exception:
+            pass
     if not subject:
         subject = str(scene.get("search_query_en", "") or "").strip()
     if not environment:
@@ -125,6 +139,7 @@ def build_scene_spec(
         scene_idx=int(scene_idx),
         block_idx=_block_idx(scene),
         parent_scene_idx=parent_scene_idx,
+        media_request_id=str(scene.get("media_request_id", "") or ""),
         origin=_origin(scene),
         narration_fragment=fragment,
         subject=subject,
@@ -179,11 +194,15 @@ def attach_scene_specs(
         if spec.origin == "subscene" and spec.parent_scene_idx is None:
             # The parent block is identified by asset_idx (the original block).
             spec.parent_scene_idx = spec.block_idx
-        scene["scene_spec"] = spec
+        # Store the JSON-safe form: the same scene ranges are persisted in the
+        # media checkpoint (json.dumps), so a dataclass instance would break
+        # resume.  `_scene_spec_for` accepts both dicts and SceneSpec objects.
+        scene["scene_spec"] = spec.to_dict()
         scene["scene_idx"] = index
         scene["final_scene_idx"] = index
         scene.setdefault("block_idx", spec.block_idx)
         scene.setdefault("parent_scene_idx", spec.parent_scene_idx)
+        scene.setdefault("media_request_id", spec.media_request_id)
         scene.setdefault("narration_fragment", spec.narration_fragment)
         specs.append(spec)
     return specs

@@ -104,6 +104,7 @@ class SceneSpec:
     scene_idx: int = 0
     block_idx: int | None = None
     parent_scene_idx: int | None = None
+    media_request_id: str = ""
     origin: str = "block"  # block | subscene | merged
     narration_fragment: str = ""
     subject: str = ""
@@ -135,6 +136,7 @@ class SceneSpec:
             "scene_idx": int(self.scene_idx),
             "block_idx": self.block_idx,
             "parent_scene_idx": self.parent_scene_idx,
+            "media_request_id": self.media_request_id,
             "origin": self.origin,
             "narration_fragment": self.narration_fragment,
             "subject": self.subject,
@@ -160,8 +162,8 @@ class SceneSpec:
     def from_dict(cls, data: dict[str, Any]) -> "SceneSpec":
         data = data or {}
         known = {
-            "scene_idx", "block_idx", "parent_scene_idx", "origin",
-            "narration_fragment", "subject", "action", "environment", "era",
+            "scene_idx", "block_idx", "parent_scene_idx", "media_request_id",
+            "origin", "narration_fragment", "subject", "action", "environment", "era",
             "desired_shot", "visual_concept", "mood_style", "must_include",
             "must_avoid", "previous_context", "next_context", "duration",
             "media_type", "depiction_mode", "source", "confidence", "extra",
@@ -318,9 +320,19 @@ class Candidate:
 
     @property
     def has_metadata(self) -> bool:
-        return self.metadata_status != MetadataStatus.NO_METADATA and bool(self.searchable_text)
+        status = (
+            self.metadata_status.value
+            if isinstance(self.metadata_status, MetadataStatus)
+            else str(self.metadata_status or "")
+        )
+        return status != MetadataStatus.NO_METADATA.value and bool(self.searchable_text)
 
     def to_dict(self) -> dict[str, Any]:
+        status = (
+            self.metadata_status.value
+            if isinstance(self.metadata_status, MetadataStatus)
+            else str(self.metadata_status or MetadataStatus.NO_METADATA.value)
+        )
         return {
             "provider": self.provider,
             "provider_asset_id": self.provider_asset_id,
@@ -343,7 +355,7 @@ class Candidate:
             "provider_rank": self.provider_rank,
             "page": self.page,
             "media_type": self.media_type,
-            "metadata_status": self.metadata_status.value,
+            "metadata_status": status,
             "metadata_completeness": self.metadata_completeness,
             "searchable_text": self.searchable_text,
         }

@@ -4311,6 +4311,7 @@ class MediaFetcher:
 
         scene_idx = int(scene.get("scene_idx", getattr(self, "_current_scene_idx", 0)) or 0)
         spec = self._scene_spec_for(scene, scene_idx=scene_idx)
+        scene_ctx = self._scene_context(scene, scene_idx=scene_idx)
         budget = self._semantic_config.budget
         queries = self._semantic_query_variants(spec, query_pool)
         providers, sparing_providers = self._interleaved_providers(
@@ -4422,11 +4423,21 @@ class MediaFetcher:
             except Exception:
                 return True
 
+        def pre_rank_filter(candidate) -> str | None:
+            raw = candidate.raw_candidate or candidate.to_dict()
+            try:
+                if self._is_anachronistic_for_scene(raw, ctx, scene_ctx):
+                    return "anachronism"
+            except Exception:
+                return None
+            return None
+
         decision = selector.select_and_download(
             spec,
             pool.candidates(),
             download_fn,
             threshold=self._semantic_config.min_relevance_score,
+            pre_filter=pre_rank_filter,
             pre_download_filter=pre_download_filter,
         )
         self._last_selection_decision = decision

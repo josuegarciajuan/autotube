@@ -13,7 +13,7 @@ that path with:
 2. multiple queries derived from that scene's real narration slice,
 3. a provider-independent `Candidate` with explicit metadata status,
 4. one global candidate pool across queries/providers/pages,
-5. textual + local semantic ranking with partial scores,
+5. textual ranking with an optional embedding backend and partial scores,
 6. a global top-K and a configurable relevance threshold,
 7. download only after ranking, with ordered fallback across approved candidates,
 8. a serialisable `SelectionDecision` persisted for audit and replay.
@@ -25,7 +25,7 @@ scope** for P01. The embedding backend is pluggable so P02 can add them.
 
 | Variable | Values | Default | Meaning |
 |---|---|---|---|
-| `MEDIA_SELECTOR` | `legacy`, `semantic` | `legacy` | Selector implementation |
+| `MEDIA_SELECTOR` | `legacy`, `semantic`, `shadow` | `legacy` | Selector implementation (`shadow` = legacy runtime + semantic scoring) |
 | `MEDIA_SELECTOR_SHADOW` | `true`, `false` | `false` | In legacy mode, score the pages retrieved by the legacy loop without changing the asset |
 | `P01_MIN_RELEVANCE_SCORE` | 0.0–1.0 | `0.26` | Global relevance threshold |
 | `P01_EMBEDDING_BACKEND` | `auto`, `hashing`, `sentence_transformers`, `none` | `auto` | Text embedding backend |
@@ -51,19 +51,27 @@ Channel `MEDIA_STRATEGY` equivalents:
 },
 ```
 
-The default embedding backend is deterministic **hashing** (local, no network,
-no model download). `sentence_transformers` is attempted only when explicitly
-requested and falls back silently to hashing if unavailable.
+Ranking backends are explicitly classified:
+
+| Backend | Class | Default | Notes |
+|---|---|---|---|
+| `hashing` | **HASH_VECTOR** (lexical/distributional) | yes | tokens + bigrams; deterministic; no network/model download |
+| `none` | **LEXICAL** | no | semantic component disabled; lexical/action/etc. remain |
+| `sentence_transformers` | **SEMANTIC_EMBEDDING** (optional) | no | only attempted when explicitly requested and the local model is already available; falls back to hashing |
+
+`HashingEmbeddingBackend` is **not** a transformer/neural embedding. It is a
+lightweight local similarity fallback. The optional `sentence_transformers`
+backend is the real semantic-embedding extension point for P02/P03.
 
 ## Decision lifecycle
 
 ```
 final scene
   → SceneSpec (narration fragment + visual bible/intent)
-  → query variants (subject/action/environment/era/shot/concept/simplified)
+  → query variants (subject/action/environment/era/shot/concept/narration/simplified)
   → metadata retrieval (multi-query × multi-provider × bounded pages)
   → CandidatePool (dedup + budgets, no download)
-  → SemanticTextRanker (partial scores → final 0..1)
+  → SemanticTextRanker (partial scores → final 0..1; pre-rank era veto)
   → global top-K → threshold → approved list
   → download top-N in order → validate → winner / fallback / NO_GOOD_CANDIDATE
 ```
@@ -84,7 +92,8 @@ Every semantic decision emits:
   `video_id` exists.
 
 The row stores the scene identity (`video_id`, `scene_idx`, `block_idx`,
-`parent_scene_idx`, `origin`, `narration_fragment`), the `SceneSpec`, queries,
+`parent_scene_idx`, `media_request_id`, `origin`, `narration_fragment`), the
+`SceneSpec`, queries,
 providers, bounded candidate scores, rejected candidates/reasons, winner,
 threshold, status, fallback and timing/cost. This answers: *why did this asset
 appear over this narration fragment?*
@@ -92,7 +101,8 @@ appear over this narration fragment?*
 `video_scenes` also gains nullable identity columns (`final_scene_idx`,
 `block_idx`, `parent_scene_idx`, `media_request_id`, `narration_fragment`,
 `selector_version`, `selection_status`) so existing consumers can join the
-final scene to the asset and the decision.
+final scene to the asset and the decision. The same `media_request_id` is
+persisted on `media_selection_decisions` for direct joins.
 
 ## Offline replay and benchmark
 
@@ -106,7 +116,15 @@ print(harness.summary(results))
 
 Fixtures contain `SceneSpec`, queries and normalised candidate metadata only.
 Replay never touches the network or downloads. Both the current legacy ordering
-and the semantic selector run on exactly the same candidate set.
+and the semantic selector run on exactly the same candidate set, and replay
+output is deterministic (wall-clock timing is zeroed).
+
+CLI:
+
+```bash
+python3 scripts/media_semantics_replay.py \
+  --fixture tests/fixtures/media_semantics/example.json
+```
 
 `pipeline.media_semantics.benchmark.BenchmarkCorpus` captures the same data plus
 `expected_visual_description`, `human_relevance_label` (initially `None`) and
@@ -116,7 +134,8 @@ human review. Target corpus: 20–50 real scenes.
 ## Known limitations (deferred)
 
 * No visual embeddings / frame understanding yet (P02).
-* Hashing embeddings are distributional but not a transformer-quality model.
+* The default `hashing` backend is HASH_VECTOR (lexical/distributional), not a
+  neural semantic embedding. `sentence_transformers` is optional and isolated.
 * Default weights/threshold are uncalibrated until the benchmark is labelled.
 * Shadow mode only scores pages the legacy loop already fetched (by design: no
   extra downloads). It is an approximation, not a full semantic retrieval.

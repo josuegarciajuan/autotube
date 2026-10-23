@@ -17,8 +17,22 @@ into one bounded pool, ranks globally, applies a threshold, then downloads only
 the approved top-N.
 
 Text embeddings are optional and local. The default backend is deterministic
-hashing; a sentence-transformers backend can be enabled later without changing
-the contracts. Visual embeddings are explicitly deferred to P02.
+hashing (**HASH_VECTOR**, not a neural embedding); a sentence-transformers
+backend (**SEMANTIC_EMBEDDING**) can be enabled later without changing the
+contracts. Visual embeddings are explicitly deferred to P02.
+
+## Reconciliation note (P01-R)
+
+Two independent P01 implementations existed (`pipeline/media_semantics` in main
+and `pipeline/media_selection` in a supervised worktree). This ADR keeps
+`pipeline/media_semantics` as the single canonical namespace because it is the
+integrated implementation (worker/generation-service scene identity, DB v72,
+provenance flush, docs, 37 tests). The useful supervised-worktree pieces were
+ported into it: final-fragment action derivation for sub-scenes, a
+narration-derived query variant, forbidden-term stripping, a pre-rank
+era/anachronism veto, explicit `media_request_id` mapping, deterministic
+offline replay, the replay CLI and a benchmark fixture. The parallel
+`pipeline/media_selection` namespace is not present in main.
 
 ## Consequences
 

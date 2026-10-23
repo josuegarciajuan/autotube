@@ -20,6 +20,9 @@ def _config(**overrides):
             "ai_image_primary": True,
             "ai_image_fallback": True,
             "ai_max_per_video": 1,
+            # Isolate these prompt tests from the production provider chain
+            # (Pollinations is currently retired from defaults).
+            "ai_image_providers": ["pollinations", "local_sd"],
         },
     }
     values.update(overrides)

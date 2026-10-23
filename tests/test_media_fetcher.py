@@ -169,7 +169,8 @@ class TestSecondPass:
         # v2 path: per-scene fetch (unique image per scene to satisfy dedup)
         def mock_fetch_tiers(scene, scene_idx, total_scenes, is_video_priority,
                              target_dur, ctx, ai_used, ai_max, ai_enabled,
-                             force_images=False, is_stock_image_priority=False):
+                             force_images=False, is_stock_image_priority=False,
+                             scene_tier=None):
             return (_make_image_result(path=f"/tmp/img_{scene_idx}.jpg"), 0, {})
 
         fetcher._fetch_with_ai_tiers = MagicMock(side_effect=mock_fetch_tiers)
@@ -340,7 +341,8 @@ class TestVideoForcing:
         # v2 fetch path with a distinct image per scene (dedup-safe)
         def mock_fetch_tiers(scene, scene_idx, total_scenes, is_video_priority,
                              target_dur, ctx, ai_used, ai_max, ai_enabled,
-                             force_images=False, is_stock_image_priority=False):
+                             force_images=False, is_stock_image_priority=False,
+                             scene_tier=None):
             return (_make_image_result(path=f"/tmp/img_{scene_idx}.jpg"), 0, {})
 
         mf._fetch_with_ai_tiers = MagicMock(side_effect=mock_fetch_tiers)
@@ -1314,7 +1316,8 @@ class TestVideoCoverageFase4b:
 
         def mock_fetch_tiers(scene, scene_idx, total_scenes, is_video_priority,
                              target_dur, ctx, ai_used, ai_max, ai_enabled,
-                             force_images=False, is_stock_image_priority=False):
+                             force_images=False, is_stock_image_priority=False,
+                             scene_tier=None):
             return (_make_video_result(path=f"/tmp/vid_{scene_idx}.mp4"), 0, {})
 
         fetcher._fetch_with_ai_tiers = MagicMock(side_effect=mock_fetch_tiers)

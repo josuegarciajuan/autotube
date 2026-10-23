@@ -17,7 +17,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-VALID_MODES = ("legacy", "semantic")
+VALID_MODES = ("legacy", "semantic", "shadow")
 
 
 def _cget(obj: Any, key: str, default: Any = None) -> Any:
@@ -76,10 +76,13 @@ class RankingWeights:
         data = dict(data or {})
         defaults = cls()
         return cls(
-            semantic=_as_float(data.get("semantic"), defaults.semantic),
+            semantic=_as_float(
+                data.get("semantic", data.get("semantic_similarity")),
+                defaults.semantic,
+            ),
             lexical=_as_float(data.get("lexical"), defaults.lexical),
-            action=_as_float(data.get("action"), defaults.action),
-            subject=_as_float(data.get("subject"), defaults.subject),
+            action=_as_float(data.get("action", data.get("action_match")), defaults.action),
+            subject=_as_float(data.get("subject", data.get("subject_match")), defaults.subject),
             environment=_as_float(
                 data.get("environment", data.get("environment_match")),
                 defaults.environment,
@@ -89,10 +92,12 @@ class RankingWeights:
                 data.get("metadata_quality"), defaults.metadata_quality
             ),
             provider_prior=_as_float(
-                data.get("provider_prior"), defaults.provider_prior
+                data.get("provider_prior", data.get("provider_quality")),
+                defaults.provider_prior,
             ),
             negative_constraint=_as_float(
-                data.get("negative_constraint"), defaults.negative_constraint
+                data.get("negative_constraint", data.get("negative_constraint_penalty")),
+                defaults.negative_constraint,
             ),
             no_metadata_ceiling=_as_float(
                 data.get("no_metadata_ceiling"), defaults.no_metadata_ceiling
@@ -119,24 +124,46 @@ class RetrievalBudget:
         data = dict(data or {})
         defaults = cls()
         return cls(
-            max_total=max(1, _as_int(data.get("max_total"), defaults.max_total)),
+            max_total=max(
+                1,
+                _as_int(
+                    data.get("max_total", data.get("max_candidates_total")),
+                    defaults.max_total,
+                ),
+            ),
             max_per_provider=max(
-                1, _as_int(data.get("max_per_provider"), defaults.max_per_provider)
+                1,
+                _as_int(
+                    data.get(
+                        "max_per_provider", data.get("max_candidates_per_provider")
+                    ),
+                    defaults.max_per_provider,
+                ),
             ),
             max_per_query=max(
-                1, _as_int(data.get("max_per_query"), defaults.max_per_query)
+                1,
+                _as_int(
+                    data.get("max_per_query", data.get("max_candidates_per_query")),
+                    defaults.max_per_query,
+                ),
             ),
             max_pages_per_provider=max(
                 1,
                 _as_int(
-                    data.get("max_pages_per_provider"),
+                    data.get(
+                        "max_pages_per_provider", data.get("max_pages_per_query")
+                    ),
                     defaults.max_pages_per_provider,
                 ),
             ),
             max_queries=max(1, _as_int(data.get("max_queries"), defaults.max_queries)),
             top_k=max(1, _as_int(data.get("top_k"), defaults.top_k)),
             top_n_download=max(
-                1, _as_int(data.get("top_n_download"), defaults.top_n_download)
+                1,
+                _as_int(
+                    data.get("top_n_download", data.get("max_download_candidates")),
+                    defaults.top_n_download,
+                ),
             ),
             provenance_candidate_limit=max(
                 1,
@@ -179,13 +206,18 @@ class SemanticConfig:
 
         raw_mode = env.get("MEDIA_SELECTOR", strategy.get("media_selector", "legacy"))
         mode = str(raw_mode or "legacy").strip().lower()
+        shadow_alias = mode == "shadow"
         if mode not in VALID_MODES:
+            mode = "legacy"
+        if shadow_alias:
+            # ``MEDIA_SELECTOR=shadow`` is a compatibility alias for
+            # legacy runtime + semantic shadow scoring.
             mode = "legacy"
 
         shadow_raw = env.get(
             "MEDIA_SELECTOR_SHADOW", strategy.get("media_selector_shadow", False)
         )
-        shadow = _as_bool(shadow_raw, False) and mode == "legacy"
+        shadow = (shadow_alias or _as_bool(shadow_raw, False)) and mode == "legacy"
 
         weights = RankingWeights.from_mapping(
             strategy.get("semantic_ranking_weights") or {}
