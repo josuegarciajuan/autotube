@@ -376,3 +376,79 @@ def test_watchdog_error_alert_not_resolved_when_stale():
     assert row[0] == 0, "alert must remain unresolved"
 
     conn.close()
+
+
+# ── Standalone short word-tolerance fix (oct 2026) ───────────────
+# The LLM regularly produces 107-130 word scripts (max 92). Before this fix,
+# both attempts were rejected and the whole short was abandoned. Now the
+# script is trimmed before validation.
+
+def test_trim_reduces_word_count_within_budget():
+    """trim_blocks_to_word_budget should reduce long scripts to <= max_words."""
+    from pipeline.shorts_tts import trim_blocks_to_word_budget
+
+    bloques = [
+        {"tipo": "hook", "texto": " ".join(["palabra"] * 20)},
+        {"tipo": "desarrollo1", "texto": " ".join(["palabra"] * 25)},
+        {"tipo": "desarrollo2", "texto": " ".join(["palabra"] * 25)},
+        {"tipo": "climax", "texto": " ".join(["palabra"] * 20)},
+        {"tipo": "cierre", "texto": " ".join(["palabra"] * 17)},
+    ]
+    total_before = sum(len(b["texto"].split()) for b in bloques)
+    assert total_before == 107  # same as the real failure case
+
+    result = trim_blocks_to_word_budget(bloques, max_words=92)
+    total_after = sum(len(b["texto"].split()) for b in result)
+
+    assert total_after <= 92, f"should be <= 92 after trim, got {total_after}"
+    assert total_after < total_before, "trim should actually remove words"
+
+
+def test_trim_preserves_hook_and_climax():
+    """Hook and climax must retain content after trimming."""
+    from pipeline.shorts_tts import trim_blocks_to_word_budget
+
+    bloques = [
+        {"tipo": "hook", "texto": " ".join(["hook"] * 15)},
+        {"tipo": "desarrollo1", "texto": " ".join(["dev"] * 40)},
+        {"tipo": "desarrollo2", "texto": " ".join(["dev"] * 40)},
+        {"tipo": "climax", "texto": " ".join(["climax"] * 15)},
+        {"tipo": "cierre", "texto": " ".join(["cierre"] * 15)},
+    ]
+
+    result = trim_blocks_to_word_budget(bloques, max_words=92, min_words_per_block=5)
+
+    for b in result:
+        assert len(b["texto"].split()) >= 5, f"block {b['tipo']} emptied below floor"
+    # Hook should be preserved (trim order starts from desarrollo3)
+    hook = next(b for b in result if b["tipo"] == "hook")
+    assert len(hook["texto"].split()) >= 10, "hook should retain most words"
+
+
+def test_valid_script_passes_after_trim():
+    """A trimmed script should pass validate_short_script."""
+    from pipeline.shorts_tts import (
+        trim_blocks_to_word_budget, validate_short_script,
+        normalize_short_script, MAX_WORD_COUNT,
+    )
+
+    bloques = [
+        {"tipo": "hook", "texto": " ".join(["word"] * 25)},
+        {"tipo": "desarrollo1", "texto": " ".join(["word"] * 25)},
+        {"tipo": "desarrollo2", "texto": " ".join(["word"] * 25)},
+        {"tipo": "climax", "texto": " ".join(["word"] * 20)},
+        {"tipo": "cierre", "texto": " ".join(["word"] * 20)},
+    ]
+    script = {"bloques": bloques, "titulo": "Test", "tema": "test"}
+    script = normalize_short_script(script)
+
+    # Without trim: too long (115 words)
+    errors_before = validate_short_script(script)
+    assert any("too long" in e.lower() for e in errors_before)
+
+    # After trim: should pass
+    script["bloques"] = trim_blocks_to_word_budget(script["bloques"], max_words=MAX_WORD_COUNT)
+    errors_after = validate_short_script(script)
+    assert not any("too long" in e.lower() for e in errors_after), (
+        f"should not be too long after trim: {errors_after}"
+    )

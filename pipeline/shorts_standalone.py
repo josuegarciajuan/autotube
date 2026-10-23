@@ -190,13 +190,25 @@ def run_standalone_short(
         # Validate the schema BEFORE TTS/media. The model sometimes returns
         # list-valued fields (e.g. search_query_en), which used to crash with
         # "'list' object has no attribute 'strip'" after paying for TTS.
-        from pipeline.shorts_tts import normalize_short_script, validate_short_script
+        #
+        # If the script is too long, TRIM it to fit within MAX_WORD_COUNT
+        # instead of rejecting (fix oct 2026: the LLM regularly produces
+        # 107-130 word scripts; rejecting meant 2 attempts both failed and
+        # the whole standalone short was abandoned).
+        from pipeline.shorts_tts import (
+            normalize_short_script, validate_short_script,
+            trim_blocks_to_word_budget, MAX_WORD_COUNT,
+        )
         script = None
         for _attempt in range(2):
             candidate = pipeline._phase_script_short(short_content)
             if not candidate or not candidate.get("bloques"):
                 continue
             candidate = normalize_short_script(candidate)
+            # Trim excess words before structural validation
+            candidate["bloques"] = trim_blocks_to_word_budget(
+                candidate["bloques"], max_words=MAX_WORD_COUNT,
+            )
             errors = validate_short_script(candidate)
             if not errors:
                 script = candidate
