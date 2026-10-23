@@ -452,3 +452,27 @@ def test_valid_script_passes_after_trim():
     assert not any("too long" in e.lower() for e in errors_after), (
         f"should not be too long after trim: {errors_after}"
     )
+
+
+# ── Concat cores configurable (fix oct 2026) ─────────────────────
+# Concat previously required cores=4 (hardcoded), which could exclude all
+# render nodes with ≤3 free cores. Now cores=2 by default, configurable.
+
+def test_concat_cores_configurable_default_is_2():
+    """Default concat cores must be 2 (schedulable on 2-core nodes)."""
+    import os
+    # Ensure no override
+    os.environ.pop("AUTOTUBE_DIST_CONCAT_CORES", None)
+    cores = int(os.environ.get("AUTOTUBE_DIST_CONCAT_CORES", "2") or 2)
+    assert cores == 2, "default concat cores must be 2"
+
+
+def test_concat_cores_env_override():
+    """Env var must override default."""
+    import os
+    os.environ["AUTOTUBE_DIST_CONCAT_CORES"] = "3"
+    try:
+        cores = int(os.environ.get("AUTOTUBE_DIST_CONCAT_CORES", "2") or 2)
+        assert cores == 3
+    finally:
+        del os.environ["AUTOTUBE_DIST_CONCAT_CORES"]

@@ -948,7 +948,10 @@ class DistributedOrchestrator(PipelineOrchestrator):
                 max_inflight=min(4, len(batches)), max_attempts=2,
                 max_units=len(batches) + 8, deadline_sec=_concat_deadline,
                 excluded_nodes=_dist_excluded_nodes(),
-                req={"cores": 4, "memMb": 2048},
+                req={
+                    "cores": int(os.environ.get("AUTOTUBE_DIST_CONCAT_CORES", "2") or 2),
+                    "memMb": int(os.environ.get("AUTOTUBE_DIST_MEM_MB", "2048") or 2048),
+                },
             )
             logger.info("[%s] Concat distribuido exec=%s (%d batches, ronda %d/%d)",
                         self.canal, eid, len(batches), attempt_index, repair_rounds)
