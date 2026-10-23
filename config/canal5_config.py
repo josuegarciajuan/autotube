@@ -573,3 +573,32 @@ VIRAL_PLAYLIST_KEYWORDS = {
     "lo-mas-increible": ["most bizarre medical cases ever", "unbelievable medical anomalies", "top rarest diseases in the world", "shocking medical mysteries compilation"],
     "enfermedades-raras": ["rarest genetic disorders documentary", "one in a million medical conditions", "rare disease patient stories", "medical oddities explained"],
 }
+
+# ── Modelo editorial «curiosidad oscura» (Fase 3) ─────────────────────
+# Anomalías Médicas: casos clínicos desconcertantes y límites del cuerpo.
+# El atractivo está en el caso y su explicación documentada; nunca en
+# prometer curas ni diagnósticos. El giro se aplica DENTRO del nicho médico.
+EDITORIAL_CURIOSITY_ENABLED = True
+EDITORIAL_CURIOSITY_PILOT_SHARE = 0.5
+EDITORIAL_CURIOSITY_WEIGHT = 0.25
+EDITORIAL_TENSION_WEIGHTS = {
+    "anomalia": 1.0,
+    "supervivencia": 0.9,
+    "peligro": 0.6,
+    "muerte": 0.6,
+    "misterio_sin_resolver": 0.6,
+    "colapso": 0.3,
+}
+# Refuerzo de exclusiones en un nicho sensible: sin claims de cura.
+EDITORIAL_EXCLUDED_CATEGORIES = [
+    "menores", "autolesion", "suicidio", "violencia_grafica",
+    "desinformacion_sanitaria",
+]
+# Semillas del giro (se suman a las SEO de la Fase 4; no las sustituyen).
+EDITORIAL_TENSION_SEEDS = [
+    "casos medicos inexplicables",
+    "enfermedades raras documentadas",
+    "pacientes que sobrevivieron a lo imposible",
+    "sintomas que la medicina no explica",
+    "el cuerpo humano al limite",
+]

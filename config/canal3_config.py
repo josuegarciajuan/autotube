@@ -680,3 +680,26 @@ VIRAL_PLAYLIST_KEYWORDS = {
     "misterios-arqueologicos": ["archaeological mysteries unsolved", "ancient artifacts scientists can't explain", "impossible ancient structures", "out of place artifacts documentary"],
     "maravillas-del-mundo": ["ancient wonders of the world documentary", "greatest archaeological sites", "amazing ancient monuments", "forgotten temples documentary"],
 }
+
+# ── Modelo editorial «curiosidad oscura» (Fase 3) ─────────────────────
+# Civilizaciones Olvidadas: colapsos, abandonos, asedios y el coste humano
+# de los hallazgos. El giro se aplica DENTRO del nicho arqueológico.
+EDITORIAL_CURIOSITY_ENABLED = True
+EDITORIAL_CURIOSITY_PILOT_SHARE = 0.5
+EDITORIAL_CURIOSITY_WEIGHT = 0.25
+EDITORIAL_TENSION_WEIGHTS = {
+    "colapso": 1.0,
+    "muerte": 0.8,
+    "anomalia": 0.8,
+    "peligro": 0.7,
+    "misterio_sin_resolver": 0.7,
+    "supervivencia": 0.6,
+}
+# Semillas del giro (se suman a las SEO de la Fase 4; no las sustituyen).
+EDITORIAL_TENSION_SEEDS = [
+    "ciudades abandonadas de golpe",
+    "civilizaciones que desaparecieron",
+    "el ultimo dia de la ciudad",
+    "sacrificios documentados arqueologia",
+    "colapso de civilizaciones antiguas",
+]

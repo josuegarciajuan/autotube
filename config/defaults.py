@@ -1233,3 +1233,89 @@ RENDER_GATE_SILENCE_MIN_SEC = 3.0
 RENDER_GATE_MAX_SILENCE_SEC = 8.0
 RENDER_GATE_TIMEOUT_SEC = 300
 
+
+# ── Modelo editorial «curiosidad oscura» (Fase 3) ─────────────────────
+# Estrategia: historias con tensión humana real (peligro, supervivencia,
+# anomalía, colapso, muerte DOCUMENTADA, misterio sin resolver) dentro del
+# nicho de cada canal. El modelo es CONFIG-DRIVEN: ningún servicio decide
+# nada por slug; todo se resuelve vía config_bridge.get_channel_config(slug).
+#
+# Consumidores previstos:
+#   - pipeline/editorial_policy.py        (clasificación, puntuación, piloto)
+#   - pipeline/topic_seeding.py           (semillas; Fase 4)
+#   - pipeline/metadata_generator.py      (etiqueta de promesa; Fase 5)
+#   - api/services/experiment_report.py   (piloto vs control; Fase 6)
+#
+# Kill-switch: EDITORIAL_CURIOSITY_ENABLED=False por canal o
+# system_state["editorial_curiosity_disabled"]="true" (global, runtime).
+EDITORIAL_CURIOSITY_ENABLED = True
+# Proporción de (canal, día) que entran al piloto. 0.0 = solo control,
+# 1.0 = solo piloto. Determinista por hash de (canal, día): no hay azar en
+# runtime ni asignación que cambie entre reintentos del mismo día.
+EDITORIAL_CURIOSITY_PILOT_SHARE = 0.5
+# Peso de la señal editorial en el ranking de temas (Fase 4). Ni la demanda
+# ni el nicho se sustituyen: esto solo ORDENA candidatos ya elegibles.
+EDITORIAL_CURIOSITY_WEIGHT = 0.25
+# Tipos de tensión válidos para el canal (un canal puede reordenar/reducir).
+EDITORIAL_TENSION_TYPES = [
+    "peligro", "supervivencia", "anomalia", "colapso",
+    "muerte", "misterio_sin_resolver",
+]
+# Peso relativo de cada tipo (0.0 = vetado para este canal).
+EDITORIAL_TENSION_WEIGHTS = {
+    "peligro": 1.0,
+    "supervivencia": 1.0,
+    "anomalia": 0.9,
+    "colapso": 0.8,
+    "muerte": 0.8,
+    "misterio_sin_resolver": 0.7,
+}
+# Léxico determinista (normalizado: minúsculas y sin acentos). Se buscan
+# subcadenas normalizadas sobre el texto del tema. 0 coste, 0 red.
+# Un canal puede ampliar/reemplazar su léxico en config/<slug>_config.py.
+EDITORIAL_TENSION_LEXICON = {
+    # Se comparan RAÍCES normalizadas (minúsculas, sin acentos) como subcadena
+    # del texto: "atrap" cubre atrapado/atrapó/atrapados, "sobreviv" cubre
+    # sobrevivió/sobrevivieron, etc.
+    "peligro": [
+        "peligro", "riesgo", "trampa", "amenaza", "accidente", "desapareci",
+        "perdid", "atrap", "sin salida", "punto de no retorno", "trampa mortal",
+    ],
+    "supervivencia": [
+        "sobreviv", "rescate", "rescatad", "aislad", "naufrag", "se salvo",
+        "escap", "contra todo pronostico", "ultima esperanza", "solo ante",
+    ],
+    "anomalia": [
+        "anomalia", "raro", "extran", "inexplicable", "sin explicacion",
+        "desconcierta", "sin diagnostico", "enigma", "paranormal", "imposible",
+    ],
+    "colapso": [
+        "colapso", "derrumbe", "abandonad", "caida", "ruina", "huyeron",
+        "extincion", "plaga", "ultimo dia de", "dejo de existir",
+    ],
+    "muerte": [
+        "muerte", "murio", "murier", "muert", "falleci", "cadaver",
+        "tumba", "nadie salio", "sin vida", "con vida", "no sobreviv",
+        "victimas", "funeral",
+    ],
+    "misterio_sin_resolver": [
+        "sin resolver", "misterio", "caso abierto", "nunca se supo",
+        "jamas se explico", "sin respuesta", "sin rastro", "desapareci",
+    ],
+}
+# Respaldo factual: el packaging no puede prometer más de lo que el guion
+# sostiene. En la Fase 4, un tema sin evidencia suficiente NO entra al
+# piloto (se conserva el comportamiento normal).
+EDITORIAL_REQUIRE_FACTUAL_SUPPORT = True
+# Categorías excluidas del piloto (content_safety sigue siendo el gate duro).
+# Nunca se fuerza el giro «oscuro» sobre estos temas.
+EDITORIAL_EXCLUDED_CATEGORIES = [
+    "menores", "autolesion", "suicidio", "violencia_grafica",
+    "desinformacion_sanitaria",
+]
+# Diversidad: nº mínimo de temas recientes que deben diferir en tipo de
+# tensión antes de repetir el mismo tipo (lo aplica el ranking de la Fase 4).
+EDITORIAL_RECENT_DIVERSITY_MIN = 2
+# Semillas de búsqueda del giro editorial (Fase 4). Vacío por defecto: cada
+# canal aporta las suyas en config/<slug>_config.py.
+EDITORIAL_TENSION_SEEDS = []
