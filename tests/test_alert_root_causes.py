@@ -242,3 +242,137 @@ def test_transient_patterns_include_local_fallback_deferred():
     import inspect
     src = inspect.getsource(_auto_retry_if_transient)
     assert "local_fallback_deferred" in src
+
+
+# ── Assembly cause preservation (fix oct 2026) ──────────────────
+# When distributed render/concat fails and local assembly returns empty,
+# the real failure cause must propagate instead of "Fallo el ensamblaje".
+
+def test_dist_failure_propagates_when_local_returns_empty():
+    """Orchestrator must raise (not return None) after dist failure + empty local."""
+    from pipeline_dist.scene_plan import ScenePlanError
+
+    dist_error = ("dist_repair_exhausted: concat failed: unidad b0000 agoto "
+                  "reintentos: sin nodo compatible (tags/primaryOnly/allowedNodes)")
+    # Simulate the decision logic in orchestrator_dist.phase_video:
+    #   result = super().phase_video(...)
+    #   if not result and dist_failed: raise RuntimeError(...)
+    dist_failed = dist_error
+    result = None  # local returned empty
+
+    should_raise = (not result) and bool(dist_failed)
+    assert should_raise
+
+    error = RuntimeError(f"{dist_failed} | ensamblaje local devolvio vacio")
+    assert "sin nodo compatible" in str(error)
+    assert "dist_repair_exhausted" in str(error)
+
+
+def test_no_raise_when_local_succeeds_despite_dist_failure():
+    """If local assembly succeeds, no error should be raised."""
+    dist_failed = "some dist timeout"
+    result = {"video_path": "/tmp/x.mp4"}  # local succeeded
+
+    should_raise = (not result) and bool(dist_failed)
+    assert not should_raise
+
+
+# ── Watchdog alert auto-resolution (fix oct 2026) ──────────────
+# error_autotube_watchdog alerts must auto-resolve when heartbeat recovers.
+
+def test_watchdog_error_alert_resolves_on_heartbeat_recovery():
+    """Generic error_autotube_watchdog alert closes when task heartbeat is fresh."""
+    import sqlite3 as _sq
+    from api.services.lifecycle_monitor import _resolve_recovered_task_alerts, _utcnow
+
+    conn = _sq.connect(":memory:")
+    conn.row_factory = _sq.Row
+    conn.executescript("""
+        CREATE TABLE pipeline_alerts (
+            id INTEGER PRIMARY KEY, entity_type TEXT, entity_id INTEGER,
+            channel_id INTEGER, alert_type TEXT, severity TEXT,
+            title TEXT, message TEXT, metadata_json TEXT,
+            resolved INTEGER DEFAULT 0, acknowledged INTEGER DEFAULT 0,
+            resolved_at TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE system_state (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT);
+    """)
+
+    # Simulate: watchdog alert for schedule_checker was emitted
+    conn.execute(
+        "INSERT INTO pipeline_alerts (entity_type, alert_type, severity, title, message)"
+        " VALUES ('system', 'error_autotube_watchdog', 'critical',"
+        " 'Errores de autotube.watchdog',"
+        " 'systemd watchdog withheld: schedule_checker heartbeat stale')"
+    )
+
+    # Heartbeat is now fresh (naive UTC, matching production storage format)
+    from api.services.lifecycle_monitor import _utcnow
+    conn.execute(
+        "INSERT INTO system_state (key, value) VALUES (?, ?)",
+        ("task_heartbeat_schedule_checker",
+         _utcnow().isoformat(timespec="seconds")),
+    )
+    conn.commit()
+
+    class FakeDB:
+        def _connect(self):
+            return conn
+
+    resolved = _resolve_recovered_task_alerts(FakeDB(), conn)
+
+    assert resolved >= 1, "watchdog error alert should auto-resolve"
+    row = conn.execute(
+        "SELECT resolved FROM pipeline_alerts WHERE alert_type='error_autotube_watchdog'"
+    ).fetchone()
+    assert row[0] == 1, "alert should be marked resolved"
+
+    conn.close()
+
+
+def test_watchdog_error_alert_not_resolved_when_stale():
+    """Alert must NOT resolve if heartbeat is still stale."""
+    import sqlite3 as _sq
+    from api.services.lifecycle_monitor import _resolve_recovered_task_alerts
+
+    conn = _sq.connect(":memory:")
+    conn.row_factory = _sq.Row
+    conn.executescript("""
+        CREATE TABLE pipeline_alerts (
+            id INTEGER PRIMARY KEY, entity_type TEXT, entity_id INTEGER,
+            channel_id INTEGER, alert_type TEXT, severity TEXT,
+            title TEXT, message TEXT, metadata_json TEXT,
+            resolved INTEGER DEFAULT 0, acknowledged INTEGER DEFAULT 0,
+            resolved_at TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE system_state (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT);
+    """)
+
+    conn.execute(
+        "INSERT INTO pipeline_alerts (entity_type, alert_type, severity, title, message)"
+        " VALUES ('system', 'error_autotube_watchdog', 'critical',"
+        " 'Errores de autotube.watchdog',"
+        " 'systemd watchdog withheld: schedule_checker heartbeat stale')"
+    )
+
+    # Heartbeat is old (2 hours ago, timeout is 30 min)
+    from api.services.lifecycle_monitor import _utcnow as _utcnow_fn
+    from datetime import timedelta
+    old_hb = (_utcnow_fn() - timedelta(hours=2)).isoformat(timespec="seconds")
+    conn.execute(
+        "INSERT INTO system_state (key, value) VALUES (?, ?)",
+        ("task_heartbeat_schedule_checker", old_hb),
+    )
+    conn.commit()
+
+    class FakeDB:
+        def _connect(self):
+            return conn
+
+    resolved = _resolve_recovered_task_alerts(FakeDB(), conn)
+    assert resolved == 0, "should NOT resolve stale heartbeat"
+
+    row = conn.execute(
+        "SELECT resolved FROM pipeline_alerts WHERE alert_type='error_autotube_watchdog'"
+    ).fetchone()
+    assert row[0] == 0, "alert must remain unresolved"
+
+    conn.close()

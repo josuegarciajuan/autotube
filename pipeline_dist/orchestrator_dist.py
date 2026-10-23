@@ -163,7 +163,17 @@ class DistributedOrchestrator(PipelineOrchestrator):
         if _env_flag("AUTOTUBE_DIST_CONCAT", False):
             self._install_dist_concat()
         try:
-            return super().phase_video(script, audio_data, media_assets, job_id=job_id)
+            result = super().phase_video(script, audio_data, media_assets, job_id=job_id)
+            # ── Preserve real failure cause (fix oct 2026) ────────────────
+            # When local assembly returns falsy (None/empty) after a known
+            # distributed failure, raise with the dist cause so the worker
+            # error message contains the real reason (no compatible node,
+            # timeout, etc.) instead of generic "Fallo el ensamblaje".
+            if not result and dist_failed:
+                raise RuntimeError(
+                    f"{dist_failed} | ensamblaje local devolvio vacio"
+                )
+            return result
         except Exception as local_exc:  # noqa: BLE001 — escalada tras fallback local
             # Escalada reparar → local → re-encolar: si el render distribuido
             # agotó la reparación Y el render local también falló, se propaga el
