@@ -97,6 +97,26 @@ def _find_font(size: int, bold: bool = False,
     return ImageFont.load_default()
 
 
+def _fit_font_size(draw, text: str, start_size: int, max_width: int,
+                   min_size: int, bold: bool = True,
+                   font_name: str | None = None):
+    """Reduce el tamaño hasta que *text* quepa en *max_width* píxeles.
+
+    Devuelve ``(size, font)``. Garantiza que el overlay nunca desborda el
+    lienzo sea cual sea el ancho real de los glifos (Fase 2 curiosidad
+    oscura: antes el tamaño era fijo por altura y un L1 dentro de
+    presupuesto podía pintar 1403px sobre un lienzo de 1280px).
+    """
+    size = max(int(min_size), int(start_size))
+    while size > min_size:
+        font = _find_font(size, bold=bold, font_name=font_name)
+        bbox = draw.textbbox((0, 0), text, font=font)
+        if bbox[2] - bbox[0] <= max_width:
+            return size, font
+        size -= max(2, int(size * 0.06))
+    return min_size, _find_font(min_size, bold=bold, font_name=font_name)
+
+
 def resolve_allow_faces(cfg) -> bool:
     """Resuelve si la miniatura puede usar caras, unificando la config del canal.
 
@@ -1558,12 +1578,13 @@ class ThumbnailMaker:
             text_gancho_v = text_gancho_v.upper()
             text_complemento_v = text_complemento_v.upper()
 
-        # Truncate to the shared OverlaySpec budgets (W3) — the spec already
-        # truncates at word boundaries; this is a last-resort safety net.
-        from pipeline.packaging_brief import overlay_budgets
+        # Truncate to the shared OverlaySpec budgets (W3) — always at a word
+        # boundary, never mid-word (Fase 2: the spec already truncates at word
+        # boundaries; this is a last-resort safety net for legacy paths).
+        from pipeline.packaging_brief import overlay_budgets, _truncate_words
         _budgets = overlay_budgets(self._channel_cfg)
-        text_gancho_v = text_gancho_v[: _budgets["l1"]]
-        text_complemento_v = text_complemento_v[: _budgets["l2"]]
+        text_gancho_v = _truncate_words(text_gancho_v, _budgets["l1"])
+        text_complemento_v = _truncate_words(text_complemento_v, _budgets["l2"])
 
         stroke_w = max(3, self.text_stroke_width + 2)
 
@@ -1584,7 +1605,13 @@ class ThumbnailMaker:
                 l1_y_pct = 0.38
             else:  # bottom
                 l1_y_pct = 0.38 if comp["text_lines"] == 1 else 0.52
-            gancho_font = _find_font(gancho_font_size, bold=True, font_name=self.font_family)
+            # Fase 2 (curiosidad oscura): ajustar el tamaño al ancho real del
+            # lienzo con margen seguro — antes era fijo por altura y un L1
+            # dentro de presupuesto podía desbordar el canvas.
+            _max_text_w = self.width - 2 * max(40, int(self.width * 0.04))
+            gancho_font_size, gancho_font = _fit_font_size(
+                draw, text_gancho_v, gancho_font_size, _max_text_w,
+                min_size=56, bold=True, font_name=self.font_family)
             if gancho_font:
                 bbox_l1 = draw.textbbox((0, 0), text_gancho_v, font=gancho_font)
                 l1_w = bbox_l1[2] - bbox_l1[0]
@@ -1602,7 +1629,10 @@ class ThumbnailMaker:
         # ── L2 (complemento) — only when 2-line layout ─────
         if comp["text_lines"] >= 2 and text_complemento_v:
             comp_font_size = max(44, int(self.height * 0.09))
-            comp_font = _find_font(comp_font_size, bold=True, font_name=self.font_family)
+            _max_text_w2 = self.width - 2 * max(40, int(self.width * 0.04))
+            comp_font_size, comp_font = _fit_font_size(
+                draw, text_complemento_v, comp_font_size, _max_text_w2,
+                min_size=32, bold=True, font_name=self.font_family)
             if comp_font and 'l1_y' in locals():
                 bbox_l2 = draw.textbbox((0, 0), text_complemento_v, font=comp_font)
                 l2_w = bbox_l2[2] - bbox_l2[0]

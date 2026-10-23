@@ -56,7 +56,6 @@ def test_guard_existente_validate_title_marca_frase_incompleta():
 # ═══════════════════════════════════════════════════════════════════
 
 
-@pytest.mark.xfail(strict=True, reason="Fase 2: la dedup de tokens rompe frases válidas")
 def test_l2_no_se_mutila_por_compartir_palabra_con_titulo():
     """build_overlay_spec no debe borrar palabras de L2 por aparecer en el
     título o en L1: debe conservar la frase o reformularla entera."""
@@ -65,7 +64,6 @@ def test_l2_no_se_mutila_por_compartir_palabra_con_titulo():
     assert spec.l2 == "LA CIENCIA LO CALLÓ"
 
 
-@pytest.mark.xfail(strict=True, reason="Fase 2: L2 nunca puede quedar como resto gramatical")
 def test_l2_nunca_queda_como_resto_gramatical():
     """Caso 2649 ('LOS'): si la dedup elimina las palabras de contenido de L2,
     el resultado debe ser una reformulación con sentido o L2 vacío — nunca un
@@ -84,13 +82,11 @@ def test_l2_nunca_queda_como_resto_gramatical():
 # ═══════════════════════════════════════════════════════════════════
 
 
-@pytest.mark.xfail(strict=True, reason="Fase 2: 'quién/cómo/dónde' no son contenido")
 def test_interrogativos_no_son_terminos_de_contenido():
     terms = title_terms("¿Quién construyó las maravillas imposibles de la antigüedad?")
     assert "quien" not in terms
 
 
-@pytest.mark.xfail(strict=True, reason="Fase 2: el saliente debe ser un ancla con significado")
 def test_saliente_prefiere_contenido_sobre_token_debil():
     """Caso 2735 ('HMS'): ante varios candidatos, el saliente no debe elegir
     un token de ≤3 letras sin carga semántica si hay uno mejor."""
@@ -115,22 +111,28 @@ def _ancho_texto(texto: str, font_size: int) -> int:
     return bbox[2] - bbox[0]
 
 
-@pytest.mark.xfail(strict=True, reason="Fase 2: el pintado debe ajustar fuente al ancho real")
 def test_l1_dentro_de_presupuesto_cabe_con_margen_en_layout_1_linea():
-    """L1 de 14 chars (máximo del presupuesto) debe caber con margen seguro
-    en el layout de 1 línea (hoy se pinta a 136px fijos y desborda)."""
-    ancho = _ancho_texto("GUERRAS MUNDIAL", max(80, int(720 * 0.19)))
-    assert ancho + 2 * 40 <= 1280  # margen seguro de 40px por lado
+    """L1 de 14 chars (máximo del presupuesto) debe caber con margen seguro:
+    el ajuste de fuente reduce el tamaño en vez de desbordar el canvas."""
+    from PIL import Image, ImageDraw
+
+    from pipeline.thumbnail_maker import _fit_font_size
+
+    draw = ImageDraw.Draw(Image.new("RGB", (1280, 720)))
+    start = max(80, int(720 * 0.19))  # punto de partida del layout de 1 línea
+    max_w = 1280 - 2 * 48
+    size, font = _fit_font_size(draw, "GUERRAS MUNDIAL", start, max_w, 56)
+    bbox = draw.textbbox((0, 0), "GUERRAS MUNDIAL", font=font)
+    assert bbox[2] - bbox[0] <= max_w
+    assert size < start  # hubo reducción respecto al tamaño fijo original
 
 
-@pytest.mark.xfail(strict=True, reason="Fase 2: el recorte duro [:budget] nunca corta a mitad de palabra")
 def test_red_de_seguridad_no_corta_a_mitad_de_palabra():
-    """La red de seguridad del maker (`text[:budget]`) corta "GUERRAS MUNDIAL"
-    a "GUERRAS MUNDIA". El esperado es recorte en frontera de palabra."""
-    texto = "GUERRAS MUNDIAL"
-    budget = 14
-    cortado = texto[:budget]
-    assert cortado == "GUERRAS"
+    """La red de seguridad del maker recorta en frontera de palabra:
+    "GUERRAS MUNDIAL" (15 chars) → "GUERRAS", nunca "GUERRAS MUNDIA"."""
+    from pipeline.packaging_brief import _truncate_words
+
+    assert _truncate_words("GUERRAS MUNDIAL", 14) == "GUERRAS"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -138,12 +140,20 @@ def test_red_de_seguridad_no_corta_a_mitad_de_palabra():
 # ═══════════════════════════════════════════════════════════════════
 
 
-@pytest.mark.xfail(strict=True, reason="Fase 2: ningún paso post-selección puede romper la completitud")
 def test_paso_post_seleccion_nunca_rompe_titulo_completo():
-    """Un título completo de 72 chars que el motor seleccionó NO debe salir
-    del pipeline cortado a medias: o cabe y se mantiene, o se rechaza y se
-    regenera — pero nunca se devuelve incompleto."""
-    titulo = "El misterio del sistema solar exterior que la NASA aún no logra explicar"
-    assert is_complete_title(titulo)[0]  # el candidato es completo
-    salida = truncate_title_at_word(titulo, 65)
-    assert is_complete_title(salida)[0], f"salió cortado: {salida!r}"
+    """La resolución de título del generador elige un candidato COMPLETO
+    dentro de presupuesto; si el seleccionado no cabe, se reelige — nunca
+    se devuelve un corte a mitad de cláusula."""
+    from pipeline.metadata_generator import MetadataGenerator
+
+    gen = MetadataGenerator.__new__(MetadataGenerator)
+    gen.title_max_chars = 65
+    titulo_completo_largo = (
+        "El misterio del sistema solar exterior que la NASA aún no logra explicar"
+    )
+    alternativo = "La NASA confirma el hallazgo que cambia el sistema solar"
+    elegido = gen._pick_complete_title(
+        [titulo_completo_largo, alternativo], 65
+    )
+    assert elegido == alternativo
+    assert is_complete_title(elegido)[0] and len(elegido) <= 65
