@@ -1477,6 +1477,9 @@ def migrate_v2(db_path: str = None):
     # ── v70: reparto franja-first — índice de duplicado por franja ──
     _migrate_v70(conn, logger)
 
+    # ── v71: desglose de ranking editorial + piloto/control (Fase 4) ──
+    _migrate_v71(conn, logger)
+
     conn.commit()
     conn.close()
     
@@ -9966,27 +9969,54 @@ class ExtendedDatabase(Database):
         entity_id: int | None = None, route: str = "", topic: str = "",
         demand_query: str = "", source: str = "", demand_score: float = 0.0,
         niche_fit: float = 0.0, novelty_ok: bool = True, reason: str = "",
+        signals_json: str = "", editorial_label: str = "", pilot_group: str = "",
     ) -> bool:
-        """Registra por qué se eligió un tema (F3, trazabilidad auditable)."""
+        """Registra por qué se eligió un tema (F3, trazabilidad auditable).
+
+        Fase 4: además del motivo, guarda el desglose de señales del ranking
+        (``signals_json``), la etiqueta editorial y el grupo piloto/control.
+        """
         try:
             with self._connect() as conn:
                 conn.execute(
                     """INSERT INTO content_selection_provenance
                          (entity_type, entity_id, channel_id, route, topic,
                           demand_query, source, demand_score, niche_fit,
-                          novelty_ok, reason)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                          novelty_ok, reason, signals_json, editorial_label,
+                          pilot_group)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (entity_type, entity_id, channel_id, (route or "")[:40],
                      (topic or "")[:300], (demand_query or "")[:200],
                      (source or "")[:60], float(demand_score or 0),
                      float(niche_fit or 0), 1 if novelty_ok else 0,
-                     (reason or "")[:500]),
+                     (reason or "")[:500], (signals_json or "")[:2000],
+                     (editorial_label or "")[:80], (pilot_group or "")[:20]),
                 )
                 conn.commit()
             return True
         except Exception as exc:  # noqa: BLE001
             logger.debug("record_selection_provenance failed: %s", exc)
             return False
+
+    def get_recent_topic_titles(self, channel_id: int, limit: int = 20) -> list[str]:
+        """Títulos de los últimos vídeos del canal (novedad/diversidad, F4).
+
+        Incluye borradores recientes: lo que no debe repetirse es el TEMA ya
+        elegido, no solo lo publicado. Fail-open: ``[]`` ante cualquier error.
+        """
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """SELECT titulo_final FROM videos
+                        WHERE channel_id = ? AND titulo_final IS NOT NULL
+                          AND TRIM(titulo_final) != ''
+                        ORDER BY id DESC LIMIT ?""",
+                    (channel_id, int(limit)),
+                ).fetchall()
+            return [str(r[0]) for r in rows]
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("get_recent_topic_titles failed: %s", exc)
+            return []
 
     def get_recent_selection_provenance(self, channel_id: int,
                                         limit: int = 50) -> list[dict]:
@@ -12897,6 +12927,37 @@ def _migrate_v69(conn, logger):
 
     conn.commit()
     logger.info("Migration v69: atomic planned-short publishing ready")
+
+
+def _migrate_v71(conn, logger):
+    """Idempotent v71 (Fase 4): desglose auditable del ranking editorial.
+
+    Añade a ``content_selection_provenance``:
+      - ``signals_json``   desglose de señales (demanda, nicho, editorial...)
+      - ``editorial_label`` etiqueta del tipo de tensión elegido
+      - ``pilot_group``    pilot | control | disabled (asignación determinista)
+    """
+    try:
+        cols = {row[1] for row in conn.execute(
+            "PRAGMA table_info('content_selection_provenance')")}
+        if not cols:
+            return  # la tabla la crea v67 en el mismo arranque
+        additions = (
+            ("signals_json", "TEXT"),
+            ("editorial_label", "TEXT"),
+            ("pilot_group", "TEXT"),
+        )
+        for col, col_type in additions:
+            if col not in cols:
+                try:
+                    conn.execute(
+                        f"ALTER TABLE content_selection_provenance ADD COLUMN {col} {col_type}"
+                    )
+                    logger.info("Migration v71: provenance.%s added", col)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Migration v71 provenance.%s: %s", col, exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Migration v71: %s", exc)
 
 
 def _migrate_v70(conn, logger):

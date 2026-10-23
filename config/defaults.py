@@ -1319,3 +1319,40 @@ EDITORIAL_RECENT_DIVERSITY_MIN = 2
 # Semillas de búsqueda del giro editorial (Fase 4). Vacío por defecto: cada
 # canal aporta las suyas en config/<slug>_config.py.
 EDITORIAL_TENSION_SEEDS = []
+
+# ── Ranking de temas multi-señal (Fase 4, curiosidad oscura) ───────────
+# Ordena candidatos YA elegibles combinando señales separadas y auditables.
+# NO sustituye gates (nicho, demanda, respaldo factual, content_safety):
+# solo decide el ORDEN. Fail-open: sin datos se conserva el orden original.
+# Kill-switch: TOPIC_RANKING_ENABLED=False por canal o
+# system_state["topic_ranking_disabled"]="true".
+TOPIC_RANKING_ENABLED = True
+# Tamaño del pool de candidatos antes de ordenar (antes se ordenaban solo 5).
+# Un pool mayor permite que la señal editorial elija entre más opciones.
+TOPIC_RANKING_POOL_SIZE = 12
+# Pesos por señal (se normalizan entre sí; el peso editorial se toma de
+# EDITORIAL_CURIOSITY_WEIGHT para que el canal gobierne su intensidad).
+TOPIC_RANKING_WEIGHTS = {
+    "demand": 0.40,
+    "niche": 0.20,
+    "editorial": 0.20,
+    "visual": 0.10,
+    "novelty": 0.10,
+    "source": 0.05,
+}
+# Pistas léxicas de potencial visual (lo que se puede MOSTRAR en miniatura).
+TOPIC_RANKING_VISUAL_HINTS = [
+    "mapa", "documento", "carta", "foto", "fotografia", "diario", "cuaderno",
+    "rostro", "cara", "cuerpo", "osamenta", "cadaver", "herida", "cirugia",
+    "ruina", "templo", "ciudad", "castillo", "torre", "cueva", "pozo", "mina",
+    "barco", "naufragio", "avion", "tren", "coche", "expedicion", "traje",
+    "hielo", "desierto", "selva", "montana", "volcan", "tormenta", "nieve",
+    "instrumento", "maquina", "reliquia", "estatua", "mascara", "moneda",
+    "analisis", "radiografia", "ecografia", "muestra", "virus", "bacteria",
+    "sangre", "medicina", "hospital", "quirófano", "quirofano",
+]
+# Ventana de temas recientes para medir novedad y repetición de tensión.
+TOPIC_RANKING_RECENT_WINDOW = 20
+# Penalización cuando el tipo de tensión dominante ya se usó dentro de la
+# ventana de diversidad editorial (EDITORIAL_RECENT_DIVERSITY_MIN).
+TOPIC_RANKING_REPEAT_PENALTY = 0.20

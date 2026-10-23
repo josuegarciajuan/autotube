@@ -57,6 +57,12 @@ def seeds_from_config(cfg) -> list[str]:
                 seeds.append(str(q).strip())
     except Exception:  # noqa: BLE001
         pass
+    # Fase 4 (curiosidad oscura): semillas del giro editorial del canal. Se
+    # SUMAN a las SEO; no las sustituyen. Si el canal no define ninguna, no
+    # cambia nada.
+    for q in (getattr(cfg, "EDITORIAL_TENSION_SEEDS", []) or []):
+        if str(q).strip():
+            seeds.append(str(q).strip())
     seen: set[str] = set()
     out: list[str] = []
     for s in seeds:
