@@ -138,6 +138,31 @@ class MediaFetcher:
         else:
             self._media_strategy = dict(_channel_strategy)
 
+        # ── P01: semantic retrieval selector (opt-in, legacy by default) ──
+        # MEDIA_SELECTOR=legacy|semantic and MEDIA_SELECTOR_SHADOW=true|false.
+        # The default stays legacy until external review + benchmark evidence.
+        try:
+            from pipeline.media_semantics.config import SemanticConfig
+
+            self._semantic_config = SemanticConfig.from_media_strategy(
+                self._media_strategy
+            )
+        except Exception as exc:  # fail-open: legacy must always start
+            logger.warning("P01 semantic config unavailable (%s) — using legacy", exc)
+            from pipeline.media_semantics.config import SemanticConfig
+
+            self._semantic_config = SemanticConfig(mode="legacy", shadow=False)
+        self._semantic_selector = None
+        self._pending_selection_decisions: list[dict] = []
+        self._last_selection_decision = None
+        self._shadow_pools: dict[int, object] = {}
+        logger.info(
+            "Media selector mode=%s shadow=%s threshold=%.2f",
+            self._semantic_config.mode,
+            self._semantic_config.shadow,
+            self._semantic_config.min_relevance_score,
+        )
+
         # P3: Theme context for enriched search queries
         self._theme_context = None
 
@@ -1145,6 +1170,21 @@ class MediaFetcher:
         # resolve prev/next narration snippets for every scene.
         self._current_scenes = scenes
         self._current_scene_idx = -1
+
+        # ── P01-B: one SceneSpec per FINAL scene (post merge/split) ──
+        # Attached in place so every downstream tier (stock video, stock image,
+        # AI prompt, provenance) sees the exact narration slice of the scene,
+        # not the parent block's inherited query.
+        self._pending_selection_decisions = []
+        self._shadow_pools = {}
+        self._last_selection_decision = None
+        try:
+            from pipeline.media_semantics.scene_spec import attach_scene_specs
+
+            self._scene_specs = attach_scene_specs(scenes, self._scene_context)
+        except Exception as exc:  # fail-open: legacy behaviour must survive
+            logger.warning("P01 SceneSpec attachment failed (fail-open): %s", exc)
+            self._scene_specs = []
 
         # ── Phase 2: Classify scenes (video_priority vs stock_image vs ai_image) ──
         video_scenes, stock_image_scenes, scene_types = self._classify_scenes(scenes)
@@ -4092,19 +4132,24 @@ class MediaFetcher:
     ) -> dict | None:
         """Search exhaustively for a non-duplicate asset.
 
-        Algorithm:
-          1. For each query in the pool (specific → generic):
-             a. Interleave providers (image+video or video+image based on want_video)
-             b. For each provider, paginate through ALL available pages
-             c. For each result, check dedup → first fresh one wins
-             d. If all pages exhausted → next provider
-             e. If all providers exhausted → next query
-          2. If absolutely nothing found after all queries → return None
+        P01: the dispatch point for the selector feature flag.
 
-        This guarantees that we only give up after exhausting:
-          ~11 queries × ~6 providers × ~10 pages each ≈ 660 candidate evaluations
+        * ``MEDIA_SELECTOR=legacy`` (default) → original first-success-wins
+          loop.  When ``MEDIA_SELECTOR_SHADOW=true`` the pages already fetched
+          by the legacy loop are also scored by the semantic selector, with no
+          extra downloads and no change to the legacy asset.
+        * ``MEDIA_SELECTOR=semantic`` → retrieve metadata across all
+          queries/providers/pages, build one global pool, rank it, apply the
+          threshold and only then download the approved top-N.
         """
+        if self._semantic_config.mode == "semantic":
+            return self._fetch_asset_semantic(
+                scene, query_pool, want_video, target_dur, ctx,
+                force_images=force_images,
+            )
+
         providers, sparing_providers = self._interleaved_providers(want_video, scene, force_images=force_images)
+        shadow = bool(self._semantic_config.shadow)
 
         # ── First pass: exhaustive search across all primary providers ──
         for query in query_pool:
@@ -4121,6 +4166,11 @@ class MediaFetcher:
                     if not asset_candidates:
                         break  # no more results from this provider
 
+                    if shadow:
+                        self._shadow_accumulate(
+                            scene, query, page, asset_candidates, want_video,
+                        )
+
                     # Relevance-aware download: skips anachronistic candidates,
                     # prefers high-scoring ones, falls back conservatively when
                     # providers expose no metadata (v9).
@@ -4129,6 +4179,8 @@ class MediaFetcher:
                     )
                     if downloaded:
                         self._record_fallback_tier(query)
+                        if shadow:
+                            self._shadow_finalize(scene)
                         return downloaded
 
                     # Check if there are more pages
@@ -4155,11 +4207,17 @@ class MediaFetcher:
                         )
                         if not asset_candidates:
                             break
+                        if shadow:
+                            self._shadow_accumulate(
+                                scene, query, page, asset_candidates, want_video,
+                            )
                         downloaded = self._try_download_best_candidate(
                             asset_candidates, provider, scene, ctx,
                         )
                         if downloaded:
                             self._record_fallback_tier(query)
+                            if shadow:
+                                self._shadow_finalize(scene)
                             return downloaded
                         total = asset_candidates[0].get("_total_available", 0)
                         per_page = asset_candidates[0].get("_per_page", 20)
@@ -4168,7 +4226,335 @@ class MediaFetcher:
                         page += 1
                         time.sleep(0.15)
 
+        if shadow:
+            self._shadow_finalize(scene)
         return None
+
+    # ── P01: semantic retrieval / shadow helpers ─────────────────
+
+    def _get_semantic_selector(self):
+        if self._semantic_selector is None:
+            from pipeline.media_semantics.selector import SemanticMediaSelector
+
+            self._semantic_selector = SemanticMediaSelector(
+                config=self._semantic_config,
+            )
+        return self._semantic_selector
+
+    def _scene_spec_for(self, scene: dict, scene_idx: int = 0):
+        """Return the scene's spec, building it lazily if absent."""
+        from pipeline.media_semantics.contracts import SceneSpec
+        from pipeline.media_semantics.scene_spec import build_scene_spec
+
+        existing = scene.get("scene_spec")
+        if isinstance(existing, SceneSpec):
+            return existing
+        if isinstance(existing, dict):
+            spec = SceneSpec.from_dict(existing)
+        else:
+            spec = build_scene_spec(
+                scene, self._scene_context(scene, scene_idx=scene_idx),
+                scene_idx=scene_idx,
+            )
+        scene["scene_spec"] = spec
+        return spec
+
+    @staticmethod
+    def _provider_key(provider, raw_candidates: list[dict] | None = None) -> str:
+        if raw_candidates:
+            source = raw_candidates[0].get("source") if isinstance(raw_candidates[0], dict) else ""
+            if source:
+                return str(source)
+        name = getattr(provider, "name", None)
+        if name:
+            return str(name)
+        return provider.__class__.__name__.lower()
+
+    def _semantic_query_variants(self, spec, base_queries: list[str]) -> list[str]:
+        """Generate scene-specific variants and append the legacy ladder."""
+        from pipeline.media_semantics.query_generation import (
+            generate_scene_query_variants,
+        )
+
+        budget = self._semantic_config.budget
+        base = [q for q in (base_queries or []) if q and q.strip()]
+        # Reserve space so the existing ladder is never entirely displaced.
+        reserve = min(3, len(base))
+        generated = generate_scene_query_variants(
+            spec, [], max_variants=max(1, budget.max_queries - reserve),
+        )
+        merged: list[str] = []
+        seen: set[str] = set()
+        for item in generated:
+            query = item["query"]
+            key = query.lower()
+            if key not in seen:
+                seen.add(key)
+                merged.append(query)
+        for query in base:
+            key = query.lower()
+            if key not in seen:
+                seen.add(key)
+                merged.append(query)
+        return merged[: budget.max_queries]
+
+    def _fetch_asset_semantic(
+        self, scene: dict, query_pool: list[str],
+        want_video: bool, target_dur: float, ctx,
+        force_images: bool = False,
+    ) -> dict | None:
+        """P01-E/F/G/H/I: global metadata pool → rank → threshold → download."""
+        from pipeline.media_semantics.contracts import SelectionStatus
+        from pipeline.media_semantics.normalization import normalize_candidates
+        from pipeline.media_semantics.pool import CandidatePool
+        from pipeline.media_semantics.provenance import emit_decision_event
+
+        scene_idx = int(scene.get("scene_idx", getattr(self, "_current_scene_idx", 0)) or 0)
+        spec = self._scene_spec_for(scene, scene_idx=scene_idx)
+        budget = self._semantic_config.budget
+        queries = self._semantic_query_variants(spec, query_pool)
+        providers, sparing_providers = self._interleaved_providers(
+            want_video, scene, force_images=force_images,
+        )
+
+        pool = CandidatePool(budget=budget)
+        provider_objects: dict[str, object] = {}
+        started = time.time()
+
+        def gather(stage_providers: list) -> None:
+            if not stage_providers:
+                return
+            for query_index, query in enumerate(queries):
+                if not query:
+                    continue
+                try:
+                    from pipeline.cinematic_staging import classify_query_tier
+
+                    tier = classify_query_tier(query, None)
+                except Exception:
+                    tier = ""
+                for provider in stage_providers:
+                    page = 1
+                    while page <= budget.max_pages_per_provider:
+                        if len(pool) >= budget.max_total:
+                            return
+                        raw = self._search_provider_page(
+                            provider, query, target_dur, page, want_video,
+                        )
+                        if not raw:
+                            break
+                        provider_key = self._provider_key(provider, raw)
+                        provider_objects.setdefault(provider_key, provider)
+                        candidates = normalize_candidates(
+                            raw,
+                            provider=provider_key,
+                            query=query,
+                            query_tier=tier,
+                            query_index=query_index,
+                            page=page,
+                            media_type=("video" if want_video and not force_images else None),
+                        )
+                        # `stage_providers` may mix video/image providers; use
+                        # the raw type per candidate where present.
+                        for candidate, raw_item in zip(candidates, raw):
+                            ctype = str(raw_item.get("type") or "").strip()
+                            if ctype:
+                                candidate.media_type = ctype
+                        pool.extend(candidates)
+                        total = raw[0].get("_total_available", 0)
+                        per_page = raw[0].get("_per_page", 20)
+                        if total <= 0 or page * per_page >= total:
+                            break
+                        page += 1
+                        time.sleep(0.15)
+
+        gather(providers)
+        # Sparing providers (Unsplash) only when primary retrieval produced
+        # nothing at all — preserves the hourly budget.
+        if len(pool) == 0:
+            gather(sparing_providers)
+
+        try:
+            from pipeline.observability import obs_event
+
+            obs_event(
+                "semantic_retrieval",
+                scene_idx=scene_idx,
+                block_idx=spec.block_idx,
+                origin=spec.origin,
+                queries=len(queries),
+                providers=pool.providers,
+                pool=pool.stats.to_dict(),
+                elapsed_ms=round((time.time() - started) * 1000, 2),
+            )
+        except Exception:
+            pass
+
+        selector = self._get_semantic_selector()
+        downloaded_holder: dict[str, dict] = {}
+
+        def download_fn(candidate):
+            provider = provider_objects.get(candidate.provider)
+            if provider is None:
+                return None
+            raw = candidate.raw_candidate or candidate.to_dict()
+            try:
+                asset = self._download_candidate(provider, raw)
+            except Exception as exc:
+                logger.warning(
+                    "Semantic download failed for %s (%s): %s",
+                    candidate.provider, candidate.canonical_key, exc,
+                )
+                return None
+            if not asset or not asset.get("path"):
+                return None
+            if not self._visual_candidate_ok(asset, scene, target_dur):
+                return None
+            self._record_asset_used(raw)
+            self._record_asset_for_history(asset)
+            downloaded_holder["asset"] = asset
+            return asset
+
+        def pre_download_filter(candidate) -> bool:
+            raw = candidate.raw_candidate or candidate.to_dict()
+            try:
+                return not self._is_asset_duplicate(raw)
+            except Exception:
+                return True
+
+        decision = selector.select_and_download(
+            spec,
+            pool.candidates(),
+            download_fn,
+            threshold=self._semantic_config.min_relevance_score,
+            pre_download_filter=pre_download_filter,
+        )
+        self._last_selection_decision = decision
+        scene["selector_version"] = decision.selector_version
+        scene["selection_status"] = decision.status.value
+        self._record_selection_decision(decision, scene)
+        emit_decision_event(
+            decision,
+            video_id=None,
+            query_count=len(queries),
+            pool=pool.stats.to_dict(),
+        )
+
+        if not decision.selected:
+            logger.info(
+                "P01 semantic selector: scene %d → %s (%s, %d candidates)",
+                scene_idx, decision.status.value,
+                decision.rejection_reason or "-", decision.candidates_considered,
+            )
+            return None
+
+        asset = downloaded_holder.get("asset")
+        if not asset:
+            return None
+        asset["selector"] = "semantic"
+        asset["selector_version"] = decision.selector_version
+        asset["selection_status"] = decision.status.value
+        asset["selection_score"] = decision.winner_score
+        asset["scene_idx"] = scene_idx
+        asset["scene_spec"] = spec.to_dict()
+        if decision.winner is not None:
+            asset["candidate"] = decision.winner.to_dict()
+        return asset
+
+    def _record_selection_decision(self, decision, scene: dict) -> None:
+        """Queue a bounded provenance record for later DB flush."""
+        try:
+            from pipeline.media_semantics.provenance import decision_record
+
+            record = decision_record(
+                decision,
+                video_id=None,
+                scene_idx=decision.scene_spec.scene_idx,
+                block_idx=decision.scene_spec.block_idx,
+            )
+            self._pending_selection_decisions.append(record)
+            # Bound memory for very long videos.
+            if len(self._pending_selection_decisions) > 4000:
+                del self._pending_selection_decisions[:1000]
+        except Exception as exc:
+            logger.debug("P01 provenance record failed (fail-open): %s", exc)
+
+    def _shadow_accumulate(
+        self, scene: dict, query: str, page: int,
+        raw_candidates: list[dict], want_video: bool,
+    ) -> None:
+        """Feed candidates already fetched by the legacy path into a shadow pool."""
+        if not self._semantic_config.shadow:
+            return
+        try:
+            from pipeline.media_semantics.normalization import normalize_candidates
+            from pipeline.media_semantics.pool import CandidatePool
+
+            scene_idx = int(scene.get("scene_idx", getattr(self, "_current_scene_idx", 0)) or 0)
+            pool = self._shadow_pools.get(scene_idx)
+            if pool is None:
+                pool = CandidatePool(budget=self._semantic_config.budget)
+                self._shadow_pools[scene_idx] = pool
+            provider_key = self._provider_key(None, raw_candidates)
+            try:
+                from pipeline.cinematic_staging import classify_query_tier
+
+                tier = classify_query_tier(query, None)
+            except Exception:
+                tier = ""
+            candidates = normalize_candidates(
+                raw_candidates,
+                provider=provider_key,
+                query=query,
+                query_tier=tier,
+                query_index=0,
+                page=page,
+                media_type=("video" if want_video else None),
+            )
+            for candidate, raw_item in zip(candidates, raw_candidates):
+                ctype = str(raw_item.get("type") or "").strip()
+                if ctype:
+                    candidate.media_type = ctype
+            pool.extend(candidates)
+        except Exception as exc:
+            logger.debug("P01 shadow accumulate failed (fail-open): %s", exc)
+
+    def _shadow_finalize(self, scene: dict) -> None:
+        """Score the shadow pool without changing the legacy winner/downloads."""
+        if not self._semantic_config.shadow:
+            return
+        try:
+            scene_idx = int(scene.get("scene_idx", getattr(self, "_current_scene_idx", 0)) or 0)
+            pool = self._shadow_pools.pop(scene_idx, None)
+            if pool is None or len(pool) == 0:
+                return
+            spec = self._scene_spec_for(scene, scene_idx=scene_idx)
+            selector = self._get_semantic_selector()
+            decision = selector.rank(
+                spec, pool.candidates(),
+                threshold=self._semantic_config.min_relevance_score,
+            )
+            self._record_selection_decision(decision, scene)
+            from pipeline.media_semantics.provenance import emit_decision_event
+
+            emit_decision_event(
+                decision, shadow=True, pool=pool.stats.to_dict(),
+            )
+        except Exception as exc:
+            logger.debug("P01 shadow finalize failed (fail-open): %s", exc)
+
+    def flush_selection_decisions(self, db, video_id: int) -> int:
+        """Persist queued P01 decisions once ``video_id`` is known."""
+        records = list(self._pending_selection_decisions)
+        self._pending_selection_decisions.clear()
+        if not records:
+            return 0
+        try:
+            if hasattr(db, "insert_media_selection_decisions"):
+                return int(db.insert_media_selection_decisions(video_id, records))
+        except Exception as exc:
+            logger.warning("flush_selection_decisions failed (non-critical): %s", exc)
+        return 0
 
     def _interleaved_providers(self, want_video: bool, scene: dict, force_images: bool = False) -> tuple[list, list]:
         """Return (primary_providers, sparing_providers) ordered by preference.
@@ -4260,6 +4646,9 @@ class MediaFetcher:
             for asset in sp.assets:
                 candidates.append({
                     "id": "",  # video providers use URL as key
+                    # Keep the provider object so lazy-download providers
+                    # (Mixkit/Coverr) preserve their page URL attribute.
+                    "_asset_obj": asset,
                     "url": asset.url,
                     "type": "video",
                     "duration": asset.duration,
@@ -4329,10 +4718,15 @@ class MediaFetcher:
             url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
             filename = f"{source}_{url_hash}.mp4"
             from pipeline.providers.base import VideoAsset
-            asset = VideoAsset(
-                url=url, file_path=Path(), duration=candidate.get("duration", 5),
-                resolution=(1920, 1080), provider=source,
-            )
+            # Mixkit/Coverr resolve the real download URL from a lazily-stored
+            # page attribute; preserve the original provider object when the
+            # candidate came from search_page().
+            asset = candidate.get("_asset_obj")
+            if not isinstance(asset, VideoAsset):
+                asset = VideoAsset(
+                    url=url, file_path=Path(), duration=candidate.get("duration", 5),
+                    resolution=(1920, 1080), provider=source,
+                )
             path = self._download_video_asset(asset, provider)
             if path:
                 return {

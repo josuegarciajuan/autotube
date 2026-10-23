@@ -1584,13 +1584,16 @@ def run_job(
                 return False
             
             db.update_video(video_id, progress=55, progress_phase="media")
+            # P01-L: keep the fresh scene ranges available for the DB scene
+            # identity columns (also persisted in the media checkpoint).
+            media_scene_ranges = getattr(orch, "_last_scene_ranges", None)
             _save_checkpoint(video_id, "media", {
                 "assets": [{"type": a.get("type", "?"), "path": str(a.get("path", "")),
                             "source": a.get("source", "?")}
                            for a in (media_assets if isinstance(media_assets, list) else [])],
                 # Persist real scene timing + phase_id for 1:1 alignment on resume
                 # and for retention-curve → narrative-beat mapping (Fase 3).
-                "scene_ranges": getattr(orch, "_last_scene_ranges", None),
+                "scene_ranges": media_scene_ranges,
             }, db)
             log_phase_end(db, entity_type='video', entity_id=video_id, phase='media', channel_id=channel_id)
         
@@ -1869,16 +1872,31 @@ def run_job(
                         total_ms = audio_dur * 1000 or 60000
                     
                     assets_list = media_assets if isinstance(media_assets, list) else []
+                    ranges_list = media_scene_ranges if isinstance(media_scene_ranges, list) else []
                     scenes_data = []
                     for i, escena in enumerate(escenas):
                         asset = assets_list[i] if i < len(assets_list) else None
                         img = str(asset.get("path", "")) if isinstance(asset, dict) else ""
+                        scene_range = ranges_list[i] if i < len(ranges_list) else {}
+                        if not isinstance(scene_range, dict):
+                            scene_range = {}
                         scenes_data.append({
                             "description": escena if isinstance(escena, str)
                             else escena.get("descripcion", str(escena)),
                             "script_text": "",
                             "image_path": img,
                             "duration_ms": total_ms // max(len(escenas), 1),
+                            # P01-L: explicit final-scene identity (nullable).
+                            "block_idx": scene_range.get("asset_idx"),
+                            "final_scene_idx": i,
+                            "parent_scene_idx": scene_range.get("parent_scene_idx"),
+                            "media_request_id": scene_range.get("media_request_id"),
+                            "narration_fragment": (
+                                scene_range.get("fragment_text")
+                                or scene_range.get("query_context")
+                                or scene_range.get("texto")
+                            ),
+                            "selector_version": scene_range.get("selector_version", "") or "",
                         })
                     if scenes_data:
                         db.insert_scenes_batch(video_id, scenes_data)

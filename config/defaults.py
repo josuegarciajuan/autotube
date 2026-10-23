@@ -464,6 +464,42 @@ MEDIA_STRATEGY = {
     "prefer_video": True,
     "max_video_blocks_pct": 80,
     "target_video_pct": 80,
+
+    # ── P01: semantic retrieval selector (opt-in) ───────────────
+    # Default remains legacy until external review and a labelled benchmark.
+    # MEDIA_SELECTOR=legacy|semantic and MEDIA_SELECTOR_SHADOW=true|false can
+    # override these values via environment without editing channel configs.
+    "media_selector": "legacy",
+    "media_selector_shadow": False,
+    "semantic_min_relevance_score": 0.26,
+    "semantic_embedding_backend": "auto",
+    "semantic_embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+    "semantic_embedding_cache": "",
+    # Calibrate against the P01 benchmark corpus before raising the threshold.
+    "semantic_retrieval_budget": {
+        "max_total": 80,
+        "max_per_provider": 30,
+        "max_per_query": 24,
+        "max_pages_per_provider": 2,
+        "max_queries": 10,
+        "top_k": 10,
+        "top_n_download": 3,
+        "provenance_candidate_limit": 12,
+        "provenance_rejected_limit": 12,
+    },
+    "semantic_ranking_weights": {
+        "semantic": 0.35,
+        "lexical": 0.15,
+        "action": 0.18,
+        "subject": 0.12,
+        "environment": 0.08,
+        "era": 0.05,
+        "metadata_quality": 0.04,
+        "provider_prior": 0.03,
+        "negative_constraint": 0.50,
+        "no_metadata_ceiling": 0.12,
+    },
+
     # ── Stock image resolution preference (Fase 1) ──────────────
     # When True, image candidates whose declared width is known and below
     # `min_stock_image_width` are deferred in favour of larger candidates.

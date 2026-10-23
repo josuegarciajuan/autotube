@@ -2041,18 +2041,44 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
             else:
                 escenas = escenas_raw or []
             
+            assets_list = (
+                media_assets.get("assets", []) if isinstance(media_assets, dict)
+                else (media_assets if isinstance(media_assets, list) else [])
+            )
+            ranges_list = (
+                media_assets.get("scene_ranges") if isinstance(media_assets, dict)
+                else None
+            ) or []
+            if not ranges_list:
+                # P01-L: phase_media returns a list; final ranges live on the
+                # orchestrator until the checkpoint is written.
+                ranges_list = getattr(orch, "_last_scene_ranges", None) or []
             scenes_data = []
             for i, escena in enumerate(escenas):
                 img = ""
-                if media_assets and i < len(media_assets) and media_assets[i]:
-                    asset = media_assets[i]
+                if i < len(assets_list) and assets_list[i]:
+                    asset = assets_list[i]
                     img = str(asset.get("path", "")) if isinstance(asset, dict) else ""
-                
+                scene_range = ranges_list[i] if i < len(ranges_list) else {}
+                if not isinstance(scene_range, dict):
+                    scene_range = {}
+
                 scenes_data.append({
                     "description": escena if isinstance(escena, str) else escena.get("descripcion", str(escena)),
                     "script_text": "",
                     "image_path": img,
                     "duration_ms": (duracion * 1000) // max(len(escenas), 1) if duracion else 0,
+                    # P01-L: explicit final-scene identity (nullable).
+                    "block_idx": scene_range.get("asset_idx"),
+                    "final_scene_idx": i,
+                    "parent_scene_idx": scene_range.get("parent_scene_idx"),
+                    "media_request_id": scene_range.get("media_request_id"),
+                    "narration_fragment": (
+                        scene_range.get("fragment_text")
+                        or scene_range.get("query_context")
+                        or scene_range.get("texto")
+                    ),
+                    "selector_version": scene_range.get("selector_version", "") or "",
                 })
             
             if scenes_data:

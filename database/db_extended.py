@@ -1480,6 +1480,9 @@ def migrate_v2(db_path: str = None):
     # ── v71: desglose de ranking editorial + piloto/control (Fase 4) ──
     _migrate_v71(conn, logger)
 
+    # ── v72: P01 — identidad de escena final + provenance de selección de media ──
+    _migrate_v72(conn, logger)
+
     conn.commit()
     conn.close()
     
@@ -4992,17 +4995,40 @@ class ExtendedDatabase(Database):
     # ── Video Scenes ─────────────────────────────────────────
     
     def insert_scenes_batch(self, video_id: int, scenes: list[dict]):
+        base_columns = (
+            "video_id", "scene_order", "description", "script_text", "audio_path",
+            "image_path", "image_url", "subtitle_text", "duration_ms",
+        )
+        extra_columns = (
+            "block_idx", "final_scene_idx", "parent_scene_idx",
+            "media_request_id", "narration_fragment", "selector_version",
+            "selection_status",
+        )
+        use_extra = False
         with self._connect() as conn:
+            try:
+                existing = {
+                    row[1] for row in conn.execute("PRAGMA table_info('video_scenes')")
+                }
+                use_extra = all(col in existing for col in extra_columns)
+            except sqlite3.OperationalError:
+                use_extra = False
+
+            columns = base_columns + (extra_columns if use_extra else ())
+            sql = (
+                f"INSERT INTO video_scenes ({','.join(columns)}) "
+                f"VALUES ({','.join('?' for _ in columns)})"
+            )
             for i, scene in enumerate(scenes):
-                conn.execute(
-                    """INSERT INTO video_scenes 
-                       (video_id, scene_order, description, script_text, audio_path, 
-                        image_path, image_url, subtitle_text, duration_ms)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (video_id, i, scene.get("description"), scene.get("script_text"),
-                     scene.get("audio_path"), scene.get("image_path"), scene.get("image_url"),
-                     scene.get("subtitle_text"), scene.get("duration_ms")),
-                )
+                values = [
+                    video_id, i, scene.get("description"), scene.get("script_text"),
+                    scene.get("audio_path"), scene.get("image_path"),
+                    scene.get("image_url"), scene.get("subtitle_text"),
+                    scene.get("duration_ms"),
+                ]
+                if use_extra:
+                    values.extend(scene.get(col) for col in extra_columns)
+                conn.execute(sql, values)
             conn.commit()
     
     def get_scenes(self, video_id: int) -> list[dict]:
@@ -10033,6 +10059,61 @@ class ExtendedDatabase(Database):
             logger.debug("get_recent_selection_provenance failed: %s", exc)
             return []
 
+    # ── P01: media selection provenance ──────────────────────
+
+    _MSD_COLUMNS = (
+        "video_id", "channel_id", "scene_idx", "block_idx", "parent_scene_idx",
+        "origin", "narration_fragment", "selector_version", "status",
+        "threshold", "final_score", "rejection_reason", "fallback_used",
+        "fallback_reason", "scene_spec_json", "queries_json", "providers_json",
+        "candidates_json", "rejected_json", "winner_json", "winner_provider",
+        "winner_url", "candidate_count", "download_attempts_json", "timing_ms",
+        "cost_json",
+    )
+
+    def insert_media_selection_decisions(
+        self, video_id: int, records: list[dict]
+    ) -> int:
+        """Persist P01 selection decisions for one video (idempotent per call)."""
+        if not records:
+            return 0
+        columns = self._MSD_COLUMNS
+        placeholders = ",".join("?" for _ in columns)
+        sql = (
+            f"INSERT INTO media_selection_decisions ({','.join(columns)}) "
+            f"VALUES ({placeholders})"
+        )
+        inserted = 0
+        try:
+            with self._connect() as conn:
+                for record in records:
+                    values = []
+                    for column in columns:
+                        if column == "video_id":
+                            values.append(video_id)
+                        else:
+                            values.append(record.get(column))
+                    conn.execute(sql, values)
+                    inserted += 1
+                conn.commit()
+        except Exception as exc:  # fail-open: provenance must never block render
+            logger.warning("insert_media_selection_decisions failed: %s", exc)
+        return inserted
+
+    def get_media_selection_decisions(self, video_id: int) -> list[dict]:
+        """Return every P01 media-selection decision recorded for a video."""
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM media_selection_decisions "
+                    "WHERE video_id = ? ORDER BY scene_idx, id",
+                    (video_id,),
+                ).fetchall()
+            return [dict(row) for row in rows]
+        except Exception as exc:
+            logger.debug("get_media_selection_decisions failed: %s", exc)
+            return []
+
     def get_consumed_topic_signatures(self, channel_id: int) -> list[tuple[str, set]]:
         """Lista ``(label, tokens)`` para chequeos de similitud."""
         from pipeline.topic_dedup import tokens_from_json
@@ -12990,3 +13071,86 @@ def _migrate_v70(conn, logger):
 
     conn.commit()
     logger.info("Migration v70: franja-first duplicate index ready")
+
+
+def _migrate_v72(conn, logger):
+    """Idempotent v72 (P01): final-scene identity + media selection provenance.
+
+    P00 found that ``video_scenes`` was indexed by block while media assets
+    were indexed by final scene, making it impossible to answer "why did THIS
+    asset appear over THIS narration fragment?".  This migration adds the
+    explicit final-scene identity columns (non-destructive, nullable) and the
+    ``media_selection_decisions`` audit table.
+
+    The columns are additive and nullable: existing rows and existing readers
+    keep working, and the migration is safe to re-run.
+    """
+    scene_columns = (
+        ("block_idx", "INTEGER"),
+        ("final_scene_idx", "INTEGER"),
+        ("parent_scene_idx", "INTEGER"),
+        ("media_request_id", "TEXT"),
+        ("narration_fragment", "TEXT"),
+        ("selector_version", "TEXT"),
+        ("selection_status", "TEXT"),
+    )
+    try:
+        existing = {row[1] for row in conn.execute("PRAGMA table_info('video_scenes')")}
+        if existing:
+            for column, col_type in scene_columns:
+                if column in existing:
+                    continue
+                try:
+                    conn.execute(
+                        f"ALTER TABLE video_scenes ADD COLUMN {column} {col_type}"
+                    )
+                    logger.info("Migration v72: video_scenes.%s added", column)
+                except sqlite3.OperationalError as exc:
+                    logger.debug("Migration v72 video_scenes.%s: %s", column, exc)
+    except sqlite3.OperationalError as exc:
+        logger.debug("Migration v72: video_scenes not present yet (%s)", exc)
+
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS media_selection_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                video_id INTEGER,
+                channel_id INTEGER,
+                scene_idx INTEGER,
+                block_idx INTEGER,
+                parent_scene_idx INTEGER,
+                origin TEXT,
+                narration_fragment TEXT,
+                selector_version TEXT,
+                status TEXT,
+                threshold REAL DEFAULT 0.0,
+                final_score REAL DEFAULT 0.0,
+                rejection_reason TEXT,
+                fallback_used INTEGER DEFAULT 0,
+                fallback_reason TEXT,
+                scene_spec_json TEXT,
+                queries_json TEXT,
+                providers_json TEXT,
+                candidates_json TEXT,
+                rejected_json TEXT,
+                winner_json TEXT,
+                winner_provider TEXT,
+                winner_url TEXT,
+                candidate_count INTEGER DEFAULT 0,
+                download_attempts_json TEXT,
+                timing_ms REAL DEFAULT 0.0,
+                cost_json TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_msd_video_scene
+                ON media_selection_decisions(video_id, scene_idx);
+            CREATE INDEX IF NOT EXISTS idx_msd_scene_created
+                ON media_selection_decisions(scene_idx, created_at DESC);
+            """
+        )
+    except sqlite3.OperationalError as exc:
+        logger.warning("Migration v72 media_selection_decisions: %s", exc)
+
+    conn.commit()
+    logger.info("Migration v72: P01 scene identity + selection provenance ready")

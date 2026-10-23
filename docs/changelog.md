@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### P01 — Núcleo de recuperación semántica de media
+- Nuevo paquete `pipeline/media_semantics/` con contratos `SceneSpec`,
+  `Candidate` y `SelectionDecision`, generación de queries por escena final,
+  pool global multi-query/multi-proveedor, ranking textual/semántico local,
+  top-K global, threshold, `NO_GOOD_CANDIDATE` y descarga posterior al ranking.
+- `MEDIA_SELECTOR=legacy|semantic` y `MEDIA_SELECTOR_SHADOW`; el default sigue
+  siendo legacy. Backend de embeddings local con fallback (hashing determinista),
+  sin embeddings visuales ni nuevos proveedores.
+- Migración v72 (aditiva): columnas de identidad de escena final en
+  `video_scenes` y tabla `media_selection_decisions` para provenance completa.
+- Replay offline (`ReplayHarness`) y captura de benchmark sin etiquetas
+  inventadas. Documentación: `docs/p01-semantic-retrieval.md` y
+  `docs/adr/ADR-20261024-semantic-retrieval.md`.
+
 ### Experimento de recuperación de alcance — Fases 1, 2 y 3
 - **Fase 1 (packaging/CTR):** activados A/B de miniaturas, saneo determinista de
   títulos y composición 64/26 en canal2 y canal4 (antes solo canal3/canal5). El

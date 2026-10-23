@@ -2278,6 +2278,13 @@ class PipelineOrchestrator:
                 logger.debug("[%s] flush_asset_history failed (non-critical): %s",
                              self.canal, exc)
 
+            # ── P01-K: flush semantic selection provenance (video_id now known) ──
+            try:
+                self.media_fetcher.flush_selection_decisions(self.db, video_id)
+            except Exception as exc:
+                logger.debug("[%s] flush_selection_decisions failed (non-critical): %s",
+                             self.canal, exc)
+
             return {
                 "video_path": str(video_path),
                 "thumbnail_path": str(thumbnail_path),
