@@ -476,3 +476,130 @@ def test_concat_cores_env_override():
         assert cores == 3
     finally:
         del os.environ["AUTOTUBE_DIST_CONCAT_CORES"]
+
+
+# ── Improvement feedback reconciliation (fix oct 2026) ────────────
+# F3-F8 were stuck in 'esperando_generacion' since deploy even though
+# content was being generated. reconcile_status now transitions them.
+
+def test_reconcile_moves_to_needs_review_on_published_content():
+    """F3-F8 should move to requiere_revision when published content exists."""
+    import sqlite3 as _sq, json
+    from api.services.improvement_feedback import (
+        reconcile_status, STATE_KEY, DEPLOYED_AT_KEY,
+        STATUS_AWAITING_DATA, STATUS_NEEDS_REVIEW,
+    )
+
+    conn = _sq.connect(":memory:")
+    conn.row_factory = _sq.Row
+    conn.executescript("""
+        CREATE TABLE system_state (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT);
+        CREATE TABLE videos (id INTEGER PRIMARY KEY, created_at TEXT, published_at TEXT,
+                             yt_video_id TEXT DEFAULT '');
+        CREATE TABLE shorts (id INTEGER PRIMARY KEY, created_at TEXT);
+    """)
+
+    class FakeDB:
+        def get_system_state(self, key):
+            row = conn.execute("SELECT value FROM system_state WHERE key=?", (key,)).fetchone()
+            return row["value"] if row else None
+        def set_system_state(self, key, value):
+            conn.execute("INSERT OR REPLACE INTO system_state(key,value) VALUES(?,?)", (key, value))
+            conn.commit()
+        def _connect(self):
+            return conn
+
+    db = FakeDB()
+
+    # Seed improvement_feedback state directly (no need for full publish_all)
+    items = [
+        {"id": "F3_demanda_todas_rutas", "affects_content": True, "status": STATUS_AWAITING_DATA},
+        {"id": "F0_pausa_protegida", "affects_content": False, "status": "verificada_tecnicamente"},
+    ]
+    payload = {"updated_at": "2026-10-01T08:00:00", "deployed_at": "2026-10-01T08:00:00", "items": items}
+    db.set_system_state(STATE_KEY, json.dumps(payload))
+    db.set_system_state(DEPLOYED_AT_KEY, "2026-10-01T08:00:00")
+
+    # Add published content AFTER deploy
+    conn.execute("INSERT INTO videos (id, created_at, published_at, yt_video_id) VALUES (1, '2026-10-15', '2026-10-16', 'abc')")
+    conn.commit()
+
+    result = reconcile_status(db)
+    result_items = {i["id"]: i for i in result["items"]}
+
+    # F3 (affects_content=True) should transition to needs_review
+    assert result_items["F3_demanda_todas_rutas"]["status"] == STATUS_NEEDS_REVIEW
+    # F0 (affects_content=False) should stay
+    assert result_items["F0_pausa_protegida"]["status"] == "verificada_tecnicamente"
+
+    conn.close()
+
+
+def test_reconcile_ignores_non_content_improvements():
+    """F0/F1/F2/F9 should stay verificada_tecnicamente regardless."""
+    import sqlite3 as _sq, json
+    from api.services.improvement_feedback import (
+        reconcile_status, STATE_KEY, DEPLOYED_AT_KEY, STATUS_VERIFIED,
+    )
+
+    conn = _sq.connect(":memory:")
+    conn.row_factory = _sq.Row
+    conn.executescript("""
+        CREATE TABLE system_state (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT);
+        CREATE TABLE videos (id INTEGER PRIMARY KEY, created_at TEXT, published_at TEXT,
+                             yt_video_id TEXT DEFAULT '');
+        CREATE TABLE shorts (id INTEGER PRIMARY KEY, created_at TEXT);
+    """)
+
+    class FakeDB:
+        def get_system_state(self, key):
+            row = conn.execute("SELECT value FROM system_state WHERE key=?", (key,)).fetchone()
+            return row["value"] if row else None
+        def set_system_state(self, key, value):
+            conn.execute("INSERT OR REPLACE INTO system_state(key,value) VALUES(?,?)", (key, value))
+            conn.commit()
+        def _connect(self):
+            return conn
+
+    db = FakeDB()
+    items = [
+        {"id": "F0", "affects_content": False, "status": STATUS_VERIFIED},
+        {"id": "F3", "affects_content": True, "status": "esperando_datos"},
+    ]
+    payload = {"deployed_at": "2026-10-01", "items": items}
+    db.set_system_state(STATE_KEY, json.dumps(payload))
+    db.set_system_state(DEPLOYED_AT_KEY, "2026-10-01")
+
+    conn.execute("INSERT INTO videos (id, created_at, published_at, yt_video_id) VALUES (1, '2026-10-15', '2026-10-16', 'abc')")
+    conn.commit()
+
+    result = reconcile_status(db)
+    result_items = {i["id"]: i for i in result["items"]}
+    assert result_items["F0"]["status"] == STATUS_VERIFIED  # non-content: untouched
+
+    conn.close()
+
+
+def test_reconcile_noop_without_deploy_date():
+    """Should not crash when no deploy date is stored."""
+    import sqlite3 as _sq
+    from api.services.improvement_feedback import reconcile_status
+
+    conn = _sq.connect(":memory:")
+    conn.row_factory = _sq.Row
+    conn.executescript("""
+        CREATE TABLE system_state (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT);
+        CREATE TABLE videos (id INTEGER PRIMARY KEY, created_at TEXT, published_at TEXT,
+                             yt_video_id TEXT DEFAULT '');
+        CREATE TABLE shorts (id INTEGER PRIMARY KEY, created_at TEXT);
+    """)
+
+    class FakeDB:
+        def get_system_state(self, key): return None
+        def set_system_state(self, key, value): pass
+        def _connect(self): return conn
+
+    result = reconcile_status(FakeDB())
+    assert result.get("items", []) == []  # empty, no crash
+
+    conn.close()

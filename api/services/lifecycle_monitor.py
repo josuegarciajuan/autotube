@@ -447,6 +447,13 @@ def check_all_health(db) -> dict:
     # ── Check 8: Auto-resolve platform token alerts when uploads succeed ──
     resolved += _auto_resolve_platform_tokens(db)
 
+    # ── Check 8.5: Reconcile improvement feedback (F3-F8) with content evidence ──
+    try:
+        from api.services.improvement_feedback import reconcile_status
+        reconcile_status(db)
+    except Exception as exc:
+        logger.debug("improvement feedback reconcile failed: %s", exc)
+
     # ── Check 9: LLM credits low/exhausted ──
     created += _check_llm_credits(db)
 
