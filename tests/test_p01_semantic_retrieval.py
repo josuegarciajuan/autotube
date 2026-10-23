@@ -152,8 +152,9 @@ def test_scene_spec_per_final_scene_preserves_fragment_and_origin():
     ]
     assert [s.origin for s in specs] == ["subscene", "subscene"]
     assert [s.scene_idx for s in specs] == [0, 1]
-    assert scenes[0]["scene_spec"] is specs[0]
+    assert scenes[0]["scene_spec"]["narration_fragment"] == "first sub-scene narration"
     assert scenes[1]["final_scene_idx"] == 1
+    json.dumps(scenes)  # media checkpoint must stay JSON-serialisable
 
 
 def test_scene_spec_roundtrip_is_stable():
@@ -736,3 +737,198 @@ def test_provider_priors_are_bounded_and_provider_ordering_is_not_deciding():
     )
     assert decision.winner is not None
     assert decision.winner.provider == "coverr"
+
+
+# ── P01 reconciliation additions ────────────────────────────────
+
+def test_subscene_without_bible_does_not_inherit_parent_action():
+    """A sub-scene derives its observable action from its own fragment."""
+    parent_query = "wooden sailing ship ocean expedition"
+    specs = attach_scene_specs(
+        [
+            {
+                "search_query_en": parent_query,
+                "fragment_text": "El barco navega entre la tormenta",
+                "is_subscene": True, "asset_idx": 0,
+                "media_request_id": "0:0", "duration": 5,
+            },
+            {
+                "search_query_en": parent_query,
+                "fragment_text": "El capitán escribe el diario en cubierta",
+                "is_subscene": True, "asset_idx": 0,
+                "media_request_id": "0:1", "duration": 5,
+            },
+        ],
+        lambda scene, idx: SceneVisualContext(fragment=scene["fragment_text"]),
+    )
+    assert specs[0].action and specs[1].action
+    assert specs[0].action != specs[1].action
+    assert "navega" in specs[0].action.lower()
+    assert "escribe" in specs[1].action.lower()
+    left = generate_scene_queries(specs[0], base_queries=[parent_query])
+    right = generate_scene_queries(specs[1], base_queries=[parent_query])
+    assert left[0] != right[0]
+    assert any("navega" in q.lower() or "barco" in q.lower() for q in left)
+    assert any("escribe" in q.lower() or "capitán" in q.lower() for q in right)
+
+
+def test_pre_rank_filter_vetoes_anachronism_before_scoring():
+    selector = _selector()
+    modern = _candidate(_raw_good("1"), provider="pexels")
+    modern.title = "modern city excavation"
+    modern.searchable_text = "modern city excavation"
+    decision = selector.rank(
+        _spec(), [modern],
+        pre_filter=lambda candidate: "anachronism" if "modern" in candidate.searchable_text else None,
+    )
+    assert decision.status == SelectionStatus.NO_GOOD_CANDIDATE
+    assert any(r.reason == "anachronism" for r in decision.rejected)
+
+
+def test_semantic_retrieval_respects_pagination_and_budget(monkeypatch):
+    from pipeline.media_fetcher import MediaFetcher
+
+    fetcher = object.__new__(MediaFetcher)
+    fetcher._semantic_config = SemanticConfig(mode="semantic")
+    fetcher._semantic_config.budget.max_pages_per_provider = 2
+    fetcher._semantic_config.budget.max_queries = 1
+    fetcher._semantic_config.budget.max_total = 20
+    fetcher._semantic_selector = None
+    fetcher._pending_selection_decisions = []
+    fetcher._last_selection_decision = None
+    fetcher._current_scene_idx = 0
+    fetcher._media_strategy = {}
+    fetcher._interleaved_providers = lambda *a, **k: ([object()], [])
+    pages: list[int] = []
+
+    def fake_search(provider, query, target_dur, page, want_video):
+        pages.append(page)
+        return [{
+            "id": f"p{page}", "title": "archaeologist excavating ancient tomb",
+            "tags": ["archaeologist", "ancient", "tomb"], "type": "video",
+            "download_url": f"https://cdn.example/p{page}.mp4",
+            "source": "pexels", "page_url": (
+                f"https://pexels.com/video/archaeologist-excavating-ancient-tomb-{page}/"
+            ),
+            "_total_available": 80, "_per_page": 20,
+        }]
+
+    fetcher._search_provider_page = fake_search
+    fetcher._download_candidate = lambda provider, raw: {
+        "path": f"/tmp/{raw['id']}.mp4", "type": "video", "source": "pexels",
+    }
+    fetcher._is_asset_duplicate = lambda raw: False
+    fetcher._is_anachronistic_for_scene = lambda raw, ctx, scene_ctx: False
+    fetcher._record_asset_used = lambda raw: None
+    fetcher._record_asset_for_history = lambda asset: None
+    fetcher._visual_candidate_ok = lambda asset, scene, duration: True
+    fetcher._scene_context = lambda scene, scene_idx=0: SceneVisualContext(
+        fragment=scene.get("fragment_text", ""),
+        subject="archaeologist", action="excavating", setting="ancient tomb",
+    )
+
+    asset = fetcher._fetch_asset_semantic(
+        {
+            "scene_idx": 0,
+            "fragment_text": "an archaeologist excavates an ancient tomb",
+            "search_query_en": "archaeologist ancient tomb",
+            "duration": 5.0, "asset_idx": 0, "media_request_id": "0:0",
+        },
+        ["archaeologist ancient tomb"], False, 5.0, None,
+    )
+    assert asset is not None
+    assert pages[:2] == [1, 2]       # paginated
+    assert 3 not in pages            # budget respected
+    assert fetcher._last_selection_decision is not None
+
+
+def test_replay_is_deterministic_and_fixture_roundtrips(tmp_path):
+    harness = ReplayHarness()
+    harness.add_scene(
+        "video1:s0",
+        _spec(media_request_id="0:0"),
+        queries=["archaeologist excavating ancient tomb"],
+        candidates=[_candidate(_raw_bad("2")), _candidate(_raw_good("1"))],
+        expected_visual_description="archaeologist in a tomb",
+    )
+    path = harness.save(tmp_path / "replay.json")
+    loaded = ReplayHarness.load(path)
+    first = loaded.replay()
+    second = loaded.replay()
+    assert first == second
+    assert first[0]["same_candidates"] is True
+    assert first[0]["semantic"]["winner"] is not None
+    assert first[0]["semantic"]["winner"]["provider_asset_id"] == "1"
+
+
+def test_media_request_id_is_persisted_in_scene_and_decision(tmp_path):
+    from database.db_extended import ExtendedDatabase
+
+    db_path = tmp_path / "p01.db"
+    _make_identity_db(db_path)
+    db = ExtendedDatabase(str(db_path))
+    db.insert_scenes_batch(1, [{
+        "description": "scene", "final_scene_idx": 0, "block_idx": 3,
+        "media_request_id": "3:1",
+        "narration_fragment": "the fragment",
+    }])
+    scenes = db.get_scenes(1)
+    assert scenes[0]["media_request_id"] == "3:1"
+
+    selector = _selector()
+    decision = selector.rank(_spec(media_request_id="3:1"), [_candidate(_raw_good("1"))])
+    record = decision_record(decision, video_id=1)
+    assert record["media_request_id"] == "3:1"
+    assert db.insert_media_selection_decisions(1, [record]) == 1
+    rows = db.get_media_selection_decisions(1)
+    assert rows[0]["media_request_id"] == "3:1"
+
+
+def test_shadow_alias_and_default_legacy():
+    assert SemanticConfig.from_media_strategy({}, env={}).mode == "legacy"
+    shadow = SemanticConfig.from_media_strategy(
+        {}, env={"MEDIA_SELECTOR": "shadow"}
+    )
+    assert shadow.mode == "legacy" and shadow.shadow is True
+    semantic = SemanticConfig.from_media_strategy(
+        {}, env={"MEDIA_SELECTOR": "semantic"}
+    )
+    assert semantic.mode == "semantic" and semantic.shadow is False
+
+
+def test_v72_reconciliation_adds_column_to_preexisting_table(tmp_path):
+    """DBs that already ran the first v72 revision get the new column safely."""
+    from database.db_extended import _migrate_v72
+
+    db_path = tmp_path / "old-v72.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE video_scenes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_id INTEGER, scene_order INTEGER, description TEXT,
+            script_text TEXT, audio_path TEXT, image_path TEXT,
+            image_url TEXT, subtitle_text TEXT, duration_ms INTEGER,
+            block_idx INTEGER, final_scene_idx INTEGER, parent_scene_idx INTEGER,
+            narration_fragment TEXT, selector_version TEXT, selection_status TEXT
+        );
+        CREATE TABLE media_selection_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_id INTEGER, scene_idx INTEGER, block_idx INTEGER,
+            status TEXT, selector_version TEXT, created_at TIMESTAMP
+        );
+        """
+    )
+    _migrate_v72(conn, logging.getLogger("p01-test"))
+    _migrate_v72(conn, logging.getLogger("p01-test"))
+    cols = {
+        row[1] for row in conn.execute(
+            "PRAGMA table_info('media_selection_decisions')"
+        )
+    }
+    assert "media_request_id" in cols
+    # Existing data survives the additive migration.
+    assert conn.execute(
+        "SELECT COUNT(*) FROM media_selection_decisions"
+    ).fetchone()[0] == 0
+    conn.close()

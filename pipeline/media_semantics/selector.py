@@ -46,6 +46,7 @@ class SemanticMediaSelector:
         scene_spec: SceneSpec,
         candidates: list[Candidate],
         threshold: float | None = None,
+        pre_filter: Callable[[Candidate], str | None] | None = None,
     ) -> SelectionDecision:
         started = time.time()
         threshold = (
@@ -64,6 +65,30 @@ class SemanticMediaSelector:
         if not candidates:
             decision.status = SelectionStatus.RETRIEVAL_FAILED
             decision.rejection_reason = "no_candidates_retrieved"
+            decision.timing_ms = (time.time() - started) * 1000
+            return decision
+
+        # P01: era/anachronism (and any other hard veto) is applied BEFORE
+        # ranking, so a forbidden candidate can never win on text similarity.
+        if pre_filter is not None:
+            filtered: list[Candidate] = []
+            early_rejected: list[RejectedCandidate] = []
+            for candidate in candidates:
+                try:
+                    reason = pre_filter(candidate)
+                except Exception:
+                    reason = None
+                if reason:
+                    early_rejected.append(
+                        RejectedCandidate(candidate=candidate, score=0.0, reason=str(reason))
+                    )
+                else:
+                    filtered.append(candidate)
+            candidates = filtered
+            decision.rejected.extend(early_rejected)
+        if not candidates:
+            decision.status = SelectionStatus.NO_GOOD_CANDIDATE
+            decision.rejection_reason = "all_candidates_prefiltered"
             decision.timing_ms = (time.time() - started) * 1000
             return decision
 
@@ -119,7 +144,9 @@ class SemanticMediaSelector:
             approved.append((candidate, breakdown))
 
         decision.candidate_scores = score_rows
-        decision.rejected = rejected[: self.config.budget.provenance_rejected_limit]
+        decision.rejected = (
+            decision.rejected + rejected
+        )[: self.config.budget.provenance_rejected_limit]
         decision.approved = [c for c, _ in approved]  # type: ignore[attr-defined]
         if approved:
             winner, winner_breakdown = approved[0]
@@ -140,6 +167,7 @@ class SemanticMediaSelector:
         download_fn: Callable[[Candidate], dict | None],
         *,
         threshold: float | None = None,
+        pre_filter: Callable[[Candidate], str | None] | None = None,
         pre_download_filter: Callable[[Candidate], bool] | None = None,
     ) -> SelectionDecision:
         """Download only the approved top-N, in rank order.
@@ -149,7 +177,9 @@ class SemanticMediaSelector:
         approved candidate is tried without re-running retrieval.
         """
         started = time.time()
-        decision = self.rank(scene_spec, candidates, threshold=threshold)
+        decision = self.rank(
+            scene_spec, candidates, threshold=threshold, pre_filter=pre_filter
+        )
         approved: list[Candidate] = list(getattr(decision, "approved", []) or [])
 
         if not approved:

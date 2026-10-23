@@ -36,6 +36,7 @@ def decision_record(
         "scene_idx": int(scene_idx if scene_idx is not None else spec.get("scene_idx", 0)),
         "block_idx": block_idx if block_idx is not None else spec.get("block_idx"),
         "parent_scene_idx": spec.get("parent_scene_idx"),
+        "media_request_id": spec.get("media_request_id", ""),
         "origin": spec.get("origin", "block"),
         "narration_fragment": spec.get("narration_fragment", ""),
         "selector_version": data.get("selector_version", ""),

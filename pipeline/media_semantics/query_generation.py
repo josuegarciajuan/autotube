@@ -46,16 +46,46 @@ def _fit(query: str, max_len: int = 100) -> str:
     return query[:max_len].rsplit(" ", 1)[0].rstrip(" ,.")
 
 
+def _avoid_words(must_avoid: list[str]) -> set[str]:
+    avoid: set[str] = set()
+    for term in must_avoid:
+        avoid.update(_words(term))
+    return avoid
+
+
 def _is_avoid_only(query: str, must_avoid: list[str]) -> bool:
     if not must_avoid:
         return False
     qwords = set(_words(query))
     if not qwords:
         return True
-    avoid_words: set[str] = set()
-    for term in must_avoid:
-        avoid_words.update(_words(term))
+    avoid_words = _avoid_words(must_avoid)
     return bool(avoid_words) and qwords.issubset(avoid_words)
+
+
+def _strip_forbidden(query: str, must_avoid: list[str]) -> str:
+    """Remove ``must_avoid`` words from a positive query (never add them)."""
+    avoid = _avoid_words(must_avoid)
+    if not avoid:
+        return query
+    return " ".join(
+        w for w in _WORD_RE.findall(str(query or "")) if w.lower() not in avoid
+    )
+
+
+def _narration_query(spec: SceneSpec, limit: int = 8) -> str:
+    """Dependency-free query derived from the FINAL narration slice."""
+    words = [
+        w.lower() for w in _WORD_RE.findall(str(spec.narration_fragment or ""))
+        if len(w) > 1
+    ]
+    stop = {
+        "el", "la", "los", "las", "un", "una", "de", "del", "en", "y", "o",
+        "que", "con", "por", "para", "al", "se", "su", "the", "a", "an",
+        "of", "in", "on", "and", "or", "to", "with",
+    }
+    meaningful = [w for w in words if w not in stop]
+    return " ".join(meaningful[:limit])
 
 
 def generate_scene_query_variants(
@@ -85,7 +115,7 @@ def generate_scene_query_variants(
     seen: set[str] = set()
 
     def add(query: str, source: str) -> None:
-        q = fit_query(_fit(query, max_len), max_len)
+        q = fit_query(_fit(_strip_forbidden(query, spec.must_avoid), max_len), max_len)
         if not q:
             return
         key = q.lower()
@@ -107,6 +137,9 @@ def generate_scene_query_variants(
     add(_join(action, subject), "action_subject")
     for phrase in include[:2]:
         add(_join(phrase, subject, action), "must_include")
+    narration = _narration_query(spec)
+    if narration:
+        add(narration, "narration_fragment")
 
     # 2. Era-aware (only when the era is meaningful and not already present).
     if era_ok:

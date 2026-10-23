@@ -66,11 +66,13 @@ class EmbeddingBackend(Protocol):
 
 
 class HashingEmbeddingBackend:
-    """Deterministic, dependency-free hashed n-gram embeddings.
+    """HASH_VECTOR backend: deterministic hashed n-gram similarity.
 
     This is a real vector-space representation (word unigrams + bigrams hashed
-    into a fixed space and L2-normalised).  It is local and stable across
-    processes (uses BLAKE2b, never Python's randomised ``hash``).
+    into a fixed space and L2-normalised), but it is **not** a neural semantic
+    embedding.  It is local and stable across processes (uses BLAKE2b, never
+    Python's randomised ``hash``).  The optional ``SentenceTransformerBackend``
+    is the SEMANTIC_EMBEDDING extension point.
     """
 
     name = "hashing"

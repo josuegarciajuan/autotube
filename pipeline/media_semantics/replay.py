@@ -225,6 +225,9 @@ class ReplayHarness:
             semantic = selector.rank(
                 scene.scene_spec, scene.candidates, threshold=threshold
             )
+            # Offline replay must be byte-for-byte deterministic: wall-clock
+            # timing is metadata of the live run, not part of the decision.
+            semantic.timing_ms = 0.0
             scene.legacy_winner = (
                 legacy.winner.to_dict() if legacy.winner is not None else None
             )

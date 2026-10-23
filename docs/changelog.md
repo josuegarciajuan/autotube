@@ -1,5 +1,14 @@
 # Autotube Changelog
 
+## P01-R — reconciliación
+
+- Una sola implementación canónica: `pipeline/media_semantics/`.
+- Portados desde la rama supervisada: acción derivada del fragmento final en
+  subescenas, query de narración, stripping de `must_avoid`, veto de
+  anacronismo antes del ranking, `media_request_id` explícito, replay
+  determinista, CLI y fixture de benchmark.
+- Eliminada la segunda arquitectura (`pipeline/media_selection`) de `main`.
+
 ## [Unreleased]
 
 ### P01 — Núcleo de recuperación semántica de media

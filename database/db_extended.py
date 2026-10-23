@@ -10063,7 +10063,7 @@ class ExtendedDatabase(Database):
 
     _MSD_COLUMNS = (
         "video_id", "channel_id", "scene_idx", "block_idx", "parent_scene_idx",
-        "origin", "narration_fragment", "selector_version", "status",
+        "media_request_id", "origin", "narration_fragment", "selector_version", "status",
         "threshold", "final_score", "rejection_reason", "fallback_used",
         "fallback_reason", "scene_spec_json", "queries_json", "providers_json",
         "candidates_json", "rejected_json", "winner_json", "winner_provider",
@@ -13120,6 +13120,7 @@ def _migrate_v72(conn, logger):
                 scene_idx INTEGER,
                 block_idx INTEGER,
                 parent_scene_idx INTEGER,
+                media_request_id TEXT,
                 origin TEXT,
                 narration_fragment TEXT,
                 selector_version TEXT,
@@ -13151,6 +13152,22 @@ def _migrate_v72(conn, logger):
         )
     except sqlite3.OperationalError as exc:
         logger.warning("Migration v72 media_selection_decisions: %s", exc)
+
+    # Existing DBs that already ran the first v72 revision keep the table;
+    # add the reconciliation column explicitly (idempotent).
+    try:
+        msd_cols = {
+            row[1] for row in conn.execute(
+                "PRAGMA table_info('media_selection_decisions')"
+            ).fetchall()
+        }
+        if msd_cols and "media_request_id" not in msd_cols:
+            conn.execute(
+                "ALTER TABLE media_selection_decisions ADD COLUMN media_request_id TEXT"
+            )
+            logger.info("Migration v72: media_selection_decisions.media_request_id added")
+    except sqlite3.OperationalError as exc:
+        logger.debug("Migration v72 media_request_id: %s", exc)
 
     conn.commit()
     logger.info("Migration v72: P01 scene identity + selection provenance ready")
