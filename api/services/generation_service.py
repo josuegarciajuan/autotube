@@ -550,7 +550,8 @@ def _kill_orphaned_workers(logger) -> int:
                     if _job_row:
                         _job_status = _job_row["status"]
                         _video_id = _job_row["video_id"]
-                        if _job_status not in ("completed", "failed", "cancelled"):
+                        # Don't clobber requeued jobs ('queued' = transient retry pending)
+                        if _job_status not in ("completed", "failed", "cancelled", "queued"):
                             _cur2.execute(
                                 "UPDATE generation_jobs SET status='failed', "
                                 "error_msg=?, finished_at=CURRENT_TIMESTAMP WHERE id=?",
@@ -1351,10 +1352,7 @@ def _auto_retry_if_transient(job_id: int, video_id: int):
     TRANSIENT_PATTERNS = [
         "timeout", "memory guard", "broken pipe", "brokenpipe",
         "orphaned: process lost", "memory", "abortado: memoria",
-        # Subproceso distribuido delegado que falló tras agotar la reparación en
-        # la flota (pipeline_dist): se reintenta el vídeo desde cero (tope
-        # MAX_RETRY_ATTEMPTS). El fallback local ya se intentó antes.
-        "dist_repair_exhausted",
+        "dist_repair_exhausted", "local_fallback_deferred",
     ]
     is_transient = any(p in error_msg for p in TRANSIENT_PATTERNS)
     
@@ -1371,7 +1369,15 @@ def _auto_retry_if_transient(job_id: int, video_id: int):
         return
     
     # Requeue: reset status so queue consumer picks it up
-    db.update_job_requeue(job_id, error_msg=job.get("error_msg", "")[:200])
+    note = f" [retry {retries}/{max_retries} queued]"
+    db.update_job_requeue(job_id, error_msg=(job.get("error_msg", "")[:480] + note))
+    try:
+        db.update_video(
+            video_id, status="error", progress_phase="queued_retry",
+            error_message=(job.get("error_msg", "")[:450] + note),
+        )
+    except Exception:
+        pass
     logger.info(
         "Job #%d auto-requeued (retry %d/%d). Error: %s",
         job_id, retries, max_retries, job.get("error_msg", "")[:150],
@@ -4191,6 +4197,22 @@ async def _monitor_worker_progress(
             # Check if job is done (terminal status in DB)
             job_status = job.get("status", "") if job else ""
             is_terminal = job_status in ("completed", "failed", "cancelled")
+
+            # ── Requeue protection (fix oct 2026) ──────────────────────
+            # When the worker detects a transient failure (distributed timeout,
+            # no compatible node, local_fallback_deferred, OOM, etc.) it calls
+            # _maybe_requeue_transient -> update_job_requeue which sets the job
+            # to status='queued'. The worker then exits normally. Before this
+            # fix the monitor saw "process gone + not terminal" and overwrote
+            # the requeue with 'failed'/'worker_died', defeating every retry
+            # (#2712–#2746). Detect the requeue and leave it alone.
+            if not process_alive and job_status == "queued":
+                logger.info(
+                    "Worker pid=%d exited after requeue (job #%d, retry queued) — "
+                    "not overwriting with failed",
+                    proc.pid, job_id,
+                )
+                break
 
             # If process died but DB doesn't know yet, mark as failed
             if not process_alive and not is_terminal:

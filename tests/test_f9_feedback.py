@@ -18,7 +18,7 @@ def test_publish_all_sets_status_and_schedules_reviews(tmp_path):
 
     # Mejoras que no tocan contenido quedan verificadas; las demás esperan vídeos.
     assert items["F0_pausa_protegida"]["status"] == ifb.STATUS_VERIFIED
-    assert items["F6_ab_flujo_f1f2"]["status"] == ifb.STATUS_AWAITING_GENERATION
+    assert items["F6_ab_flujo_f1f2"]["status"] == ifb.STATUS_AWAITING_DATA
 
     # Aviso de estado persistido.
     status = ifb.get_status(db)

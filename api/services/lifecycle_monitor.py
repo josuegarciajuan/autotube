@@ -447,6 +447,13 @@ def check_all_health(db) -> dict:
     # ── Check 8: Auto-resolve platform token alerts when uploads succeed ──
     resolved += _auto_resolve_platform_tokens(db)
 
+    # ── Check 8.5: Reconcile improvement feedback (F3-F8) with content evidence ──
+    try:
+        from api.services.improvement_feedback import reconcile_status
+        reconcile_status(db)
+    except Exception as exc:
+        logger.debug("improvement feedback reconcile failed: %s", exc)
+
     # ── Check 9: LLM credits low/exhausted ──
     created += _check_llm_credits(db)
 
@@ -2241,7 +2248,13 @@ def _check_tasks_alive(db) -> int:
 
 
 def _resolve_recovered_task_alerts(db, conn) -> int:
-    """Resolve liveness alerts once a valid, fresh heartbeat is observed."""
+    """Resolve liveness alerts once a valid, fresh heartbeat is observed.
+
+    Also auto-resolves generic `error_autotube_watchdog` alerts whose message
+    references the recovered task (fix oct 2026: the watchdog emits a generic
+    error_* alert in addition to task_stalled; the generic alert had no
+    auto-resolution path and lingered even after the heartbeat recovered).
+    """
     resolved = 0
     for task_name, timeout_s in TASK_TIMEOUTS.items():
         row = conn.execute(
@@ -2265,6 +2278,20 @@ def _resolve_recovered_task_alerts(db, conn) -> int:
                WHERE entity_type = 'system' AND entity_id = ?
                  AND alert_type = 'task_stalled' AND resolved = 0""",
             (_TASK_ENTITY_IDS[task_name],),
+        )
+        resolved += cur.rowcount
+
+        # Also close generic watchdog error_* alerts referencing this task
+        cur = conn.execute(
+            """UPDATE pipeline_alerts
+               SET resolved = 1, resolved_at = datetime('now'), acknowledged = 1,
+                   message = COALESCE(message, '') ||
+                     ' [Auto-resuelto: heartbeat recuperado]'
+               WHERE entity_type = 'system'
+                 AND alert_type = 'error_autotube_watchdog'
+                 AND resolved = 0
+                 AND (message LIKE ? OR title LIKE ?)""",
+            (f'%{task_name}%', f'%{task_name}%'),
         )
         resolved += cur.rowcount
     if resolved:

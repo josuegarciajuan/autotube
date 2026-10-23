@@ -72,8 +72,7 @@ REVIEW_CHECKPOINTS = (("48h", 2), ("7d", 7), ("14d", 14), ("28d", 28))
 _REVIEW_BRIEF = (
     "Revisión {kind}: integridad y publicación; señales iniciales de impresiones, "
     "CTR y retención. Recuerda que el reloj de rendimiento cuenta desde la "
-    "publicación real de vídeos nuevos, no desde el despliegue. La generación "
-    "sigue parada salvo que el operador la reanude."
+    "publicación real de vídeos nuevos, no desde el despliegue."
 )
 
 
@@ -82,7 +81,7 @@ def _now_iso() -> str:
 
 
 def deploy_status() -> str:
-    return STATUS_AWAITING_GENERATION
+    return STATUS_AWAITING_DATA
 
 
 def publish_all(db, start_iso: str | None = None) -> dict:
@@ -90,7 +89,7 @@ def publish_all(db, start_iso: str | None = None) -> dict:
     start = start_iso or _now_iso()
     items = []
     for idx, imp in enumerate(IMPROVEMENTS):
-        status = STATUS_AWAITING_GENERATION if imp["affects_content"] else STATUS_VERIFIED
+        status = STATUS_AWAITING_DATA if imp["affects_content"] else STATUS_VERIFIED
         item = {
             "id": imp["id"], "phase": imp["phase"], "title": imp["title"],
             "detail": imp["detail"], "status": status,
@@ -113,6 +112,82 @@ def get_status(db) -> dict:
         return json.loads(raw) if raw else {"updated_at": None, "items": []}
     except (TypeError, ValueError):
         return {"updated_at": None, "items": []}
+
+
+def reconcile_status(db) -> dict:
+    """Reconcile improvement statuses with actual content evidence.
+
+    F3-F8 affect content and start in 'esperando_datos'. When videos or shorts
+    have been generated AFTER the deployment date, transition them to
+    'esperando_datos' (data is coming). When published content exists, move
+    to 'requiere_revision' if still pending.
+
+    Returns the updated payload.
+    """
+    payload = get_status(db)
+    items = payload.get("items", [])
+    if not items:
+        return payload
+
+    deployed_raw = db.get_system_state(DEPLOYED_AT_KEY) or payload.get("deployed_at")
+    if not deployed_raw:
+        return payload
+
+    # Normalize deployed_at for comparison
+    try:
+        deployed = str(deployed_raw)[:19]
+    except Exception:
+        deployed = ""
+
+    # Check for evidence of content generation after deployment
+    has_new_videos = False
+    has_new_shorts = False
+    has_published = False
+    try:
+        with db._connect() as conn:
+            if deployed:
+                v = conn.execute(
+                    "SELECT COUNT(*) as c FROM videos WHERE created_at > ?",
+                    (deployed,),
+                ).fetchone()
+                has_new_videos = bool(v and v["c"] > 0)
+                s = conn.execute(
+                    "SELECT COUNT(*) as c FROM shorts WHERE created_at > ?",
+                    (deployed,),
+                ).fetchone()
+                has_new_shorts = bool(s and s["c"] > 0)
+                p = conn.execute(
+                    "SELECT COUNT(*) as c FROM videos WHERE published_at > ? AND yt_video_id != ''",
+                    (deployed,),
+                ).fetchone()
+                has_published = bool(p and p["c"] > 0)
+    except Exception:
+        pass
+
+    has_generation = has_new_videos or has_new_shorts
+    changed = False
+
+    for item in items:
+        old_status = item.get("status", "")
+        if not item.get("affects_content"):
+            continue  # F0/F1/F2/F9 are already verified
+
+        # Waiting for generation -> data is available once content exists
+        if old_status == STATUS_AWAITING_GENERATION and has_generation:
+            item["status"] = STATUS_AWAITING_DATA
+            item["note"] = "Contenido generado post-despliegue detectado"
+            changed = True
+        # Awaiting data -> needs review once published
+        elif old_status == STATUS_AWAITING_DATA and has_published:
+            item["status"] = STATUS_NEEDS_REVIEW
+            item["note"] = "Vídeos publicados post-despliegue; revisar métricas"
+            changed = True
+
+    if changed:
+        payload["updated_at"] = _now_iso()
+        db.set_system_state(STATE_KEY, json.dumps(payload, ensure_ascii=False))
+
+    return payload
 
 
 def set_improvement_status(db, improvement_id: str, status: str, note: str = "") -> dict:
