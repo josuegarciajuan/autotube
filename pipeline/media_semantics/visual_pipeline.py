@@ -469,6 +469,13 @@ class VisualIntelligencePipeline:
                 frame_relevance=row["frame_relevance"],
                 technical_quality=row["technical_quality"],
                 weights=self.weights,
+                available_components={
+                    "text": True,
+                    "preview": bool(preview_scores),
+                    "frame": bool(row.get("frame_scores")),
+                    "vlm": False,
+                    "technical_quality": True,
+                },
             )
             row["combined"] = combined
         vlm_available = _vlm_available(self.vlm)
@@ -547,6 +554,13 @@ class VisualIntelligencePipeline:
                 era_penalty=constraints.era_penalty,
                 must_include_penalty=constraints.must_include_penalty,
                 weights=self.weights,
+                available_components={
+                    "text": True,
+                    "preview": bool(preview_scores),
+                    "frame": bool(row.get("frame_scores")),
+                    "vlm": bool(verification is not None and verification.usable),
+                    "technical_quality": True,
+                },
             )
 
         eligible: list[dict[str, Any]] = []

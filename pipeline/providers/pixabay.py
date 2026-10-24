@@ -46,29 +46,44 @@ class PixabayVideoProvider(BaseVideoProvider):
     def name(self) -> str:
         return "pixabay"
 
-    @staticmethod
-    def _visual_fields(hit: dict) -> dict:
+    # Ordered from smallest to largest.  The API exposes a poster still for
+    # every rendition; the P02 preview budget caps downloads at 512 KB, so the
+    # 4K ``large`` thumbnail (often >700 KB) must not win by insertion order.
+    _THUMB_RENDITIONS = ("tiny", "small", "medium", "large")
+
+    @classmethod
+    def _visual_fields(cls, hit: dict) -> dict:
         """Use only fields the Pixabay response already provides.
 
-        The Videos API does not currently document a poster URL; if a future
-        response includes ``image``/``thumbnail``/``picture`` we use it, else
-        we explicitly mark PREVIEW_UNAVAILABLE (never invent a CDN URL).
+        Live responses (verified in P03) expose ``videos.<size>.thumbnail``.
+        We pick the smallest rendition that the preview fetcher can afford.
+        No CDN URL is invented; if no rendition has a thumbnail the status is
+        explicitly PREVIEW_UNAVAILABLE.
         """
         thumb = str(
             hit.get("image") or hit.get("thumbnail") or hit.get("picture") or ""
         ).strip()
+        preview_width = preview_height = None
         videos = hit.get("videos") or {}
         if not thumb and isinstance(videos, dict):
-            for item in videos.values():
-                if isinstance(item, dict):
-                    candidate = str(item.get("thumbnail") or item.get("picture") or "").strip()
-                    if candidate:
-                        thumb = candidate
-                        break
+            for size in cls._THUMB_RENDITIONS:
+                item = videos.get(size)
+                if not isinstance(item, dict):
+                    continue
+                candidate = str(
+                    item.get("thumbnail") or item.get("picture") or ""
+                ).strip()
+                if candidate:
+                    thumb = candidate
+                    preview_width = item.get("width")
+                    preview_height = item.get("height")
+                    break
         return {
             "thumbnail_url": thumb,
             "preview_url": thumb,
             "preview_type": "image" if thumb else "",
+            "preview_width": preview_width,
+            "preview_height": preview_height,
             "visual_source": "pixabay:thumbnail" if thumb else "",
             "preview_status": "PREVIEW_AVAILABLE" if thumb else "PREVIEW_UNAVAILABLE",
         }
