@@ -281,7 +281,7 @@ def copy_review_pack_to_repo(run_dir: Path, repo_root: Path, run_id: str) -> Pat
     text = source.read_text(encoding="utf-8")
     # The stable copy lives one directory above the runs/ folder.
     prefix = f"runs/{run_id}/"
-    text = text.replace('src="', f'src="{prefix}')
+    text = text.replace('src="', f'src="{prefix}').replace("src='", f"src='{prefix}")
     target = target_dir / "review_pack.html"
     target.write_text(text, encoding="utf-8")
     return target

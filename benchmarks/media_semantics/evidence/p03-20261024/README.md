@@ -22,8 +22,8 @@ gitignored.
 | `performance.json` | latency, throughput, network, 20-min estimate |
 | `auto_eval_before.json` / `auto_eval_after.json` | auxiliary VLM labels |
 | `decisions_summary.json` | compact winners/scores per scene and arm |
-| `review_pack.html` | review pack with local asset paths (run dir) |
 | `review_pack_remote.html` | review pack using provider thumbnail URLs |
+| `../../review_pack.html` | stable local-asset pack (run assets preserved under `runs/`) |
 | `labels_template.json` etc. | human labels are `null` |
 
 `AUTO_EVALUATION` is not human ground truth. `human_label` is `null` everywhere.
