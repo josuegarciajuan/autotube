@@ -218,3 +218,74 @@ def test_seo_summary_marca_reach_pendiente(tmp_path):
     assert summary[3]["total_impressions_30d"] == 500
     assert summary[3]["impression_video_count"] == 1
     assert summary[3]["avg_ctr_30d"] == 4.0
+
+
+# ── Crecimiento de impresiones y CTR en el dashboard ────────────────────────
+
+
+def _iso_days_ago(days: int) -> str:
+    from datetime import timedelta
+    return (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+
+def test_dashboard_impressions_y_ctr_delta(tmp_path):
+    """El dashboard compara 0-30d contra 30-60d (CTR ponderado)."""
+    db = _get_db(tmp_path)
+
+    # Periodo actual: 1000 impresiones al 5% → 50 clics.
+    db.upsert_video_reach_daily(3, "VID1", _iso_days_ago(1), impressions=1000, impressions_ctr=5.0)
+    # Periodo anterior: 500 impresiones al 4% → 20 clics.
+    db.upsert_video_reach_daily(3, "VID1", _iso_days_ago(40), impressions=500, impressions_ctr=4.0)
+
+    data = db.get_dashboard_data(channel_id=None)
+    kpis = data["global_kpis"]
+
+    assert kpis["impressions"]["value"] == 1000
+    assert kpis["impressions"]["delta"] == 100.0      # (1000-500)/500
+    assert kpis["ctr"]["value"] == 5.0
+    assert kpis["ctr"]["delta"] == 25.0               # (5.0-4.0)/4.0
+    assert kpis["in_production"].get("delta") is None  # pipeline no lleva %
+
+
+def test_dashboard_reach_delta_ctr_ponderado(tmp_path):
+    """El CTR del periodo es ponderado por impresiones, no media de porcentajes."""
+    db = _get_db(tmp_path)
+
+    # Actual: 900 imp @ 2% (18 clics) + 100 imp @ 10% (10 clics) → 28/1000 = 2.8%.
+    db.upsert_video_reach_daily(3, "VID1", _iso_days_ago(2), impressions=900, impressions_ctr=2.0)
+    db.upsert_video_reach_daily(3, "VID2", _iso_days_ago(2), impressions=100, impressions_ctr=10.0)
+    # Anterior: 1000 imp @ 2% → CTR 2.0%.
+    db.upsert_video_reach_daily(3, "VID1", _iso_days_ago(45), impressions=1000, impressions_ctr=2.0)
+
+    kpis = db.get_dashboard_data(channel_id=None)["global_kpis"]
+    assert kpis["ctr"]["value"] == 2.8
+    assert kpis["ctr"]["delta"] == 40.0               # (2.8-2.0)/2.0
+
+
+def test_dashboard_reach_delta_sin_periodo_anterior(tmp_path):
+    """Sin datos previos el delta es None (no inventa 0% ni +100%)."""
+    db = _get_db(tmp_path)
+    db.upsert_video_reach_daily(3, "VID1", _iso_days_ago(1), impressions=1000, impressions_ctr=5.0)
+
+    kpis = db.get_dashboard_data(channel_id=None)["global_kpis"]
+    assert kpis["impressions"]["value"] == 1000
+    assert kpis["impressions"]["delta"] is None
+    assert kpis["ctr"]["value"] == 5.0
+    assert kpis["ctr"]["delta"] is None
+
+
+def test_dashboard_reach_delta_filtra_por_canal(tmp_path):
+    """El periodo anterior respeta el filtro channel_id."""
+    db = _get_db(tmp_path)
+    # Canal 3: 1000 imp ahora, 500 antes.
+    db.upsert_video_reach_daily(3, "V3", _iso_days_ago(1), impressions=1000, impressions_ctr=5.0)
+    db.upsert_video_reach_daily(3, "V3", _iso_days_ago(40), impressions=500, impressions_ctr=4.0)
+    # Canal 4: valores altos que NO deben contaminar el cálculo del canal 3.
+    db.upsert_video_reach_daily(4, "V4", _iso_days_ago(1), impressions=99999, impressions_ctr=9.0)
+    db.upsert_video_reach_daily(4, "V4", _iso_days_ago(40), impressions=1, impressions_ctr=1.0)
+
+    kpis = db.get_dashboard_data(channel_id=3)["global_kpis"]
+    assert kpis["impressions"]["value"] == 1000
+    assert kpis["impressions"]["delta"] == 100.0
+    assert kpis["ctr"]["value"] == 5.0
+    assert kpis["ctr"]["delta"] == 25.0
