@@ -79,6 +79,39 @@ class CoverrVideoProvider(BaseVideoProvider):
     def name(self) -> str:
         return "coverr"
 
+    @staticmethod
+    def _link_thumbnail(link) -> str:
+        img = None
+        try:
+            img = link.select_one("img")
+            if img is None:
+                parent = link.find_parent(["div", "article", "li"])
+                img = parent.select_one("img") if parent else None
+        except Exception:
+            img = None
+        if img is None:
+            return ""
+        for attr in ("src", "data-src", "data-original", "data-lazy-src"):
+            value = str(img.get(attr) or "").strip()
+            if value:
+                return value if value.startswith("http") else BASE_URL + value
+        srcset = str(img.get("srcset") or "").split(",")[0].strip().split(" ")[0]
+        if srcset:
+            return srcset if srcset.startswith("http") else BASE_URL + srcset
+        return ""
+
+    @staticmethod
+    def _visual_fields(thumbnail: str) -> dict:
+        return {
+            "thumbnail_url": thumbnail,
+            "preview_url": thumbnail,
+            "preview_type": "image" if thumbnail else "",
+            "visual_source": "coverr:card-image" if thumbnail else "",
+            "preview_status": (
+                "PREVIEW_AVAILABLE" if thumbnail else "PREVIEW_UNAVAILABLE"
+            ),
+        }
+
     def search(
         self,
         query: str,
@@ -170,6 +203,7 @@ class CoverrVideoProvider(BaseVideoProvider):
                 duration=typical_dur,
                 resolution=resolution,
                 provider=self.name,
+                **self._visual_fields(self._link_thumbnail(link)),
             )
             asset._coverr_page_url = page_url  # type: ignore[attr-defined]
             assets.append(asset)
@@ -241,6 +275,7 @@ class CoverrVideoProvider(BaseVideoProvider):
                 duration=dur,
                 resolution=resolution,
                 provider=self.name,
+                **self._visual_fields(self._link_thumbnail(link)),
             )
 
         return None

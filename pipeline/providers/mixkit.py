@@ -124,6 +124,14 @@ class MixkitVideoProvider(BaseVideoProvider):
                 duration=dur,
                 resolution=resolution,  # Mixkit videos are typically 1080p
                 provider=self.name,
+                thumbnail_url=card.get("thumbnail", ""),
+                preview_url=card.get("thumbnail", ""),
+                preview_type="image" if card.get("thumbnail") else "",
+                visual_source="mixkit:card-image" if card.get("thumbnail") else "",
+                preview_status=(
+                    "PREVIEW_AVAILABLE" if card.get("thumbnail")
+                    else "PREVIEW_UNAVAILABLE"
+                ),
             )
 
         logger.info("Mixkit: no video matching duration [%.1f–%.1fs] for query=%r",
@@ -186,6 +194,14 @@ class MixkitVideoProvider(BaseVideoProvider):
                 duration=dur,
                 resolution=resolution,
                 provider=self.name,
+                thumbnail_url=card.get("thumbnail", ""),
+                preview_url=card.get("thumbnail", ""),
+                preview_type="image" if card.get("thumbnail") else "",
+                visual_source="mixkit:card-image" if card.get("thumbnail") else "",
+                preview_status=(
+                    "PREVIEW_AVAILABLE" if card.get("thumbnail")
+                    else "PREVIEW_UNAVAILABLE"
+                ),
             )
             asset._mixkit_page_url = page_url  # type: ignore[attr-defined]
             assets.append(asset)
@@ -248,10 +264,24 @@ class MixkitVideoProvider(BaseVideoProvider):
     # ── Internal helpers ─────────────────────────────────────
 
     @staticmethod
+    def _card_thumbnail(card) -> str:
+        img = card.select_one("img") if card else None
+        if not img:
+            return ""
+        for attr in ("src", "data-src", "data-original", "data-lazy-src"):
+            value = str(img.get(attr) or "").strip()
+            if value:
+                return value if value.startswith("http") else BASE_URL + value
+        srcset = str(img.get("srcset") or "").split(",")[0].strip().split(" ")[0]
+        if srcset:
+            return srcset if srcset.startswith("http") else BASE_URL + srcset
+        return ""
+
+    @staticmethod
     def _parse_video_cards(soup: BeautifulSoup) -> list[dict]:
         """Extract video card data from the search results page.
 
-        Returns list of dicts with keys: url, title, duration_text.
+        Returns list of dicts with keys: url, title, duration_text, thumbnail.
         """
         cards = []
         # Mixkit video cards are typically <div class="item-grid ..."> or similar
@@ -276,6 +306,7 @@ class MixkitVideoProvider(BaseVideoProvider):
                 "url": href,
                 "title": title,
                 "duration_text": duration_text,
+                "thumbnail": MixkitVideoProvider._card_thumbnail(card),
             })
 
         # Fallback: try a more generic selector if nothing found
@@ -300,6 +331,9 @@ class MixkitVideoProvider(BaseVideoProvider):
                     "url": href,
                     "title": a_tag.get_text(strip=True),
                     "duration_text": duration_text,
+                    "thumbnail": MixkitVideoProvider._card_thumbnail(
+                        parent or a_tag
+                    ),
                 })
 
         return cards

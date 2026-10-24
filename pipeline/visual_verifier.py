@@ -373,23 +373,66 @@ def extract_asset_frames(
     return frames
 
 
-# ── Model extension point (deliberately a no-op today) ─────────────────
+# ── Semantic model extension point (P02 bridge) ────────────────────────
+
+_SEMANTIC_FRAME_VERIFIER: Callable[..., Any] | None = None
+
+
+def set_semantic_frame_verifier(verifier: Callable[..., Any] | None) -> None:
+    """Register (or clear) the P02 multimodal verifier used by QA observations.
+
+    The callable receives ``(scene_spec, narration, frames, scene_context)``
+    and should return a structured dict/result.  It is optional: when unset,
+    the legacy advisory verification remains a no-op.  Tests set a fake here;
+    production wiring is explicit (no model/provider is invoked implicitly).
+    """
+    global _SEMANTIC_FRAME_VERIFIER
+    _SEMANTIC_FRAME_VERIFIER = verifier
+
 
 def _classify_frames_with_model(
     frames: Sequence[Path], scene_context: Any = None
 ) -> Any:
-    """Extension point for a future LOCAL image-analysis model.
+    """Bridge the former no-op hook to an explicitly registered verifier.
 
-    Today returns ``None`` on purpose: the cheap heuristics above cannot judge
-    whether a clip depicts the narrated action, and pretending otherwise would
-    be a false verification.  A future implementation (e.g. a small CLIP/OWL-ViT
-    classifier running locally) should return a structured dict — e.g.
-    ``{"action_match": float, "labels": [...]}`` — and callers may then use it.
-
-    Kept dependency-free and side-effect-free so wiring a model later does not
-    change the fail-open contract.
+    P02's selector uses :mod:`pipeline.media_semantics.visual_vlm` directly.
+    This bridge lets the low-level QA observation reuse the same structured
+    model when an operator explicitly registers it.  Any failure stays
+    fail-open (``None``); no provider is called implicitly.
     """
-    return None
+    verifier = _SEMANTIC_FRAME_VERIFIER
+    if verifier is None:
+        return None
+    try:
+        from pipeline.media_semantics.contracts import SceneSpec
+
+        spec = getattr(scene_context, "scene_spec", None)
+        if isinstance(spec, dict):
+            spec = SceneSpec.from_dict(spec)
+        elif isinstance(scene_context, SceneSpec):
+            spec = scene_context
+        elif not isinstance(spec, SceneSpec):
+            spec = SceneSpec(
+                narration_fragment=str(getattr(scene_context, "fragment", "") or ""),
+                subject=str(getattr(scene_context, "subject", "") or ""),
+                action=str(getattr(scene_context, "action", "") or ""),
+                environment=str(getattr(scene_context, "setting", "") or ""),
+                era=str(getattr(scene_context, "era", "") or ""),
+                must_include=list(getattr(scene_context, "must_show", []) or []),
+                must_avoid=list(getattr(scene_context, "must_avoid", []) or []),
+            )
+        narration = (
+            getattr(spec, "narration_fragment", "")
+            or getattr(scene_context, "fragment", "")
+            or ""
+        )
+        result = verifier(spec, narration, list(frames), scene_context)
+        if hasattr(result, "to_dict"):
+            return result.to_dict()
+        return result
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("semantic frame verifier failed (fail-open): %s", exc)
+        return None
 
 
 # ── Observation & verification ────────────────────────────────────────
