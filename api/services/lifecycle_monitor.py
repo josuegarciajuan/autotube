@@ -1343,6 +1343,36 @@ def _auto_resolve_completed(db) -> int:
                 )
                 resolved += 1
 
+            # ── Agrupar diagnósticos derivados bajo la alerta canónica ──────
+            # Un mismo fallo genera 'failed' + 'error_<módulo>' (worker,
+            # orchestrator...). Para el operador son el MISMO problema: se
+            # conserva 'failed' como alerta activa y los derivados pasan a
+            # resueltos con la nota de agrupación (sin perder el traceback).
+            rows = conn.execute(
+                """SELECT pa.id
+                   FROM pipeline_alerts pa
+                   WHERE pa.resolved = 0
+                     AND pa.entity_type IN ('video', 'short')
+                     AND pa.alert_type LIKE 'error_%'
+                     AND EXISTS (
+                       SELECT 1 FROM pipeline_alerts f
+                       WHERE f.resolved = 0
+                         AND f.alert_type = 'failed'
+                         AND f.entity_type = pa.entity_type
+                         AND f.entity_id = pa.entity_id
+                     )"""
+            ).fetchall()
+            for alert in rows:
+                conn.execute(
+                    """UPDATE pipeline_alerts
+                       SET resolved = 1, resolved_at = datetime('now'), acknowledged = 1,
+                           message = COALESCE(message, '') ||
+                             ' [Agrupado: mismo fallo que la alerta failed]'
+                       WHERE id = ?""",
+                    (alert["id"],),
+                )
+                resolved += 1
+
             # Resolve alerts for videos that are now uploaded/published.
             # Incluye 'failed': si el vídeo ya no está en 'error' (p.ej. recuperado
             # por Glass Box y reencolado), el fallo que originó la alerta ya no es

@@ -905,3 +905,38 @@ def test_failed_and_error_alerts_resolve_when_retry_is_queued(tmp_path):
     assert {r["alert_type"] for r in rows} == {"failed", "error_autotube_worker"}
     assert all(r["resolved"] == 1 for r in rows)
     assert all("reintento en curso" in (r["message"] or "") for r in rows)
+
+
+def test_derived_error_alerts_are_grouped_under_failed(tmp_path):
+    """Un fallo terminal se muestra UNA vez, no como failed + error_*.
+
+    Regresión #2747-#2756: el mismo vídeo generaba 2-3 alertas críticas
+    (failed, error_autotube_worker, error_orchestrator), inflando el contador
+    y ocultando que era un único problema.
+    """
+    db = _build_db(tmp_path)
+    _insert_failed_video(db, vid=40, error_msg="Fallo el ensamblaje del video")
+    with db._connect() as conn:
+        conn.execute(
+            "INSERT INTO pipeline_alerts(entity_type, entity_id, channel_id, alert_type, severity, title) "
+            "VALUES ('video', 40, 1, 'failed', 'critical', 'fallo')"
+        )
+        for alert_type in ("error_autotube_worker", "error_orchestrator"):
+            conn.execute(
+                "INSERT INTO pipeline_alerts(entity_type, entity_id, channel_id, alert_type, severity, title) "
+                "VALUES ('video', 40, 1, ?, 'critical', 'diag')",
+                (alert_type,),
+            )
+        conn.commit()
+
+    assert _auto_resolve_completed(db) == 2
+    with db._connect() as conn:
+        rows = conn.execute(
+            "SELECT alert_type, resolved, message FROM pipeline_alerts "
+            "WHERE entity_type='video' AND entity_id=40"
+        ).fetchall()
+    by_type = {r["alert_type"]: r for r in rows}
+    assert by_type["failed"]["resolved"] == 0
+    for alert_type in ("error_autotube_worker", "error_orchestrator"):
+        assert by_type[alert_type]["resolved"] == 1
+        assert "Agrupado" in by_type[alert_type]["message"]
