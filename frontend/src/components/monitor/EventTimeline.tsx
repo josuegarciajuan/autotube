@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { Activity, CheckCircle, Clock, XCircle, AlertTriangle } from 'lucide-react'
+import { formatApiDate } from '../../lib/api'
+import type { MonitorUpdate } from '../../hooks/useMonitorWebSocket'
 
 interface MonitorEvent {
   type: string
@@ -33,9 +35,11 @@ interface TimelineEntry {
 interface EventTimelineProps {
   /** If provided by parent (Monitor), skip creating own WebSocket */
   wsConnected?: boolean
+  /** Eventos del WebSocket único del padre (health_update, snapshot...). */
+  lastUpdate?: MonitorUpdate | null
 }
 
-export default function EventTimeline({ wsConnected }: EventTimelineProps) {
+export default function EventTimeline({ wsConnected, lastUpdate }: EventTimelineProps) {
   const [entries, setEntries] = useState<TimelineEntry[]>([])
   const [connected, setConnected] = useState(wsConnected ?? false)
   const wsRef = useRef<WebSocket | null>(null)
@@ -43,6 +47,7 @@ export default function EventTimeline({ wsConnected }: EventTimelineProps) {
   const mountedRef = useRef(true)
   const containerRef = useRef<HTMLDivElement>(null)
   const externalWs = useRef(wsConnected)
+  const lastUpdateRef = useRef(lastUpdate)
 
   useEffect(() => {
     externalWs.current = wsConnected
@@ -50,6 +55,25 @@ export default function EventTimeline({ wsConnected }: EventTimelineProps) {
       setConnected(true)
     }
   }, [wsConnected])
+
+  // Cuando el padre posee el WebSocket, ESTE componente antes no recibía los
+  // mensajes: el timeline quedaba vacío aunque el indicador dijera "Live".
+  useEffect(() => {
+    if (!lastUpdate || lastUpdate === lastUpdateRef.current) return
+    lastUpdateRef.current = lastUpdate
+    if (lastUpdate.type === 'health_update') {
+      const created = lastUpdate.alerts_created ?? 0
+      const resolved = lastUpdate.alerts_resolved ?? 0
+      if (created > 0 || resolved > 0) {
+        addEntry(
+          resolved > 0 && created === 0 ? 'check' : 'warn',
+          `Health check: +${created} alertas, ${resolved} resueltas`,
+          undefined,
+          'sistema',
+        )
+      }
+    }
+  }, [lastUpdate])
 
   const connect = () => {
     // Skip own WebSocket if parent provides connection
@@ -96,7 +120,9 @@ export default function EventTimeline({ wsConnected }: EventTimelineProps) {
   }
 
   function addEntry(icon: TimelineEntry['icon'], message: string, detail?: string, entity?: string) {
-    const now = new Date().toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    const now = formatApiDate(new Date().toISOString(), {
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    }) || new Date().toISOString().slice(11, 19)
     setEntries(prev => {
       const next = [{ id: Date.now().toString(), time: now, icon, color: iconColor(icon), message, detail, entity }, ...prev]
       return next.slice(0, 100) // keep last 100

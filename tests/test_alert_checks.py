@@ -828,3 +828,80 @@ def test_emit_alert_creates_in_db(tmp_path):
     with db._connect() as conn:
         count = conn.execute("SELECT COUNT(*) as c FROM pipeline_alerts WHERE alert_type='test_emit'").fetchone()["c"]
     assert count == 1
+
+
+def test_task_watchdog_loop_alerts_resolve_after_heartbeat_recovers(tmp_path):
+    """Los diagnósticos por loop (task_stalled_loop_*) se cierran al latir.
+
+    Regresión: los emite observabilidad con alert_type
+    'task_stalled_loop_<loop>' y entity_id NULL; el resolver antiguo solo
+    cerraba 'task_stalled', así que quedaban críticos para siempre (#3879).
+    """
+    db = _build_db(tmp_path)
+    task = "schedule_checker"
+    with db._connect() as conn:
+        conn.execute(
+            "INSERT INTO system_state(key, value) VALUES (?, ?)",
+            (f"task_heartbeat_{task}", "2020-01-01T00:00:00"),
+        )
+        conn.execute(
+            "INSERT INTO pipeline_alerts(entity_type, entity_id, alert_type, severity, title, message) "
+            "VALUES ('system', NULL, ?, 'critical', 'Errores de autotube.task_watchdog', ?)",
+            (f"task_stalled_loop_{task}",
+             "Background loop 'schedule_checker' heartbeat is stale; cancelling safely"),
+        )
+        conn.commit()
+
+    # Heartbeat recuperado
+    with db._connect() as conn:
+        conn.execute(
+            "UPDATE system_state SET value = ? WHERE key = ?",
+            (datetime.utcnow().isoformat(timespec="seconds"), f"task_heartbeat_{task}"),
+        )
+        conn.commit()
+
+    assert _check_tasks_alive(db) == 0
+    with db._connect() as conn:
+        row = conn.execute(
+            "SELECT resolved, message FROM pipeline_alerts "
+            "WHERE alert_type = ?",
+            (f"task_stalled_loop_{task}",),
+        ).fetchone()
+    assert row["resolved"] == 1
+    assert "heartbeat recuperado" in row["message"]
+
+
+def test_failed_and_error_alerts_resolve_when_retry_is_queued(tmp_path):
+    """Un fallo transitorio reencolado deja de ser una alerta vigente.
+
+    Regresión #2760/#2761: el vídeo seguía en status='error' con
+    progress_phase='queued_retry' y tanto 'failed' como 'error_*' permanecían
+    críticas hasta terminar o 7 días, aunque el sistema ya reintentaba.
+    """
+    db = _build_db(tmp_path)
+    _insert_failed_video(db, vid=30, error_msg="interrupted: server restarted")
+    with db._connect() as conn:
+        conn.execute(
+            "UPDATE videos SET progress_phase = 'queued_retry' WHERE id = 30"
+        )
+        conn.execute(
+            "INSERT INTO generation_jobs(channel_id, video_id, action, status) "
+            "VALUES (1, 30, 'generate_and_upload', 'queued')"
+        )
+        for alert_type in ("failed", "error_autotube_worker"):
+            conn.execute(
+                "INSERT INTO pipeline_alerts(entity_type, entity_id, channel_id, alert_type, severity, title) "
+                "VALUES ('video', 30, 1, ?, 'critical', 'fallo')",
+                (alert_type,),
+            )
+        conn.commit()
+
+    assert _auto_resolve_completed(db) == 2
+    with db._connect() as conn:
+        rows = conn.execute(
+            "SELECT alert_type, resolved, message FROM pipeline_alerts "
+            "WHERE entity_type='video' AND entity_id=30"
+        ).fetchall()
+    assert {r["alert_type"] for r in rows} == {"failed", "error_autotube_worker"}
+    assert all(r["resolved"] == 1 for r in rows)
+    assert all("reintento en curso" in (r["message"] or "") for r in rows)

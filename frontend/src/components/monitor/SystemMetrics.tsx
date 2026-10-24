@@ -92,10 +92,14 @@ export default function SystemMetrics() {
           {data ? `libre / ${data.ram_total_mb} MB total` : ''}
         </div>
         <div className="mt-2 h-1.5 bg-dark-700 rounded-full overflow-hidden">
-          <div
-            className={`h-full rounded-full transition-all duration-500 ${ramColor(data?.ram_percent || 0)}`}
-            style={{ width: `${data?.ram_percent || 0}%` }}
-          />
+          {data ? (
+            <div
+              className={`h-full rounded-full transition-all duration-500 ${ramColor(data.ram_percent)}`}
+              style={{ width: `${data.ram_percent}%` }}
+            />
+          ) : (
+            <div className="h-full w-full bg-gray-600/20 animate-pulse rounded-full" />
+          )}
         </div>
         <div className="text-[10px] text-gray-500 mt-0.5">{data?.ram_percent ?? '--'}% usado</div>
       </div>
@@ -109,8 +113,8 @@ export default function SystemMetrics() {
         <div className="text-xl font-bold font-mono text-white">
           {data ? `${data.disk_output_free_gb} GB` : '--'}
         </div>
-        <div className={`text-xs mt-1 ${diskColor(data?.disk_output_free_gb || 0, data?.disk_output_total_gb || 1)}`}>
-          {data ? `libres en output/` : ''}
+        <div className={`text-xs mt-1 ${data ? diskColor(data.disk_output_free_gb, data.disk_output_total_gb) : 'text-gray-500'}`}>
+          {data ? `libres en output/` : 'sin datos'}
         </div>
         <div className="text-[10px] text-gray-600 mt-0.5">
           {data ? `logs: ${data.disk_logs_free_gb} GB libres` : ''}
