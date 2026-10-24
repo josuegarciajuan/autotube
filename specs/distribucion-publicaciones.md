@@ -35,7 +35,19 @@
    `uploaded_private`, `warming` y slots pendientes se recolocan con el mismo
    asignador. Los jobs `running` no se tocan.
 10. **Idempotencia.** Repetir un replan con los mismos datos produce el mismo
-   plan y no crea duplicados.
+    plan y no crea duplicados.
+11. **Enforcement de la franja en la subida (oct 2026).** Ninguna ruta
+    automática puede publicar un short antes de su `target_publish_at`. El
+    worker atómico espera a la franja si el render termina antes; la válvula de
+    cola selecciona por `target_publish_at` (nunca por `id`) y solo drena
+    franjas ya llegadas. Un target vencido (>10 min) se **replanifica** a la
+    próxima franja; nunca se publica en ráfaga al primer tick del día. La única
+    excepción es la subida manual explícita (`force_immediate=true`).
+12. **Reparación de planes agrupados.** Si los slots pendientes de un canal/día
+    están todos en la primera franja (mismo rank o targets a <20 min), la
+    reconciliación los reconstruye; los slots `running`/`completed`/`generated`
+    se preservan. Para el día actual, la asignación parte de la hora actual, no
+    de medianoche.
 
 ## Verificación
 

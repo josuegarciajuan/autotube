@@ -6,7 +6,7 @@ segunda cola de subida para los shorts nuevos.
 """
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -580,3 +580,116 @@ def test_retime_updates_rank_and_avoids_exact_collision(tmp_path, monkeypatch):
     assert all(len(set(dups)) == len(dups) for dups in by_target.values())
     # El slot movido tiene un rank coherente con una de las franjas.
     assert all(int(r["slot_rank"]) in (1, 2, 3) for r in rows)
+
+
+# ── 11. Enforcement de la franja en la subida ────────────────────
+
+
+def test_wait_until_publish_target_returns_immediately_when_past():
+    now = datetime(2026, 10, 18, 10, 0, tzinfo=timezone.utc)
+    waited = ss._wait_until_publish_target(
+        "2026-10-18 09:59:00", _now=lambda: now,
+    )
+    assert waited == 0
+
+
+def test_wait_until_publish_target_blocks_until_target():
+    clock = {"now": datetime(2026, 10, 18, 9, 59, 50, tzinfo=timezone.utc)}
+    target = datetime(2026, 10, 18, 10, 0, 0, tzinfo=timezone.utc)
+
+    def _now():
+        return clock["now"]
+
+    def _sleep(seconds):
+        clock["now"] += timedelta(seconds=seconds)
+
+    waited = ss._wait_until_publish_target(
+        "2026-10-18 10:00:00", poll_seconds=10,
+        _sleep=_sleep, _now=_now,
+    )
+    assert clock["now"] >= target
+    assert waited == 10
+
+
+def test_wait_until_publish_target_refuses_an_absurdly_early_dispatch():
+    now = datetime(2026, 10, 18, 8, 0, tzinfo=timezone.utc)
+    with pytest.raises(RuntimeError):
+        ss._wait_until_publish_target(
+            "2026-10-18 23:00:00", max_wait_hours=1, _now=lambda: now,
+        )
+
+
+def test_publish_target_is_stale_after_grace():
+    now = datetime(2026, 10, 18, 10, 0, tzinfo=timezone.utc)
+    assert ss._publish_target_is_stale(
+        "2026-10-18 09:30:00", grace_minutes=15, now=now) is True
+    assert ss._publish_target_is_stale(
+        "2026-10-18 09:55:00", grace_minutes=15, now=now) is False
+    assert ss._publish_target_is_stale(None, now=now) is True
+
+
+def test_pending_distribution_rejects_first_franja_cluster():
+    """Slots agrupados en la primera franja deben considerarse mal planificados."""
+    clustered = [
+        {"target_publish_at": "2026-10-18 08:00:00", "slot_rank": 1},
+        {"target_publish_at": "2026-10-18 08:03:00", "slot_rank": 1},
+        {"target_publish_at": "2026-10-18 08:06:00", "slot_rank": 1},
+    ]
+    assert ss._pending_native_distribution_ok(clustered, None, 1) is False
+
+
+def test_pending_distribution_accepts_ranked_spread():
+    spread = [
+        {"target_publish_at": "2026-10-18 01:00:00", "slot_rank": 3},
+        {"target_publish_at": "2026-10-18 11:00:00", "slot_rank": 2},
+        {"target_publish_at": "2026-10-18 17:00:00", "slot_rank": 1},
+    ]
+    assert ss._pending_native_distribution_ok(spread, None, 1) is True
+
+
+def test_generated_stale_slot_is_retimed_but_fresh_due_slot_is_not(tmp_path):
+    """Backlog `generated` con target viejo → futura franja; target reciente → se deja."""
+    db = _timing_db(tmp_path)
+    now = datetime(2026, 10, 20, 10, 0, tzinfo=timezone.utc)
+    with db._connect() as conn:
+        for rank, (h, m) in enumerate([(19, 0), (13, 0), (3, 0)], start=1):
+            conn.execute(
+                """INSERT INTO optimal_publish_slots
+                   (channel_id, content_type, target_hour, target_minute,
+                    slot_rank, timezone)
+                   VALUES (1, 'short', ?, ?, ?, 'Europe/Madrid')""",
+                (h, m, rank),
+            )
+        # Stale: target 4h atrás.
+        conn.execute(
+            """INSERT INTO shorts_planned_slots
+               (channel_id, date_key, scheduled_at, target_upload_at,
+                target_publish_at, short_type, status, slot_rank)
+               VALUES (1, '2026-10-20', '2026-10-20 05:00:00',
+                       '2026-10-20 06:00:00', '2026-10-20 06:00:00',
+                       'native', 'generated', 1)"""
+        )
+        # Fresh: target 2 min atrás (due, no se mueve).
+        conn.execute(
+            """INSERT INTO shorts_planned_slots
+               (channel_id, date_key, scheduled_at, target_upload_at,
+                target_publish_at, short_type, status, slot_rank)
+               VALUES (1, '2026-10-20', '2026-10-20 09:58:00',
+                       '2026-10-20 09:58:00', '2026-10-20 09:58:00',
+                       'native', 'generated', 2)"""
+        )
+        conn.commit()
+
+    moved = ss.retime_overdue_shorts_slots(
+        db, now=now, statuses=("generated",), stale_after_min=10,
+    )
+
+    assert moved == 1
+    with db._connect() as conn:
+        rows = conn.execute(
+            """SELECT target_publish_at FROM shorts_planned_slots ORDER BY id"""
+        ).fetchall()
+    stale_target = datetime.strptime(str(rows[0]["target_publish_at"])[:19],
+                                     "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    assert stale_target > now
+    assert str(rows[1]["target_publish_at"]).startswith("2026-10-20 09:58")
