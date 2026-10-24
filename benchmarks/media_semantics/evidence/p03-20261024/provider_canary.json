@@ -1,0 +1,177 @@
+{
+  "timestamp": "2026-10-24T15:02:13.555799+00:00",
+  "calls": [
+    {
+      "provider": "pexels",
+      "status": "OK",
+      "assets": 8,
+      "total_available": 8000,
+      "sample": {
+        "url": "https://videos.pexels.com/video-files/2055056/2055056-hd_1920_802_25fps.mp4",
+        "duration": 12,
+        "resolution": [
+          1920,
+          802
+        ],
+        "page_url": "https://www.pexels.com/video/a-desert-with-view-of-sunset-2055056/",
+        "title": "",
+        "tags": [
+          "desert",
+          "with",
+          "view",
+          "sunset"
+        ],
+        "thumbnail_url": "https://images.pexels.com/videos/2055056/free-video-2055056.jpg?auto=compress&cs=tinysrgb&fit=crop&h=630&w=1200",
+        "preview_url": "https://images.pexels.com/videos/2055056/pictures/preview-0.jpg",
+        "preview_status": "PREVIEW_AVAILABLE",
+        "visual_source": "pexels:image"
+      },
+      "sample_thumbnail_status": "AVAILABLE",
+      "latency_ms": 431.4
+    },
+    {
+      "provider": "pixabay",
+      "status": "OK",
+      "assets": 8,
+      "total_available": 500,
+      "sample": {
+        "url": "https://cdn.pixabay.com/video/2021/09/15/88660-606111056_small.mp4",
+        "duration": 25,
+        "resolution": [
+          1920,
+          1080
+        ],
+        "page_url": "https://pixabay.com/videos/id-88660/",
+        "title": "Amirirani",
+        "tags": [
+          "desert",
+          "moon",
+          "mountain",
+          "nature",
+          "landscape"
+        ],
+        "thumbnail_url": "https://cdn.pixabay.com/video/2021/09/15/88660-606111056_tiny.jpg",
+        "preview_url": "https://cdn.pixabay.com/video/2021/09/15/88660-606111056_tiny.jpg",
+        "preview_status": "PREVIEW_AVAILABLE",
+        "visual_source": "pixabay:thumbnail"
+      },
+      "sample_thumbnail_status": "AVAILABLE",
+      "latency_ms": 361.4
+    },
+    {
+      "provider": "mixkit",
+      "status": "OK",
+      "assets": 10,
+      "total_available": 40,
+      "sample": {
+        "url": "https://mixkit.co/free-stock-video/going-down-a-curved-highway-through-a-mountain-range-41576/",
+        "duration": 15.0,
+        "resolution": [
+          1920,
+          1080
+        ],
+        "page_url": "",
+        "title": "",
+        "tags": [],
+        "thumbnail_url": "https://assets.mixkit.co/videos/41576/41576-thumb-360-0.jpg",
+        "preview_url": "https://assets.mixkit.co/videos/41576/41576-thumb-360-0.jpg",
+        "preview_status": "PREVIEW_AVAILABLE",
+        "visual_source": "mixkit:card-image"
+      },
+      "sample_thumbnail_status": "AVAILABLE",
+      "latency_ms": 500.7
+    },
+    {
+      "provider": "coverr",
+      "status": "OK",
+      "assets": 10,
+      "total_available": 25,
+      "sample": {
+        "url": "https://coverr.co/videos/business-in-the-desert-a-unique-fashion-statement",
+        "duration": 15.0,
+        "resolution": [
+          1920,
+          1080
+        ],
+        "page_url": "",
+        "title": "",
+        "tags": [],
+        "thumbnail_url": "https://cdn.coverr.co/videos/user-ai-generation-sw2TWfHVplwl/thumbnail?width=385",
+        "preview_url": "https://cdn.coverr.co/videos/user-ai-generation-sw2TWfHVplwl/thumbnail?width=385",
+        "preview_status": "PREVIEW_AVAILABLE",
+        "visual_source": "coverr:card-image"
+      },
+      "sample_thumbnail_status": "AVAILABLE",
+      "latency_ms": 646.1
+    },
+    {
+      "provider": "pixabay_photo",
+      "status": "OK",
+      "assets": 5,
+      "total_available": 500,
+      "sample": {
+        "id": "7559993",
+        "url": "https://pixabay.com/photos/namib-desert-namibia-africa-desert-7559993/",
+        "download_url": "https://pixabay.com/get/g75af43f2f7deb3782f87923904d49b202eefe0e25c02e6b016e8526da0f0a3dd14c3b2e0d41b90474c42c34da5633468096f83ca8f12510e65e04fce22690279_1280.jpg",
+        "fallback_download_url": "https://pixabay.com/get/ge029a97edc23a40d9701c308511c584a4e7308be513aa5f1fa041216e69c15942cabc461fd0e899558c8463b41a1b7c1058a09eb3806510a6586f6c518d9e8a0_640.jpg",
+        "preview_url": "https://pixabay.com/get/ge029a97edc23a40d9701c308511c584a4e7308be513aa5f1fa041216e69c15942cabc461fd0e899558c8463b41a1b7c1058a09eb3806510a6586f6c518d9e8a0_640.jpg",
+        "thumbnail_url": "https://pixabay.com/get/ge029a97edc23a40d9701c308511c584a4e7308be513aa5f1fa041216e69c15942cabc461fd0e899558c8463b41a1b7c1058a09eb3806510a6586f6c518d9e8a0_640.jpg",
+        "preview_type": "image",
+        "preview_width": 640,
+        "preview_height": 427,
+        "visual_source": "pixabay:webformat",
+        "photographer": "Barni1",
+        "width": 6000,
+        "height": 4000,
+        "description": "namib desert, nature, namibia, africa, desert, desert sand, namib, landscape"
+      },
+      "sample_thumbnail_status": "AVAILABLE",
+      "latency_ms": 337.0
+    }
+  ],
+  "budget": {
+    "requests": 5,
+    "bytes": 0,
+    "downloads": 0,
+    "previews": 0,
+    "frames": 0,
+    "per_provider": {
+      "coverr": {
+        "requests": 1,
+        "bytes": 0,
+        "downloads": 0,
+        "previews": 0,
+        "frames": 0
+      },
+      "mixkit": {
+        "requests": 1,
+        "bytes": 0,
+        "downloads": 0,
+        "previews": 0,
+        "frames": 0
+      },
+      "pexels": {
+        "requests": 1,
+        "bytes": 0,
+        "downloads": 0,
+        "previews": 0,
+        "frames": 0
+      },
+      "pixabay": {
+        "requests": 1,
+        "bytes": 0,
+        "downloads": 0,
+        "previews": 0,
+        "frames": 0
+      },
+      "pixabay_photo": {
+        "requests": 1,
+        "bytes": 0,
+        "downloads": 0,
+        "previews": 0,
+        "frames": 0
+      }
+    },
+    "errors": []
+  }
+}

@@ -1,0 +1,166 @@
+{
+  "arms": {
+    "legacy": {
+      "scenes": 36,
+      "auto_evaluated": 36,
+      "auto_coverage": 1.0,
+      "candidate_auto_evaluated": 108,
+      "top1_relevance_mean": 0.2694,
+      "top1_relevance_median": 0.3,
+      "relevant_rate": 0.1389,
+      "subject_match_mean": 0.2083,
+      "action_match_mean": 0.125,
+      "environment_match_mean": 0.4167,
+      "era_violations": 3,
+      "era_scenes": 4,
+      "must_avoid_violations": 0,
+      "no_good_candidate_rate": 0.0,
+      "generic_fallback_rate": 0.4167,
+      "provider_distribution": {
+        "pexels": 13,
+        "pixabay": 8,
+        "pixabay_photo": 15
+      },
+      "latency_mean_ms": 4983.85,
+      "latency_total_ms": 179418.47,
+      "candidate_top3_relevance_mean": 0.2889
+    },
+    "semantic_text": {
+      "scenes": 36,
+      "auto_evaluated": 19,
+      "auto_coverage": 0.5278,
+      "candidate_auto_evaluated": 108,
+      "top1_relevance_mean": 0.3605,
+      "top1_relevance_median": 0.3,
+      "relevant_rate": 0.2632,
+      "subject_match_mean": 0.3158,
+      "action_match_mean": 0.2368,
+      "environment_match_mean": 0.5263,
+      "era_violations": 1,
+      "era_scenes": 2,
+      "must_avoid_violations": 0,
+      "no_good_candidate_rate": 0.4722,
+      "generic_fallback_rate": 0.2632,
+      "provider_distribution": {
+        "pexels": 7,
+        "pixabay": 7,
+        "pixabay_photo": 5
+      },
+      "latency_mean_ms": 4930.97,
+      "latency_total_ms": 177515.07,
+      "candidate_top3_relevance_mean": 0.3306
+    },
+    "semantic_visual": {
+      "scenes": 36,
+      "auto_evaluated": 34,
+      "auto_coverage": 0.9444,
+      "candidate_auto_evaluated": 108,
+      "top1_relevance_mean": 0.3412,
+      "top1_relevance_median": 0.3,
+      "relevant_rate": 0.2059,
+      "subject_match_mean": 0.2794,
+      "action_match_mean": 0.1471,
+      "environment_match_mean": 0.5147,
+      "era_violations": 2,
+      "era_scenes": 5,
+      "must_avoid_violations": 0,
+      "no_good_candidate_rate": 0.1389,
+      "generic_fallback_rate": 0.4167,
+      "provider_distribution": {
+        "pexels": 11,
+        "pixabay": 10,
+        "pixabay_photo": 15
+      },
+      "latency_mean_ms": 4904.58,
+      "latency_total_ms": 176564.98,
+      "candidate_top3_relevance_mean": 0.3761
+    }
+  },
+  "paired": {
+    "legacy_vs_semantic_text": {
+      "n": 19,
+      "mean_delta": 0.0395,
+      "wins": 3,
+      "losses": 1,
+      "ties": 15
+    },
+    "legacy_vs_semantic_visual": {
+      "n": 34,
+      "mean_delta": 0.0735,
+      "wins": 7,
+      "losses": 2,
+      "ties": 25
+    },
+    "semantic_text_vs_semantic_visual": {
+      "n": 18,
+      "mean_delta": 0.0167,
+      "wins": 1,
+      "losses": 0,
+      "ties": 17
+    }
+  },
+  "overall": {
+    "network": {
+      "requests": 134,
+      "bytes": 239292218,
+      "downloads": 16,
+      "previews": 432,
+      "frames": 0,
+      "per_provider": {
+        "coverr": {
+          "requests": 10,
+          "bytes": 0,
+          "downloads": 0,
+          "previews": 0,
+          "frames": 0
+        },
+        "mixkit": {
+          "requests": 10,
+          "bytes": 0,
+          "downloads": 0,
+          "previews": 0,
+          "frames": 0
+        },
+        "pexels": {
+          "requests": 42,
+          "bytes": 188606369,
+          "downloads": 11,
+          "previews": 210,
+          "frames": 0
+        },
+        "pixabay": {
+          "requests": 42,
+          "bytes": 37819737,
+          "downloads": 5,
+          "previews": 42,
+          "frames": 0
+        },
+        "pixabay_photo": {
+          "requests": 30,
+          "bytes": 12866112,
+          "downloads": 0,
+          "previews": 180,
+          "frames": 0
+        }
+      },
+      "errors": [
+        "download too large (50867297 bytes): https://videos.pexels.com/video-files/30131338/12921229_1920_1080_30fps.mp4",
+        "download too large (38740516 bytes): https://videos.pexels.com/video-files/30402965/13029803_1920_1080_30fps.mp4",
+        "download too large (81370751 bytes): https://videos.pexels.com/video-files/30546582/13084219_1920_1080_30fps.mp4",
+        "download too large (51049731 bytes): https://videos.pexels.com/video-files/30503893/13069316_1920_1080_30fps.mp4",
+        "download too large (34675500 bytes): https://videos.pexels.com/video-files/40159453/17153072_1920_1080_24fps.mp4",
+        "download too large (73611759 bytes): https://videos.pexels.com/video-files/26860633/12023138_1920_1080_60fps.mp4"
+      ]
+    },
+    "scenes": 36,
+    "auto_eval_records": 324,
+    "auto_eval_ok": 89,
+    "frames_sampled": 96,
+    "vlm_calls": 89,
+    "vlm_prompt_tokens": 296335,
+    "vlm_completion_tokens": 8066,
+    "vlm_latency_mean_ms": 1613.57
+  },
+  "label": "before",
+  "timestamp": "2026-10-24T16:11:47.196249+00:00"
+}

@@ -113,17 +113,18 @@ never invents a CDN URL.
 | Provider | Lightweight still | Status |
 |---|---|---|
 | Pexels video | API `image` poster + first `video_pictures[].picture` | available |
-| Pixabay video | no documented poster URL in the current API response | `PREVIEW_UNAVAILABLE` unless a future response exposes one |
+| Pixabay video | `videos.<size>.thumbnail` (smallest rendition preferred) | available |
 | Mixkit | search-card `<img>` (`src`/`data-src`/`srcset`) | available when present |
 | Coverr | search-card `<img>` | available when present |
 | Pexels image | API `src.medium`/`src.small` | available |
 | Pixabay image | API `webformatURL` | available |
 | Unsplash image | API `urls.small`/`urls.thumb` | available |
 
-The exact live provider responses were not re-queried during P02 (no network /
-no quota spend). The contracts above come from the provider code and documented
-response shapes already used by the project. A future minimal live probe can
-confirm Pixabay video poster availability.
+Live contracts were verified in P03 (`docs/p03-real-world-benchmark.md`):
+Pexels, Pixabay video, Mixkit, Coverr and Pixabay Photos all expose a usable
+still. Pixabay video posters are **available** via
+`videos.{tiny,small,medium,large}.thumbnail`; the smallest rendition is chosen
+so the 512 KB preview budget is not exceeded.
 
 ## Visual description
 
@@ -163,6 +164,13 @@ not call a real VLM.
 `text_relevance`, `visual_preview_relevance`, `frame_relevance`, `vlm_relevance`,
 `technical_quality`, `negative_penalty`, `era_penalty`, `must_include_penalty`.
 
+**Availability renormalization (P03 fix).** `compute_combined_score()` accepts
+`available_components`. The pipeline passes the stages that actually ran, so a
+preview-only mode is not penalized for missing frame/VLM evidence. The ratios
+between available components are unchanged (ranking is unchanged); only the
+score scale, and therefore threshold eligibility, becomes comparable across
+modes. Without `available_components` the historical behaviour is preserved.
+
 Stable rejection reasons include:
 
 `VISUAL_SUBJECT_MISMATCH`, `VISUAL_ACTION_MISMATCH`,
@@ -201,15 +209,27 @@ network. Timing is zeroed for deterministic replay.
 
 ## Known limitations / deferred to P03
 
-* No live provider response verification for Pixabay video posters.
-* CLIP/SigLIP weights are not downloaded by tests; production must pre-provision
-  the model and enable `visual_embedding_backend` explicitly.
+* P03 verified the live provider contracts and provisioned CLIP ViT-B/32
+  (`openai/clip-vit-base-patch32`, 1.2 GB, CPU).
+* Real benchmark evidence and calibration: see
+  `docs/p03-real-world-benchmark.md`. Preview-only NO_GOOD dropped from 77.8%
+  to 13.9% after the availability renormalization fix.
 * Local VLM backend is an explicit placeholder (`local_vlm_not_configured_for_this_model`)
   until a concrete local model/profile is provisioned and evaluated.
-* Weights/thresholds remain uncalibrated; a labelled visual benchmark is needed.
+* Weights/thresholds were calibrated on 36 real scenes with an auxiliary VLM
+  rubric (not human labels). Human review is still required before activation.
 * Negative visual constraints rely primarily on the VLM + optional embedding
   similarities; no dedicated detector per concept is introduced.
 * No production activation, uploads or real video generation were performed.
+
+## P03 regressions fixed
+
+* Transformers 5 returns `BaseModelOutputWithPooling` from
+  `get_text_features`/`get_image_features`; the backend now extracts
+  `pooler_output`. Without this, CLIP silently returned `None`.
+* `PreviewFetcher` no longer advertises `image/avif` (Pexels returned AVIF and
+  the MIME detector rejected it as `not_an_image`).
+* Pixabay video previews prefer the smallest thumbnail rendition.
 
 ## Verification
 

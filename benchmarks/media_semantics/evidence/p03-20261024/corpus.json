@@ -1,0 +1,2252 @@
+{
+  "version": 1,
+  "source_db": "/root/autotube/autotube.db",
+  "seed": 20261024,
+  "limit": 44,
+  "per_category": 6,
+  "intent_source": [
+    "llm_intent_extraction"
+  ],
+  "entries": [
+    {
+      "scene_id": "s0379-b03",
+      "script_id": 379,
+      "video_id": 491,
+      "channel": "canal3",
+      "script_title": "El nudo de Isis: el amuleto egipcio que protegía más allá de la muerte",
+      "block_idx": 3,
+      "category": "desert_geology",
+      "era": "ancient",
+      "narration_fragment": "Pero el poder del nudo de Isis no se limitaba a los vivos. Los arqueólogos han encontrado estos amuletos envueltos entre las vendas de momias, colocados estratégicamente sobre el pecho o cerca del corazón. En el contexto funerario, el tyt se convertía en un salvoconducto hacia la otra vida. Los egipcios creían que la diosa Isis, con su magia, había devuelto la vida a su esposo Osiris. Llevar su símbolo en la tumba era invocar ese mismo poder de resurrección. No era un adorno: era una herramienta espiritual para el viaje más importante.",
+      "visual_description_es": "Primer plano de vendas de momia desenrollándose revelando un amuleto sobre el pecho, con iluminación dramática.",
+      "query_en": "Egyptian mummy wrappings amulet on chest archaeological excavation",
+      "media_type": "video",
+      "duration": 10.0,
+      "intent": {
+        "subject": "mummy wrappings and amulet",
+        "action": "unrolling to reveal amulet",
+        "environment": "dramatic lighting",
+        "visual_concept": "spiritual tool for afterlife journey",
+        "must_include": [
+          "close-up of bandages",
+          "amulet on chest"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 3,
+        "block_idx": 3,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "Pero el poder del nudo de Isis no se limitaba a los vivos. Los arqueólogos han encontrado estos amuletos envueltos entre las vendas de momias, colocados estratégicamente sobre el pecho o cerca del corazón. En el contexto funerario, el tyt se convertía en un salvoconducto hacia la otra vida. Los egipcios creían que la diosa Isis, con su magia, había devuelto la vida a su esposo Osiris. Llevar su símbolo en la tumba era invocar ese mismo poder de resurrección. No era un adorno: era una herramienta espiritual para el viaje más importante.",
+        "subject": "mummy wrappings and amulet",
+        "action": "unrolling to reveal amulet",
+        "environment": "dramatic lighting",
+        "era": "ancient",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "spiritual tool for afterlife journey",
+        "mood_style": "",
+        "must_include": [
+          "close-up of bandages",
+          "amulet on chest"
+        ],
+        "must_avoid": [
+          "smartphone",
+          "laptop",
+          "modern car",
+          "neon sign"
+        ],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 10.0,
+        "media_type": "video",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "El nudo de Isis: el amuleto egipcio que protegía más allá de la muerte",
+          "query_en": "Egyptian mummy wrappings amulet on chest archaeological excavation",
+          "category": "desert_geology",
+          "benchmark_injected_must_avoid": [
+            "smartphone",
+            "laptop",
+            "modern car",
+            "neon sign"
+          ]
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s0777-b12",
+      "script_id": 777,
+      "video_id": 2032,
+      "channel": "canal3",
+      "script_title": "Las Ruinas: Testigos Silenciosos de Civilizaciones Perdidas y su Misterio",
+      "block_idx": 12,
+      "category": "history",
+      "era": "",
+      "narration_fragment": "Pensemos, por ejemplo, en la ciudad de Palmira, en el desierto sirio. Durante siglos, sus columnas y templos contaron la historia de un cruce de rutas comerciales donde se encontraban Oriente y Occidente. Pero en 2015, cuando el conflicto armado arrasó la región, el mundo observó impotente cómo monumentos que habían sobrevivido a dos milenios de tormentas, invasiones y terremotos eran reducidos a escombros en cuestión de días. Las imágenes de aquellos arcos derrumbados no solo documentaron la pérdida de un patrimonio, sino que se convirtieron en un símbolo de cómo la barbarie puede ser más rápida que el tiempo. Y sin embargo, incluso en ese paisaje de destrucción, los arqueólogos han encontrado fragmentos que aún hablan: inscripciones, relieves, piedras que quizás algún día vuelvan a ser parte de un templo o de una calle.",
+      "visual_description_es": "Vista aérea de las ruinas de Palmira en el desierto, con columnas derribadas y arcos destruidos, bajo un cielo árido.",
+      "query_en": "Palmyra ruins desert columns destruction",
+      "media_type": "video",
+      "duration": 11.0,
+      "intent": {
+        "subject": "Palmyra ruins in the desert",
+        "action": "showing collapsed columns and destroyed arches",
+        "environment": "arid desert sky",
+        "visual_concept": "aerial view of ancient destruction",
+        "must_include": [
+          "f",
+          "a"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 12,
+        "block_idx": 12,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "Pensemos, por ejemplo, en la ciudad de Palmira, en el desierto sirio. Durante siglos, sus columnas y templos contaron la historia de un cruce de rutas comerciales donde se encontraban Oriente y Occidente. Pero en 2015, cuando el conflicto armado arrasó la región, el mundo observó impotente cómo monumentos que habían sobrevivido a dos milenios de tormentas, invasiones y terremotos eran reducidos a escombros en cuestión de días. Las imágenes de aquellos arcos derrumbados no solo documentaron la pérdida de un patrimonio, sino que se convirtieron en un símbolo de cómo la barbarie puede ser más rápida que el tiempo. Y sin embargo, incluso en ese paisaje de destrucción, los arqueólogos han encontrado fragmentos que aún hablan: inscripciones, relieves, piedras que quizás algún día vuelvan a ser parte de un templo o de una calle.",
+        "subject": "Palmyra ruins in the desert",
+        "action": "showing collapsed columns and destroyed arches",
+        "environment": "arid desert sky",
+        "era": "",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "aerial view of ancient destruction",
+        "mood_style": "",
+        "must_include": [
+          "f",
+          "a"
+        ],
+        "must_avoid": [],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 11.0,
+        "media_type": "video",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "Las Ruinas: Testigos Silenciosos de Civilizaciones Perdidas y su Misterio",
+          "query_en": "Palmyra ruins desert columns destruction",
+          "category": "history",
+          "benchmark_injected_must_avoid": []
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s1406-b11",
+      "script_id": 1406,
+      "video_id": null,
+      "channel": "canal5",
+      "script_title": "Carcinoma Escamoso: Cómo se Trata Realmente en las Unidades",
+      "block_idx": 11,
+      "category": "medical",
+      "era": "",
+      "narration_fragment": "En la siguiente parte, exploraremos cómo se diagnostica el carcinoma de células escamosas: los síntomas iniciales, las pruebas que confirman la enfermedad y las decisiones que marcan la diferencia. Porque entender al paciente es solo el primer paso; el segundo es afinar la precisión clínica. ¿Conocías el impacto emocional y físico que esconde este diagnóstico? Te leo en los comentarios.",
+      "visual_description_es": "Médico revisando expedientes clínicos y pruebas diagnósticas en un escritorio de hospital moderno, con luz natural entrando por la ventana.",
+      "query_en": "doctor reviewing clinical records diagnostic tests hospital desk",
+      "media_type": "video",
+      "duration": 5.0,
+      "intent": {
+        "subject": "doctor",
+        "action": "reviewing clinical records and diagnostic tests",
+        "environment": "modern hospital desk with natural window light",
+        "visual_concept": "clinical precision in diagnosis",
+        "must_include": [
+          "doctor",
+          "clinical records"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 11,
+        "block_idx": 11,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "En la siguiente parte, exploraremos cómo se diagnostica el carcinoma de células escamosas: los síntomas iniciales, las pruebas que confirman la enfermedad y las decisiones que marcan la diferencia. Porque entender al paciente es solo el primer paso; el segundo es afinar la precisión clínica. ¿Conocías el impacto emocional y físico que esconde este diagnóstico? Te leo en los comentarios.",
+        "subject": "doctor",
+        "action": "reviewing clinical records and diagnostic tests",
+        "environment": "modern hospital desk with natural window light",
+        "era": "",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "clinical precision in diagnosis",
+        "mood_style": "",
+        "must_include": [
+          "doctor",
+          "clinical records"
+        ],
+        "must_avoid": [],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 5.0,
+        "media_type": "video",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "Carcinoma Escamoso: Cómo se Trata Realmente en las Unidades",
+          "query_en": "doctor reviewing clinical records diagnostic tests hospital desk",
+          "category": "medical",
+          "benchmark_injected_must_avoid": []
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s0114-b17",
+      "script_id": 114,
+      "video_id": null,
+      "channel": "canal4",
+      "script_title": "El misterioso hundimiento del USS Monitor: una tragedia naval",
+      "block_idx": 17,
+      "category": "nature",
+      "era": "",
+      "narration_fragment": "Días después de la tormenta que arrasó el USS Monitor, la incertidumbre se cernía como una sombra sobre el océano. El navío, una obra maestra de la ingeniería bélica, había sucumbido a la furia de las olas, llevándose consigo a hombres y esperanzas. Los sobrevivientes, que habían logrado aferrarse a los fragmentos de su onceava vida, enfrentaban ahora la desgarradora realidad de la pérdida. La superficie del agua, antes un manto de peligro y aventura, se había convertido en un cementerio helado donde la memoria de sus compañeros caídos se unía al vaivén de las corrientes. En cada amanecer, el dolor de los que se habían ido resonaba en los corazones de aquellos que aún luchaban por un futuro incierto.",
+      "visual_description_es": "La superficie helada del océano refleja el dolor y la tristeza de los sobrevivientes mientras el sol se asoma.",
+      "query_en": "frozen sea cemetery",
+      "media_type": "image",
+      "duration": 7.0,
+      "intent": {
+        "subject": "survivors of the USS Monitor",
+        "action": "grieving on the frozen sea",
+        "environment": "frozen ocean surface at sunrise",
+        "visual_concept": "frozen sea as a cemetery of memory",
+        "must_include": [
+          "frozen ocean surface",
+          "survivors"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 17,
+        "block_idx": 17,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "Días después de la tormenta que arrasó el USS Monitor, la incertidumbre se cernía como una sombra sobre el océano. El navío, una obra maestra de la ingeniería bélica, había sucumbido a la furia de las olas, llevándose consigo a hombres y esperanzas. Los sobrevivientes, que habían logrado aferrarse a los fragmentos de su onceava vida, enfrentaban ahora la desgarradora realidad de la pérdida. La superficie del agua, antes un manto de peligro y aventura, se había convertido en un cementerio helado donde la memoria de sus compañeros caídos se unía al vaivén de las corrientes. En cada amanecer, el dolor de los que se habían ido resonaba en los corazones de aquellos que aún luchaban por un futuro incierto.",
+        "subject": "survivors of the USS Monitor",
+        "action": "grieving on the frozen sea",
+        "environment": "frozen ocean surface at sunrise",
+        "era": "",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "frozen sea as a cemetery of memory",
+        "mood_style": "",
+        "must_include": [
+          "frozen ocean surface",
+          "survivors"
+        ],
+        "must_avoid": [],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 7.0,
+        "media_type": "image",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "El misterioso hundimiento del USS Monitor: una tragedia naval",
+          "query_en": "frozen sea cemetery",
+          "category": "nature",
+          "benchmark_injected_must_avoid": []
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s0223-b48",
+      "script_id": 223,
+      "video_id": null,
+      "channel": "canal2",
+      "script_title": "Seguí a mi sombra en cuatro sueños: así se transformó mientras trabajaba en ella",
+      "block_idx": 48,
+      "category": "other",
+      "era": "",
+      "narration_fragment": "Carl Jung documentó en 'Recuerdos, sueños, pensamientos' que las series de sueños revelan patrones del inconsciente que ningún sueño aislado puede mostrar. La secuencia es más sabia.",
+      "visual_description_es": "Primer plano del libro abierto de Jung con texto visible.",
+      "query_en": "Carl Jung book Memories Dreams Reflections close up",
+      "media_type": "image",
+      "duration": 6.0,
+      "intent": {
+        "subject": "open Carl Jung book",
+        "action": "showing visible text",
+        "environment": "close-up setting",
+        "visual_concept": "documenting dream series patterns",
+        "must_include": [
+          "open book",
+          "visible text"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 48,
+        "block_idx": 48,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "Carl Jung documentó en 'Recuerdos, sueños, pensamientos' que las series de sueños revelan patrones del inconsciente que ningún sueño aislado puede mostrar. La secuencia es más sabia.",
+        "subject": "open Carl Jung book",
+        "action": "showing visible text",
+        "environment": "close-up setting",
+        "era": "",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "documenting dream series patterns",
+        "mood_style": "",
+        "must_include": [
+          "open book",
+          "visible text"
+        ],
+        "must_avoid": [],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 6.0,
+        "media_type": "image",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "Seguí a mi sombra en cuatro sueños: así se transformó mientras trabajaba en ella",
+          "query_en": "Carl Jung book Memories Dreams Reflections close up",
+          "category": "other",
+          "benchmark_injected_must_avoid": []
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s0526-b18",
+      "script_id": 526,
+      "video_id": null,
+      "channel": "canal2",
+      "script_title": "Fui atacado por brujas y crucé a otra realidad",
+      "block_idx": 18,
+      "category": "people",
+      "era": "",
+      "narration_fragment": "Pronto notó que su entorno también se alteraba. Las coincidencias imposibles ya no eran amenazas, sino señales de un camino que él mismo trazaba. Al aplicar el concepto de 'trabajar su propia salvación', experimentó un cambio de realidad: ya no era víctima de fuerzas oscuras, sino un cocreador consciente. La luz que antes buscaba afuera ahora irradiaba desde su centro.",
+      "visual_description_es": "Una silueta humana se ilumina desde el pecho, expandiendo rayos de luz que disuelven la oscuridad circundante.",
+      "query_en": "person radiating light from chest dark room silhouette",
+      "media_type": "video",
+      "duration": 11.0,
+      "intent": {
+        "subject": "human silhouette",
+        "action": "radiating light from chest",
+        "environment": "dark room",
+        "visual_concept": "inner light dissolving darkness",
+        "must_include": [
+          "human silhouette",
+          "light rays from chest"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 18,
+        "block_idx": 18,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "Pronto notó que su entorno también se alteraba. Las coincidencias imposibles ya no eran amenazas, sino señales de un camino que él mismo trazaba. Al aplicar el concepto de 'trabajar su propia salvación', experimentó un cambio de realidad: ya no era víctima de fuerzas oscuras, sino un cocreador consciente. La luz que antes buscaba afuera ahora irradiaba desde su centro.",
+        "subject": "human silhouette",
+        "action": "radiating light from chest",
+        "environment": "dark room",
+        "era": "",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "inner light dissolving darkness",
+        "mood_style": "",
+        "must_include": [
+          "human silhouette",
+          "light rays from chest"
+        ],
+        "must_avoid": [],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 11.0,
+        "media_type": "video",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "Fui atacado por brujas y crucé a otra realidad",
+          "query_en": "person radiating light from chest dark room silhouette",
+          "category": "people",
+          "benchmark_injected_must_avoid": []
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s0203-b16",
+      "script_id": 203,
+      "video_id": null,
+      "channel": "canal2",
+      "script_title": "Encuentros OVNI: Misterios en la Carretera",
+      "block_idx": 16,
+      "category": "space_science",
+      "era": "",
+      "narration_fragment": "Este enfoque científico ha revitalizado el interés en el tema, señalando que los encuentros pueden ofrecer pistas sobre la existencia de vida más allá de nuestro planeta.",
+      "visual_description_es": "Un astrónomo observando el cielo estrellado a través de un telescopio, con un fondo de galaxias.",
+      "query_en": "scientific exploration UFO evidence space",
+      "media_type": "image",
+      "duration": 7.0,
+      "intent": {
+        "subject": "astronomer",
+        "action": "observing the starry sky through a telescope",
+        "environment": "starry sky with galaxies in the background",
+        "visual_concept": "scientific exploration of space and extraterrestrial life",
+        "must_include": [
+          "astronomer",
+          "telescope"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 16,
+        "block_idx": 16,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "Este enfoque científico ha revitalizado el interés en el tema, señalando que los encuentros pueden ofrecer pistas sobre la existencia de vida más allá de nuestro planeta.",
+        "subject": "astronomer",
+        "action": "observing the starry sky through a telescope",
+        "environment": "starry sky with galaxies in the background",
+        "era": "",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "scientific exploration of space and extraterrestrial life",
+        "mood_style": "",
+        "must_include": [
+          "astronomer",
+          "telescope"
+        ],
+        "must_avoid": [],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 7.0,
+        "media_type": "image",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "Encuentros OVNI: Misterios en la Carretera",
+          "query_en": "scientific exploration UFO evidence space",
+          "category": "space_science",
+          "benchmark_injected_must_avoid": []
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s0826-b40",
+      "script_id": 826,
+      "video_id": 2074,
+      "channel": "canal2",
+      "script_title": "El Amabie: La profecía marina que resurgió en la pandemia",
+      "block_idx": 40,
+      "category": "technology",
+      "era": "",
+      "narration_fragment": "Lo que resulta verdaderamente asombroso es cómo una leyenda de casi dos siglos logró adaptarse a la era de las pantallas táctiles y las aplicaciones de mensajería. En una época en la que la información viaja a la velocidad de la luz, el Amabie se convirtió en un símbolo de resiliencia cultural: no era una superstición, sino un recordatorio de que la humanidad ya había enfrentado plagas antes, y que siempre encontró la manera de sobrevivir, incluso con humor y creatividad. Las ilustraciones virales no solo buscaban protección mística; también eran una forma de decir 'esto también pasará', un mensaje de esperanza que trascendía las barreras del idioma y del tiempo.",
+      "visual_description_es": "Primer plano de manos sosteniendo un smartphone con ilustraciones virales del Amabie en la pantalla, fondo desenfocado de una habitación moderna.",
+      "query_en": "smartphone hands scrolling social media illustrations amabie",
+      "media_type": "video",
+      "duration": 8.0,
+      "intent": {
+        "subject": "hands holding a smartphone",
+        "action": "scrolling social media illustrations",
+        "environment": "modern room with blurred background",
+        "visual_concept": "viral Amabie illustrations on a touchscreen",
+        "must_include": [
+          "close-up of hands",
+          "smartphone screen"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 40,
+        "block_idx": 40,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "Lo que resulta verdaderamente asombroso es cómo una leyenda de casi dos siglos logró adaptarse a la era de las pantallas táctiles y las aplicaciones de mensajería. En una época en la que la información viaja a la velocidad de la luz, el Amabie se convirtió en un símbolo de resiliencia cultural: no era una superstición, sino un recordatorio de que la humanidad ya había enfrentado plagas antes, y que siempre encontró la manera de sobrevivir, incluso con humor y creatividad. Las ilustraciones virales no solo buscaban protección mística; también eran una forma de decir 'esto también pasará', un mensaje de esperanza que trascendía las barreras del idioma y del tiempo.",
+        "subject": "hands holding a smartphone",
+        "action": "scrolling social media illustrations",
+        "environment": "modern room with blurred background",
+        "era": "",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "viral Amabie illustrations on a touchscreen",
+        "mood_style": "",
+        "must_include": [
+          "close-up of hands",
+          "smartphone screen"
+        ],
+        "must_avoid": [],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 8.0,
+        "media_type": "video",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "El Amabie: La profecía marina que resurgió en la pandemia",
+          "query_en": "smartphone hands scrolling social media illustrations amabie",
+          "category": "technology",
+          "benchmark_injected_must_avoid": []
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s1629-b21",
+      "script_id": 1629,
+      "video_id": null,
+      "channel": "canal4",
+      "script_title": "La expedición Franklin: 129 hombres que desaparecieron en el hielo",
+      "block_idx": 21,
+      "category": "action",
+      "era": "",
+      "narration_fragment": "Hoy, los restos de ambos navíos descansan en el Ártico como un monumento involuntario a la arrogancia y a la resistencia. En el Erebus, los buzos encontraron el mecanismo del timón aún engrasado, y en el Terror, un plato de porcelana con el escudo de la Marina Real. Pero el legado más profundo no está en los objetos: está en lo que los inuit ya sabían y los europeos no quisieron escuchar. La expedición Franklin demostró que la tecnología más avanzada de su tiempo —motores de vapor, conservas herméticas, bibliotecas de mil libros— no podía competir con el conocimiento de quienes vivían en el hielo desde hacía generaciones. Cuando los barcos se hundieron, los hombres que sobrevivieron murieron caminando hacia un horizonte que no conocían. La pregunta que queda flotando es incómoda: si hubieran confiado en los netsilik desde el principio, si hubieran aceptado que el Ártico no se conquista sino que se habita, ¿cuántos de esos 129 hombres habrían vuelto a casa? El Erebus y el Terror ya no son naufragios. Son la prueba de que el respeto al entorno y a quienes lo conocen puede ser la diferencia entre la vida y la muerte.",
+      "visual_description_es": "Los restos de los navíos emergen del hielo, rodeados de un paisaje ártico desolado.",
+      "query_en": "Erebus Terror shipwreck Arctic exploration respect",
+      "media_type": "image",
+      "duration": 6.0,
+      "intent": {
+        "subject": "remains of the Erebus and Terror ships",
+        "action": "emerging from the ice",
+        "environment": "desolate Arctic landscape",
+        "visual_concept": "involuntary monument to arrogance and endurance",
+        "must_include": [
+          "shipwreck remains",
+          "ice"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 21,
+        "block_idx": 21,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "Hoy, los restos de ambos navíos descansan en el Ártico como un monumento involuntario a la arrogancia y a la resistencia. En el Erebus, los buzos encontraron el mecanismo del timón aún engrasado, y en el Terror, un plato de porcelana con el escudo de la Marina Real. Pero el legado más profundo no está en los objetos: está en lo que los inuit ya sabían y los europeos no quisieron escuchar. La expedición Franklin demostró que la tecnología más avanzada de su tiempo —motores de vapor, conservas herméticas, bibliotecas de mil libros— no podía competir con el conocimiento de quienes vivían en el hielo desde hacía generaciones. Cuando los barcos se hundieron, los hombres que sobrevivieron murieron caminando hacia un horizonte que no conocían. La pregunta que queda flotando es incómoda: si hubieran confiado en los netsilik desde el principio, si hubieran aceptado que el Ártico no se conquista sino que se habita, ¿cuántos de esos 129 hombres habrían vuelto a casa? El Erebus y el Terror ya no son naufragios. Son la prueba de que el respeto al entorno y a quienes lo conocen puede ser la diferencia entre la vida y la muerte.",
+        "subject": "remains of the Erebus and Terror ships",
+        "action": "emerging from the ice",
+        "environment": "desolate Arctic landscape",
+        "era": "",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "involuntary monument to arrogance and endurance",
+        "mood_style": "",
+        "must_include": [
+          "shipwreck remains",
+          "ice"
+        ],
+        "must_avoid": [],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 6.0,
+        "media_type": "image",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "La expedición Franklin: 129 hombres que desaparecieron en el hielo",
+          "query_en": "Erebus Terror shipwreck Arctic exploration respect",
+          "category": "action",
+          "benchmark_injected_must_avoid": []
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s0714-b09",
+      "script_id": 714,
+      "video_id": null,
+      "channel": "canal3",
+      "script_title": "El Monte Meru: El Secreto Oculto en las Pirámides y Templos del Mundo",
+      "block_idx": 9,
+      "category": "animals",
+      "era": "",
+      "narration_fragment": "Y en esa comprensión yace el secreto que Thoth ordenó esconder en las cavernas, esperando el fin de la guerra de los ciclos. Los dogones, ese pueblo de África occidental que los antropólogos llaman hijos de Enki, guardaron durante milenios la memoria de aquellos seres que bajaron del cielo, los que en Sumeria fueron conocidos como los Apkallu, los hombres-pájaro que trajeron la sabiduría de las estrellas. No eran dioses en el sentido que nosotros entendemos, sino portadores de una ciencia que trascendía lo que podía escribirse en tablillas de arcilla. Eran viajeros de la luz, como los llamaban los textos, y su vehículo no era una nave de metal, sino un campo de energía que los antiguos denominaron MerKaBa, la luz que transporta el espíritu a través de los mundos. Cuando contemplamos las estatuas de esos seres alados, cubiertos de escamas como peces o vestidos con túnicas de pájaro, no estamos viendo mitos inocentes, sino la memoria petrificada de un contacto que ocurrió antes de que la historia comenzara, y que fue borrado de la memoria colectiva para que no cayera en manos de quienes buscaban dominar, no comprender.",
+      "visual_description_es": "Primer plano de una estatua antigua de un ser alado con escamas de pez, iluminada por la luz de antorchas.",
+      "query_en": "ancient bird-man statue fish scales close up detail",
+      "media_type": "image",
+      "duration": 6.0,
+      "intent": {
+        "subject": "ancient winged statue with fish scales",
+        "action": "being illuminated by torchlight",
+        "environment": "torchlit cavern",
+        "visual_concept": "ancient bird-man statue detail",
+        "must_include": [
+          "close-up of statue",
+          "fish scales"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 9,
+        "block_idx": 9,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "Y en esa comprensión yace el secreto que Thoth ordenó esconder en las cavernas, esperando el fin de la guerra de los ciclos. Los dogones, ese pueblo de África occidental que los antropólogos llaman hijos de Enki, guardaron durante milenios la memoria de aquellos seres que bajaron del cielo, los que en Sumeria fueron conocidos como los Apkallu, los hombres-pájaro que trajeron la sabiduría de las estrellas. No eran dioses en el sentido que nosotros entendemos, sino portadores de una ciencia que trascendía lo que podía escribirse en tablillas de arcilla. Eran viajeros de la luz, como los llamaban los textos, y su vehículo no era una nave de metal, sino un campo de energía que los antiguos denominaron MerKaBa, la luz que transporta el espíritu a través de los mundos. Cuando contemplamos las estatuas de esos seres alados, cubiertos de escamas como peces o vestidos con túnicas de pájaro, no estamos viendo mitos inocentes, sino la memoria petrificada de un contacto que ocurrió antes de que la historia comenzara, y que fue borrado de la memoria colectiva para que no cayera en manos de quienes buscaban dominar, no comprender.",
+        "subject": "ancient winged statue with fish scales",
+        "action": "being illuminated by torchlight",
+        "environment": "torchlit cavern",
+        "era": "",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "ancient bird-man statue detail",
+        "mood_style": "",
+        "must_include": [
+          "close-up of statue",
+          "fish scales"
+        ],
+        "must_avoid": [],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 6.0,
+        "media_type": "image",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "El Monte Meru: El Secreto Oculto en las Pirámides y Templos del Mundo",
+          "query_en": "ancient bird-man statue fish scales close up detail",
+          "category": "animals",
+          "benchmark_injected_must_avoid": []
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s0795-b11",
+      "script_id": 795,
+      "video_id": 2052,
+      "channel": "canal3",
+      "script_title": "Piedras ciervo: el enigma de una civilización que desafió el tiempo",
+      "block_idx": 11,
+      "category": "city",
+      "era": "",
+      "narration_fragment": "Así, las piedras ciervo de Mongolia y los palacios de Creta nos enseñan que la grandeza humana es frágil, que las civilizaciones pueden erigir monumentos y luego desvanecerse bajo el polvo y las cenizas. Pero el colapso minoico no fue el último gran misterio de la antigüedad. Mientras el Mediterráneo se recuperaba de aquel desastre, en el otro lado del mundo, en las selvas de Mesoamérica, otra civilización construía ciudades tan majestuosas que también desaparecerían sin dejar una explicación clara. Ese es el enigma que nos espera: el colapso de los mayas, el misterio de las ciudades abandonadas.",
+      "visual_description_es": "Vista aérea de una ciudad maya cubierta por la selva, con pirámides emergiendo entre la vegetación, creando una atmósfera de misterio.",
+      "query_en": "abandoned Mayan city jungle ruins aerial view",
+      "media_type": "video",
+      "duration": 10.0,
+      "intent": {
+        "subject": "abandoned Mayan city",
+        "action": "emerging from jungle vegetation",
+        "environment": "aerial view of jungle-covered city with pyramids",
+        "visual_concept": "mystery of a lost civilization",
+        "must_include": [
+          "p",
+          "y"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 11,
+        "block_idx": 11,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "Así, las piedras ciervo de Mongolia y los palacios de Creta nos enseñan que la grandeza humana es frágil, que las civilizaciones pueden erigir monumentos y luego desvanecerse bajo el polvo y las cenizas. Pero el colapso minoico no fue el último gran misterio de la antigüedad. Mientras el Mediterráneo se recuperaba de aquel desastre, en el otro lado del mundo, en las selvas de Mesoamérica, otra civilización construía ciudades tan majestuosas que también desaparecerían sin dejar una explicación clara. Ese es el enigma que nos espera: el colapso de los mayas, el misterio de las ciudades abandonadas.",
+        "subject": "abandoned Mayan city",
+        "action": "emerging from jungle vegetation",
+        "environment": "aerial view of jungle-covered city with pyramids",
+        "era": "",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "mystery of a lost civilization",
+        "mood_style": "",
+        "must_include": [
+          "p",
+          "y"
+        ],
+        "must_avoid": [],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 10.0,
+        "media_type": "video",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "Piedras ciervo: el enigma de una civilización que desafió el tiempo",
+          "query_en": "abandoned Mayan city jungle ruins aerial view",
+          "category": "city",
+          "benchmark_injected_must_avoid": []
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s0377-b02",
+      "script_id": 377,
+      "video_id": null,
+      "channel": "canal3",
+      "script_title": "El pectoral de Pa-nehesi: un mapa al más allá de 3000 años",
+      "block_idx": 2,
+      "category": "desert_geology",
+      "era": "ancient",
+      "narration_fragment": "Pero hay un detalle inquietante: no sabemos de dónde proviene este pectoral. Su origen es desconocido, perdido en el polvo del desierto o en el saqueo de alguna tumba olvidada. ¿Fue hallado en la necrópolis de Tebas, entre los restos de los sirvientes del faraón? ¿O acaso perteneció a un alto funcionario de la Dinastía XX, una época de declive y corrupción? Lo cierto es que, a pesar de su pequeño tamaño, este objeto nos habla de una obsesión humana que trasciende el tiempo: el deseo de vencer a la muerte. Mientras exista un pectoral como este, la voz de Pa-nehesi seguirá resonando, recordándonos que, para los egipcios, la vida era solo el primer capítulo de una historia infinita.",
+      "visual_description_es": "Vista aérea de un desierto egipcio con tumbas abiertas y arena arrastrada por el viento, evocando saqueo y abandono.",
+      "query_en": "Egyptian desert tomb robbery sandstorm ancient Thebes necropolis",
+      "media_type": "video",
+      "duration": 10.0,
+      "intent": {
+        "subject": "Egyptian desert necropolis with open tombs",
+        "action": "revealing looted tombs and wind-blown sand",
+        "environment": "Egyptian desert, ancient Thebes necropolis",
+        "visual_concept": "looting and abandonment evoked through wind-swept sand over open tombs",
+        "must_include": [
+          "aerial view",
+          "open tombs"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 2,
+        "block_idx": 2,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "Pero hay un detalle inquietante: no sabemos de dónde proviene este pectoral. Su origen es desconocido, perdido en el polvo del desierto o en el saqueo de alguna tumba olvidada. ¿Fue hallado en la necrópolis de Tebas, entre los restos de los sirvientes del faraón? ¿O acaso perteneció a un alto funcionario de la Dinastía XX, una época de declive y corrupción? Lo cierto es que, a pesar de su pequeño tamaño, este objeto nos habla de una obsesión humana que trasciende el tiempo: el deseo de vencer a la muerte. Mientras exista un pectoral como este, la voz de Pa-nehesi seguirá resonando, recordándonos que, para los egipcios, la vida era solo el primer capítulo de una historia infinita.",
+        "subject": "Egyptian desert necropolis with open tombs",
+        "action": "revealing looted tombs and wind-blown sand",
+        "environment": "Egyptian desert, ancient Thebes necropolis",
+        "era": "ancient",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "looting and abandonment evoked through wind-swept sand over open tombs",
+        "mood_style": "",
+        "must_include": [
+          "aerial view",
+          "open tombs"
+        ],
+        "must_avoid": [
+          "smartphone",
+          "laptop",
+          "modern car",
+          "neon sign"
+        ],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 10.0,
+        "media_type": "video",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "El pectoral de Pa-nehesi: un mapa al más allá de 3000 años",
+          "query_en": "Egyptian desert tomb robbery sandstorm ancient Thebes necropolis",
+          "category": "desert_geology",
+          "benchmark_injected_must_avoid": [
+            "smartphone",
+            "laptop",
+            "modern car",
+            "neon sign"
+          ]
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s1356-b04",
+      "script_id": 1356,
+      "video_id": 2493,
+      "channel": "canal4",
+      "script_title": "Héroes del Hiyaz: la yihad que humilló a Napoleón en Egipto",
+      "block_idx": 4,
+      "category": "history",
+      "era": "18th century",
+      "narration_fragment": "Entre esos voluntarios destacaron Sayyid Tahir al-Jilani y su sobrino Hasan, quienes llegaron a Al-Qusayr el 1 de enero de 1799. Cuando la flota procedente de Jeddah arribó, se topó con una pequeña escuadra francesa que Napoleón había enviado a ocupar el puerto. Lejos de amedrentarse, los hiyazíes atacaron con tal ímpetu que la flota francesa, golpeada severamente, huyó de regreso a Suez. Aquel combate no fue un simple escaramuza: demostró que la resistencia podía golpear al invasor en su propio terreno logístico. Tras la victoria, los muyahidines avanzaron hacia la gobernación de Qena y se unieron al ejército de Murad Bey, el líder mameluco que aún resistía en el Alto Egipto.",
+      "visual_description_es": "Los hiyazíes atacando con valentía una flota francesa en Al-Qusayr, con un ambiente de triunfo y determinación.",
+      "query_en": "Hiyaz volunteers Al-Qusayr French fleet battle 18th century",
+      "media_type": "video",
+      "duration": 6.0,
+      "intent": {
+        "subject": "Hiyaz volunteers and French fleet",
+        "action": "attacking bravely",
+        "environment": "Al-Qusayr port, 18th century",
+        "visual_concept": "triumphant resistance against French fleet",
+        "must_include": [
+          "Hiyaz volunteers",
+          "French fleet"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 4,
+        "block_idx": 4,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "Entre esos voluntarios destacaron Sayyid Tahir al-Jilani y su sobrino Hasan, quienes llegaron a Al-Qusayr el 1 de enero de 1799. Cuando la flota procedente de Jeddah arribó, se topó con una pequeña escuadra francesa que Napoleón había enviado a ocupar el puerto. Lejos de amedrentarse, los hiyazíes atacaron con tal ímpetu que la flota francesa, golpeada severamente, huyó de regreso a Suez. Aquel combate no fue un simple escaramuza: demostró que la resistencia podía golpear al invasor en su propio terreno logístico. Tras la victoria, los muyahidines avanzaron hacia la gobernación de Qena y se unieron al ejército de Murad Bey, el líder mameluco que aún resistía en el Alto Egipto.",
+        "subject": "Hiyaz volunteers and French fleet",
+        "action": "attacking bravely",
+        "environment": "Al-Qusayr port, 18th century",
+        "era": "18th century",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "triumphant resistance against French fleet",
+        "mood_style": "",
+        "must_include": [
+          "Hiyaz volunteers",
+          "French fleet"
+        ],
+        "must_avoid": [
+          "smartphone",
+          "laptop",
+          "modern car",
+          "neon sign"
+        ],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 6.0,
+        "media_type": "video",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "Héroes del Hiyaz: la yihad que humilló a Napoleón en Egipto",
+          "query_en": "Hiyaz volunteers Al-Qusayr French fleet battle 18th century",
+          "category": "history",
+          "benchmark_injected_must_avoid": [
+            "smartphone",
+            "laptop",
+            "modern car",
+            "neon sign"
+          ]
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s0869-b09",
+      "script_id": 869,
+      "video_id": null,
+      "channel": "canal4",
+      "script_title": "Cinco relatos inquietantes de desapariciones que te dejarán sin aliento",
+      "block_idx": 9,
+      "category": "medical",
+      "era": "",
+      "narration_fragment": "Mientras las luces del quirófano se encendían, Rita cerró los ojos, enfocándose en ese pequeño destello de esperanza que había encontrado en lo más profundo de sí misma. La lucha por su vida era inminente, y aunque la incertidumbre se adueñaba de su mente, el desafío que enfrentaba era también una oportunidad para renacer. La cirugía se convertiría en el umbral hacia una nueva etapa, un espacio donde la posibilidad de volver a caminar, de recuperar su independencia, se tejía poco a poco. Pero en su corazón, la pregunta persistía: ¿sería suficiente su fuerza para superar lo que estaba por venir? La respuesta aún se encontraba en el velo incierto del futuro.",
+      "visual_description_es": "Distant view del quirófano iluminado, con Rita en la mesa rodeada de médicos preparados para la cirugía.",
+      "query_en": "elderly woman surgery lights hope future",
+      "media_type": "video",
+      "duration": 10.0,
+      "intent": {
+        "subject": "Rita, an elderly woman on the operating table",
+        "action": "closing her eyes amid surgery preparation",
+        "environment": "distant view of an illuminated operating room with doctors around the table",
+        "visual_concept": "surgery lights as a threshold of hope and rebirth",
+        "must_include": [
+          "Rita on the operating table",
+          "surrounding prepared doctors"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 9,
+        "block_idx": 9,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "Mientras las luces del quirófano se encendían, Rita cerró los ojos, enfocándose en ese pequeño destello de esperanza que había encontrado en lo más profundo de sí misma. La lucha por su vida era inminente, y aunque la incertidumbre se adueñaba de su mente, el desafío que enfrentaba era también una oportunidad para renacer. La cirugía se convertiría en el umbral hacia una nueva etapa, un espacio donde la posibilidad de volver a caminar, de recuperar su independencia, se tejía poco a poco. Pero en su corazón, la pregunta persistía: ¿sería suficiente su fuerza para superar lo que estaba por venir? La respuesta aún se encontraba en el velo incierto del futuro.",
+        "subject": "Rita, an elderly woman on the operating table",
+        "action": "closing her eyes amid surgery preparation",
+        "environment": "distant view of an illuminated operating room with doctors around the table",
+        "era": "",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "surgery lights as a threshold of hope and rebirth",
+        "mood_style": "",
+        "must_include": [
+          "Rita on the operating table",
+          "surrounding prepared doctors"
+        ],
+        "must_avoid": [],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 10.0,
+        "media_type": "video",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "Cinco relatos inquietantes de desapariciones que te dejarán sin aliento",
+          "query_en": "elderly woman surgery lights hope future",
+          "category": "medical",
+          "benchmark_injected_must_avoid": []
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s1212-b08",
+      "script_id": 1212,
+      "video_id": 2374,
+      "channel": "canal5",
+      "script_title": "Acromatopsia: el mundo sin color que 1 de cada 30.000 personas habita",
+      "block_idx": 8,
+      "category": "nature",
+      "era": "ancient",
+      "narration_fragment": "Pero CNGB3 no es el único gen implicado. Las mutaciones en CNGA3, otro componente esencial de los canales iónicos de los conos, también pueden causar acromatopsia. En este caso, la disfunción del canal afecta directamente la señalización visual: los iones no fluyen adecuadamente, y la cascada de fototransducción se ve alterada. A diferencia de CNGB3, donde la proteína truncada no alcanza su destino, en CNGA3 las mutaciones pueden alterar la estructura del canal de manera que este se vuelva inoperante o pierda su capacidad de respuesta. Ambos genes trabajan en conjunto para formar un canal heteromérico, y una falla en cualquiera de ellos rompe el delicado equilibrio necesario para la visión en color. La genética molecular ha revelado que la acromatopsia es una enfermedad genéticamente heterogénea, con múltiples genes y variantes que convergen en un mismo fenotipo: un mundo en escala de grises.",
+      "visual_description_es": "Modelo tridimensional de un canal iónico heteromérico formado por subunidades CNGA3 y CNGB3, con iones fluyendo a través de él.",
+      "query_en": "ion channel protein structure 3D model, wide shot, molecular biology",
+      "media_type": "image",
+      "duration": 5.0,
+      "intent": {
+        "subject": "heteromeric CNGA3/CNGB3 ion channel 3D model",
+        "action": "showing ions flowing through the channel",
+        "environment": "molecular visualization",
+        "visual_concept": "ion flow through a heteromeric cone ion channel",
+        "must_include": [
+          "CNGA3 and CNGB3 subunits",
+          "heteromeric channel structure"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 8,
+        "block_idx": 8,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "Pero CNGB3 no es el único gen implicado. Las mutaciones en CNGA3, otro componente esencial de los canales iónicos de los conos, también pueden causar acromatopsia. En este caso, la disfunción del canal afecta directamente la señalización visual: los iones no fluyen adecuadamente, y la cascada de fototransducción se ve alterada. A diferencia de CNGB3, donde la proteína truncada no alcanza su destino, en CNGA3 las mutaciones pueden alterar la estructura del canal de manera que este se vuelva inoperante o pierda su capacidad de respuesta. Ambos genes trabajan en conjunto para formar un canal heteromérico, y una falla en cualquiera de ellos rompe el delicado equilibrio necesario para la visión en color. La genética molecular ha revelado que la acromatopsia es una enfermedad genéticamente heterogénea, con múltiples genes y variantes que convergen en un mismo fenotipo: un mundo en escala de grises.",
+        "subject": "heteromeric CNGA3/CNGB3 ion channel 3D model",
+        "action": "showing ions flowing through the channel",
+        "environment": "molecular visualization",
+        "era": "ancient",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "ion flow through a heteromeric cone ion channel",
+        "mood_style": "",
+        "must_include": [
+          "CNGA3 and CNGB3 subunits",
+          "heteromeric channel structure"
+        ],
+        "must_avoid": [
+          "smartphone",
+          "laptop",
+          "modern car",
+          "neon sign"
+        ],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 5.0,
+        "media_type": "image",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "Acromatopsia: el mundo sin color que 1 de cada 30.000 personas habita",
+          "query_en": "ion channel protein structure 3D model, wide shot, molecular biology",
+          "category": "nature",
+          "benchmark_injected_must_avoid": [
+            "smartphone",
+            "laptop",
+            "modern car",
+            "neon sign"
+          ]
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s0434-b07",
+      "script_id": 434,
+      "video_id": 928,
+      "channel": "canal4",
+      "script_title": "La proteína invisible que mantiene viva la fotosíntesis en las plantas",
+      "block_idx": 7,
+      "category": "other",
+      "era": "",
+      "narration_fragment": "Pero hay más: los investigadores descubrieron que en los mutantes carentes de PsbZ, dos proteínas esenciales del complejo antenna, CP26 y CP29, disminuyen drásticamente. Son como los paneles solares de la célula, los encargados de capturar la luz y canalizarla hacia el centro de reacción. Sin ellas, el sistema de captación se desmorona. Ycf9 no solo une estructuras; es el arquitecto que asegura que los colectores de luz estén en su lugar.",
+      "visual_description_es": "Animación 3D de un complejo antena de proteínas en un tilacoide, con partículas de luz siendo absorbidas.",
+      "query_en": "antenna complex protein structure chloroplast molecular animation",
+      "media_type": "video",
+      "duration": 10.0,
+      "intent": {
+        "subject": "antenna protein complex in thylakoid",
+        "action": "absorbing light particles",
+        "environment": "thylakoid membrane",
+        "visual_concept": "molecular light-harvesting architecture",
+        "must_include": [
+          "antenna protein complex",
+          "thylakoid"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 7,
+        "block_idx": 7,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "Pero hay más: los investigadores descubrieron que en los mutantes carentes de PsbZ, dos proteínas esenciales del complejo antenna, CP26 y CP29, disminuyen drásticamente. Son como los paneles solares de la célula, los encargados de capturar la luz y canalizarla hacia el centro de reacción. Sin ellas, el sistema de captación se desmorona. Ycf9 no solo une estructuras; es el arquitecto que asegura que los colectores de luz estén en su lugar.",
+        "subject": "antenna protein complex in thylakoid",
+        "action": "absorbing light particles",
+        "environment": "thylakoid membrane",
+        "era": "",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "molecular light-harvesting architecture",
+        "mood_style": "",
+        "must_include": [
+          "antenna protein complex",
+          "thylakoid"
+        ],
+        "must_avoid": [],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 10.0,
+        "media_type": "video",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "La proteína invisible que mantiene viva la fotosíntesis en las plantas",
+          "query_en": "antenna complex protein structure chloroplast molecular animation",
+          "category": "other",
+          "benchmark_injected_must_avoid": []
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s0173-b13",
+      "script_id": 173,
+      "video_id": null,
+      "channel": "canal2",
+      "script_title": "Descubre los secretos de tus sueños y su impacto en la mente",
+      "block_idx": 13,
+      "category": "people",
+      "era": "",
+      "narration_fragment": "Esta investigación sugiere que, al controlar sus sueños, los individuos pueden reescribir narrativas de miedo, enfrentándose a situaciones que normalmente evitarían en la vida cotidiana.",
+      "visual_description_es": "Una persona en un paisaje onírico, transformando una escena aterradora en una experiencia liberadora.",
+      "query_en": "overcoming fears lucid dream narrative control wide angle",
+      "media_type": "video",
+      "duration": 11.0,
+      "intent": {
+        "subject": "a person in a dreamlike landscape",
+        "action": "transforming a frightening scene into a liberating experience",
+        "environment": "dreamlike landscape",
+        "visual_concept": "rewriting fear narratives through lucid dream control",
+        "must_include": [
+          "person",
+          "dreamlike landscape"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 13,
+        "block_idx": 13,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "Esta investigación sugiere que, al controlar sus sueños, los individuos pueden reescribir narrativas de miedo, enfrentándose a situaciones que normalmente evitarían en la vida cotidiana.",
+        "subject": "a person in a dreamlike landscape",
+        "action": "transforming a frightening scene into a liberating experience",
+        "environment": "dreamlike landscape",
+        "era": "",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "rewriting fear narratives through lucid dream control",
+        "mood_style": "",
+        "must_include": [
+          "person",
+          "dreamlike landscape"
+        ],
+        "must_avoid": [],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 11.0,
+        "media_type": "video",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "Descubre los secretos de tus sueños y su impacto en la mente",
+          "query_en": "overcoming fears lucid dream narrative control wide angle",
+          "category": "people",
+          "benchmark_injected_must_avoid": []
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s0080-b02",
+      "script_id": 80,
+      "video_id": null,
+      "channel": "canal2",
+      "script_title": "La asombrosa historia de mi muerte y regreso",
+      "block_idx": 2,
+      "category": "space_science",
+      "era": "",
+      "narration_fragment": "A medida que ascendía, vislumbró la presencia de seres desconocidos, figuras etéreas que, aunque eran ajenas a su corta vida, le ofrecieron una calidez reconfortante. En este espacio, donde se entrelazaban luces y sombras, sentía como si dos corrientes de humo se fusionaran en su ser. La experiencia era casi onírica, envuelta en una niebla suave y envolvente, un campo que desdibujaba la línea entre su esencia física y algo mucho más grande. Era un estado de pureza, donde el miedo, esa emoción tan humana, se desvanecía por completo, dejando lugar a una conexión profunda con el universo.",
+      "visual_description_es": "Figuras etéreas flotando en una neblina suave, iluminadas por luces tenues y cálidas.",
+      "query_en": "ethereal beings in soft mist",
+      "media_type": "image",
+      "duration": 7.0,
+      "intent": {
+        "subject": "ethereal figures",
+        "action": "floating",
+        "environment": "soft mist with warm dim light",
+        "visual_concept": "dreamlike fusion of smoke and light",
+        "must_include": [
+          "ethereal figures",
+          "soft mist"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 2,
+        "block_idx": 2,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "A medida que ascendía, vislumbró la presencia de seres desconocidos, figuras etéreas que, aunque eran ajenas a su corta vida, le ofrecieron una calidez reconfortante. En este espacio, donde se entrelazaban luces y sombras, sentía como si dos corrientes de humo se fusionaran en su ser. La experiencia era casi onírica, envuelta en una niebla suave y envolvente, un campo que desdibujaba la línea entre su esencia física y algo mucho más grande. Era un estado de pureza, donde el miedo, esa emoción tan humana, se desvanecía por completo, dejando lugar a una conexión profunda con el universo.",
+        "subject": "ethereal figures",
+        "action": "floating",
+        "environment": "soft mist with warm dim light",
+        "era": "",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "dreamlike fusion of smoke and light",
+        "mood_style": "",
+        "must_include": [
+          "ethereal figures",
+          "soft mist"
+        ],
+        "must_avoid": [],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 7.0,
+        "media_type": "image",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "La asombrosa historia de mi muerte y regreso",
+          "query_en": "ethereal beings in soft mist",
+          "category": "space_science",
+          "benchmark_injected_must_avoid": []
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s0184-b13",
+      "script_id": 184,
+      "video_id": null,
+      "channel": "canal2",
+      "script_title": "Descubre las experiencias paranormales que transformaron mi vida",
+      "block_idx": 13,
+      "category": "technology",
+      "era": "",
+      "narration_fragment": "La creciente popularidad de la parapsicología en el siglo XXI ha impulsado nuevas investigaciones sobre fenómenos como los que vivió el narrador. Cada estudio busca arrojar luz sobre lo que escapa a nuestra comprensión.",
+      "visual_description_es": "Un laboratorio de parapsicología moderno, con científicos observando datos en pantallas brillantes.",
+      "query_en": "21st century parapsychology research laboratory footage",
+      "media_type": "video",
+      "duration": 12.0,
+      "intent": {
+        "subject": "scientists in a modern parapsychology laboratory",
+        "action": "observing data on bright screens",
+        "environment": "modern parapsychology laboratory",
+        "visual_concept": "21st century parapsychology research",
+        "must_include": [
+          "scientists",
+          "bright screens"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 13,
+        "block_idx": 13,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "La creciente popularidad de la parapsicología en el siglo XXI ha impulsado nuevas investigaciones sobre fenómenos como los que vivió el narrador. Cada estudio busca arrojar luz sobre lo que escapa a nuestra comprensión.",
+        "subject": "scientists in a modern parapsychology laboratory",
+        "action": "observing data on bright screens",
+        "environment": "modern parapsychology laboratory",
+        "era": "",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "21st century parapsychology research",
+        "mood_style": "",
+        "must_include": [
+          "scientists",
+          "bright screens"
+        ],
+        "must_avoid": [],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 12.0,
+        "media_type": "video",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "Descubre las experiencias paranormales que transformaron mi vida",
+          "query_en": "21st century parapsychology research laboratory footage",
+          "category": "technology",
+          "benchmark_injected_must_avoid": []
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s1365-b02",
+      "script_id": 1365,
+      "video_id": 2501,
+      "channel": "canal3",
+      "script_title": "El Misterio de las Hachas Ceremoniales de los Hopewell",
+      "block_idx": 2,
+      "category": "action",
+      "era": "",
+      "narration_fragment": "La grandeza de los artefactos de Mound 25 trasciende su tamaño físico; se convierten en símbolos de una sociedad que priorizaba el estatus y la espiritualidad. A medida que los arqueólogos han explorado el sitio, han encontrado que en las aldeas cercanas se forjaban herramientas más pequeñas a partir de cobre local, destinadas a usos cotidianos. Pero aquí, en las tumulaciones, los objetos adquirían un significado distinto, elevado al rango de símbolos de poder y prestigio. El estudio de estas dinámicas económicas por Tom Emerson y Ken Farnsworth revela dos mundos coexistentes dentro de una misma cultura: uno práctico y otro ceremonial, donde el valor de estos elementos radicaba en su capacidad de impresionar y comunicar estatus.",
+      "visual_description_es": "Una vista de los artefactos excavados en Mound 25, mostrando su tamaño y elaborados detalles.",
+      "query_en": "Hopewell artifacts Mound 25 ancient Ohio symbolism",
+      "media_type": "image",
+      "duration": 5.0,
+      "intent": {
+        "subject": "excavated Hopewell artifacts from Mound 25",
+        "action": "displaying size and elaborate details",
+        "environment": "archaeological site of Mound 25",
+        "visual_concept": "ceremonial symbols of power and prestige",
+        "must_include": [
+          "Hopewell artifacts",
+          "Mound 25"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 2,
+        "block_idx": 2,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "La grandeza de los artefactos de Mound 25 trasciende su tamaño físico; se convierten en símbolos de una sociedad que priorizaba el estatus y la espiritualidad. A medida que los arqueólogos han explorado el sitio, han encontrado que en las aldeas cercanas se forjaban herramientas más pequeñas a partir de cobre local, destinadas a usos cotidianos. Pero aquí, en las tumulaciones, los objetos adquirían un significado distinto, elevado al rango de símbolos de poder y prestigio. El estudio de estas dinámicas económicas por Tom Emerson y Ken Farnsworth revela dos mundos coexistentes dentro de una misma cultura: uno práctico y otro ceremonial, donde el valor de estos elementos radicaba en su capacidad de impresionar y comunicar estatus.",
+        "subject": "excavated Hopewell artifacts from Mound 25",
+        "action": "displaying size and elaborate details",
+        "environment": "archaeological site of Mound 25",
+        "era": "",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "ceremonial symbols of power and prestige",
+        "mood_style": "",
+        "must_include": [
+          "Hopewell artifacts",
+          "Mound 25"
+        ],
+        "must_avoid": [],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 5.0,
+        "media_type": "image",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "El Misterio de las Hachas Ceremoniales de los Hopewell",
+          "query_en": "Hopewell artifacts Mound 25 ancient Ohio symbolism",
+          "category": "action",
+          "benchmark_injected_must_avoid": []
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s1468-b12",
+      "script_id": 1468,
+      "video_id": 2584,
+      "channel": "canal4",
+      "script_title": "129 Hombres, Cero Sobrevivientes: El Misterio de Franklin",
+      "block_idx": 12,
+      "category": "animals",
+      "era": "19th century",
+      "narration_fragment": "Los restos hallados en la isla King William y en la isla Beechey cuentan lo que ningún diario pudo contar. Los arqueólogos han encontrado huesos humanos con marcas de corte limpias, del tipo que deja un cuchillo al retirar la carne de un hueso, y cráneos fracturados por golpes. No son marcas de animales: son marcas de manos humanas. La evidencia indica que algunos de los últimos supervivientes recurrieron al canibalismo para seguir un día más. En 1851, el explorador John Rae encontró objetos de la expedición en manos de familias inuit del Ártico central, y ellos le dijeron lo que habían visto: hombres que caminaban encorvados, con las encías sangrantes por el escorbuto, que caían y no se levantaban. Los últimos, según los relatos inuit recogidos por Rae, murieron de hambre y de enfermedad, no de una sola tragedia, sino de una suma de ellas.",
+      "visual_description_es": "Un excavador en un paisaje helado descubriendo huesos humanos entre la nieve y el hielo.",
+      "query_en": "archaeological findings human remains cannibalism Arctic expedition",
+      "media_type": "image",
+      "duration": 5.0,
+      "intent": {
+        "subject": "excavator in frozen landscape",
+        "action": "discovering human bones",
+        "environment": "snow and ice",
+        "visual_concept": "archaeological evidence of cannibalism",
+        "must_include": [
+          "human bones",
+          "cut marks"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 12,
+        "block_idx": 12,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "Los restos hallados en la isla King William y en la isla Beechey cuentan lo que ningún diario pudo contar. Los arqueólogos han encontrado huesos humanos con marcas de corte limpias, del tipo que deja un cuchillo al retirar la carne de un hueso, y cráneos fracturados por golpes. No son marcas de animales: son marcas de manos humanas. La evidencia indica que algunos de los últimos supervivientes recurrieron al canibalismo para seguir un día más. En 1851, el explorador John Rae encontró objetos de la expedición en manos de familias inuit del Ártico central, y ellos le dijeron lo que habían visto: hombres que caminaban encorvados, con las encías sangrantes por el escorbuto, que caían y no se levantaban. Los últimos, según los relatos inuit recogidos por Rae, murieron de hambre y de enfermedad, no de una sola tragedia, sino de una suma de ellas.",
+        "subject": "excavator in frozen landscape",
+        "action": "discovering human bones",
+        "environment": "snow and ice",
+        "era": "19th century",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "archaeological evidence of cannibalism",
+        "mood_style": "",
+        "must_include": [
+          "human bones",
+          "cut marks"
+        ],
+        "must_avoid": [
+          "smartphone",
+          "laptop",
+          "modern car",
+          "neon sign"
+        ],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 5.0,
+        "media_type": "image",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "129 Hombres, Cero Sobrevivientes: El Misterio de Franklin",
+          "query_en": "archaeological findings human remains cannibalism Arctic expedition",
+          "category": "animals",
+          "benchmark_injected_must_avoid": [
+            "smartphone",
+            "laptop",
+            "modern car",
+            "neon sign"
+          ]
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s0133-b06",
+      "script_id": 133,
+      "video_id": null,
+      "channel": "canal4",
+      "script_title": "El Enigma del Asesino Zodiac: Mitos y Realidades",
+      "block_idx": 6,
+      "category": "city",
+      "era": "",
+      "narration_fragment": "En medio de la desesperación y la confusión, surgieron múltiples teorías sobre la identidad del Zodiac, alimentadas por la especulación y la falta de pruebas concretas. Desde la imagen de un hombre solitario hasta la concepción de un grupo cómplice, todos parecían tener su propia versión del misterio. Los expertos en criminología y psicología intentaron desentrañar la mente retorcida del asesino, pero cada intento se topaba con el muro de su astucia. La frustración aumentaba, y la comunidad clamaba por respuestas. Sin embargo, las preguntas persistían, volviendo a la sociedad una presa fácil de la paranoia, donde cada sombra podía esconder un secreto mortal, y cada sonido en la noche podía ser el eco de la risa del asesino.",
+      "visual_description_es": "Una calle oscura y desierta, con sombras alargadas proyectadas por un farol parpadeante, creando un ambiente de inquietud.",
+      "query_en": "dark alley shadow mystery",
+      "media_type": "image",
+      "duration": 6.0,
+      "intent": {
+        "subject": "dark deserted street with flickering streetlamp",
+        "action": "casting elongated shadows",
+        "environment": "dark deserted street at night",
+        "visual_concept": "unease and mystery through shadow and flickering light",
+        "must_include": [
+          "flickering streetlamp",
+          "elongated shadows"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 6,
+        "block_idx": 6,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "En medio de la desesperación y la confusión, surgieron múltiples teorías sobre la identidad del Zodiac, alimentadas por la especulación y la falta de pruebas concretas. Desde la imagen de un hombre solitario hasta la concepción de un grupo cómplice, todos parecían tener su propia versión del misterio. Los expertos en criminología y psicología intentaron desentrañar la mente retorcida del asesino, pero cada intento se topaba con el muro de su astucia. La frustración aumentaba, y la comunidad clamaba por respuestas. Sin embargo, las preguntas persistían, volviendo a la sociedad una presa fácil de la paranoia, donde cada sombra podía esconder un secreto mortal, y cada sonido en la noche podía ser el eco de la risa del asesino.",
+        "subject": "dark deserted street with flickering streetlamp",
+        "action": "casting elongated shadows",
+        "environment": "dark deserted street at night",
+        "era": "",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "unease and mystery through shadow and flickering light",
+        "mood_style": "",
+        "must_include": [
+          "flickering streetlamp",
+          "elongated shadows"
+        ],
+        "must_avoid": [],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 6.0,
+        "media_type": "image",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "El Enigma del Asesino Zodiac: Mitos y Realidades",
+          "query_en": "dark alley shadow mystery",
+          "category": "city",
+          "benchmark_injected_must_avoid": []
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s1698-b06",
+      "script_id": 1698,
+      "video_id": 2760,
+      "channel": "canal3",
+      "script_title": "12 inventos antiguos que desafían toda lógica moderna",
+      "block_idx": 6,
+      "category": "desert_geology",
+      "era": "1940s",
+      "narration_fragment": "La arqueóloga alemana Maria Reiche dedicó más de 50 años de su vida a barrer, medir y proteger estas líneas, y en 1949 publicó su hipótesis de que funcionaban como un calendario astronómico. La idea se repitió durante décadas en libros y documentales. Sin embargo, investigaciones posteriores no han confirmado esa función: muchos de los trazos no se alinean con eventos celestes relevantes, y el hallazgo de 2020 refuerza otra lectura. Los registros indican que las figuras nuevas, más pequeñas y cercanas a senderos, podrían haber sido marcadores de rutas rituales o señales para peregrinos que caminaban entre ellas, no para dioses que las miraban desde arriba.",
+      "visual_description_es": "Una arqueóloga anciana, con sombrero y vestimenta de campo, mide con cinta métrica una línea trazada en el desierto, con figuras geométricas alrededor.",
+      "query_en": "archaeologist measuring ancient lines desert Nazca Peru ancient",
+      "media_type": "image",
+      "duration": 5.0,
+      "intent": {
+        "subject": "elderly archaeologist in field hat",
+        "action": "measuring a line with a tape measure",
+        "environment": "desert with geometric figures",
+        "visual_concept": "measuring ancient desert lines",
+        "must_include": [
+          "e",
+          "l"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 6,
+        "block_idx": 6,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "La arqueóloga alemana Maria Reiche dedicó más de 50 años de su vida a barrer, medir y proteger estas líneas, y en 1949 publicó su hipótesis de que funcionaban como un calendario astronómico. La idea se repitió durante décadas en libros y documentales. Sin embargo, investigaciones posteriores no han confirmado esa función: muchos de los trazos no se alinean con eventos celestes relevantes, y el hallazgo de 2020 refuerza otra lectura. Los registros indican que las figuras nuevas, más pequeñas y cercanas a senderos, podrían haber sido marcadores de rutas rituales o señales para peregrinos que caminaban entre ellas, no para dioses que las miraban desde arriba.",
+        "subject": "elderly archaeologist in field hat",
+        "action": "measuring a line with a tape measure",
+        "environment": "desert with geometric figures",
+        "era": "1940s",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "measuring ancient desert lines",
+        "mood_style": "",
+        "must_include": [
+          "e",
+          "l"
+        ],
+        "must_avoid": [
+          "smartphone",
+          "laptop",
+          "modern car",
+          "neon sign"
+        ],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 5.0,
+        "media_type": "image",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "12 inventos antiguos que desafían toda lógica moderna",
+          "query_en": "archaeologist measuring ancient lines desert Nazca Peru ancient",
+          "category": "desert_geology",
+          "benchmark_injected_must_avoid": [
+            "smartphone",
+            "laptop",
+            "modern car",
+            "neon sign"
+          ]
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s1161-b08",
+      "script_id": 1161,
+      "video_id": 2340,
+      "channel": "canal2",
+      "script_title": "Carne del Cielo: El Misterio de Kentucky que Desafía la Ciencia",
+      "block_idx": 8,
+      "category": "history",
+      "era": "",
+      "narration_fragment": "Leopold Brandeis, un analista de aguas, examinó una muestra y propuso una teoría sorprendente: que no era carne, sino Nostoc, una cianobacteria gelatinosa que, al secarse, adquiere una consistencia similar a la del cartílago. Pero había un problema: para que el Nostoc se forme, se necesita humedad, y ese día no había llovido. ¿Cómo podía haber caído del cielo una sustancia que requiere agua para desarrollarse? La explicación parecía más extraña que el propio fenómeno.",
+      "visual_description_es": "Un científico del siglo XIX observa una muestra gelatinosa bajo un microscopio en un laboratorio con frascos y libros antiguos.",
+      "query_en": "scientist examining gelatinous sample microscope 19th century laboratory",
+      "media_type": "image",
+      "duration": 5.0,
+      "intent": {
+        "subject": "19th-century scientist",
+        "action": "examining gelatinous sample under microscope",
+        "environment": "laboratory with jars and old books",
+        "visual_concept": "scientific analysis of mysterious gelatinous substance",
+        "must_include": [
+          "scientist",
+          "microscope"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 8,
+        "block_idx": 8,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "Leopold Brandeis, un analista de aguas, examinó una muestra y propuso una teoría sorprendente: que no era carne, sino Nostoc, una cianobacteria gelatinosa que, al secarse, adquiere una consistencia similar a la del cartílago. Pero había un problema: para que el Nostoc se forme, se necesita humedad, y ese día no había llovido. ¿Cómo podía haber caído del cielo una sustancia que requiere agua para desarrollarse? La explicación parecía más extraña que el propio fenómeno.",
+        "subject": "19th-century scientist",
+        "action": "examining gelatinous sample under microscope",
+        "environment": "laboratory with jars and old books",
+        "era": "",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "scientific analysis of mysterious gelatinous substance",
+        "mood_style": "",
+        "must_include": [
+          "scientist",
+          "microscope"
+        ],
+        "must_avoid": [],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 5.0,
+        "media_type": "image",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "Carne del Cielo: El Misterio de Kentucky que Desafía la Ciencia",
+          "query_en": "scientist examining gelatinous sample microscope 19th century laboratory",
+          "category": "history",
+          "benchmark_injected_must_avoid": []
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s1299-b15",
+      "script_id": 1299,
+      "video_id": null,
+      "channel": "canal5",
+      "script_title": "El enigma de la acuaporina-4: cuando el sistema inmunitario ataca el cerebro",
+      "block_idx": 15,
+      "category": "medical",
+      "era": "",
+      "narration_fragment": "Y aquí es donde el misterio se vuelve más denso. Muchos de estos pacientes con lesiones cerebrales reciben primero un diagnóstico de esclerosis múltiple, porque las imágenes se parecen y los síntomas se solapan. Pero la diferencia es crucial: el tratamiento para la esclerosis múltiple, basado en interferón beta, puede empeorar la NMOSD. En el próximo capítulo exploraremos cómo este error diagnóstico ocurre con frecuencia y por qué puede tener consecuencias devastadoras para quien lo padece.",
+      "visual_description_es": "Un neurólogo observa imágenes de resonancia magnética cerebral en una sala oscura, con gesto de preocupación.",
+      "query_en": "neurologist examining brain MRI scans dim hospital room, medical mystery",
+      "media_type": "video",
+      "duration": 6.0,
+      "intent": {
+        "subject": "neurologist",
+        "action": "examining brain MRI scans",
+        "environment": "dim hospital room",
+        "visual_concept": "medical mystery",
+        "must_include": [
+          "neurologist",
+          "brain MRI scans"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 15,
+        "block_idx": 15,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "Y aquí es donde el misterio se vuelve más denso. Muchos de estos pacientes con lesiones cerebrales reciben primero un diagnóstico de esclerosis múltiple, porque las imágenes se parecen y los síntomas se solapan. Pero la diferencia es crucial: el tratamiento para la esclerosis múltiple, basado en interferón beta, puede empeorar la NMOSD. En el próximo capítulo exploraremos cómo este error diagnóstico ocurre con frecuencia y por qué puede tener consecuencias devastadoras para quien lo padece.",
+        "subject": "neurologist",
+        "action": "examining brain MRI scans",
+        "environment": "dim hospital room",
+        "era": "",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "medical mystery",
+        "mood_style": "",
+        "must_include": [
+          "neurologist",
+          "brain MRI scans"
+        ],
+        "must_avoid": [],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 6.0,
+        "media_type": "video",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "El enigma de la acuaporina-4: cuando el sistema inmunitario ataca el cerebro",
+          "query_en": "neurologist examining brain MRI scans dim hospital room, medical mystery",
+          "category": "medical",
+          "benchmark_injected_must_avoid": []
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s0767-b04",
+      "script_id": 767,
+      "video_id": null,
+      "channel": "canal2",
+      "script_title": "Mi primera pesadilla en años: ¿qué me está diciendo mi cerebro?",
+      "block_idx": 4,
+      "category": "nature",
+      "era": "",
+      "narration_fragment": "Para entender por qué tu cerebro decide convertir una noche tranquila en una película de terror, tenemos que mirar dentro de la máquina más compleja que existe. Las pesadillas no son accidentes ni caprichos de la mente: tienen una base neurobiológica sólida. Ocurren, casi siempre, durante la fase REM del sueño, ese período en el que tus ojos se mueven rápidamente bajo los párpados y tu actividad cerebral se dispara. Según la National Sleep Foundation, esta fase ocupa aproximadamente el 20 al 25 por ciento del sueño total en un adulto, y es justo ahí, en esa ventana de tiempo, donde tu amígdala —el centro de procesamiento de emociones— se enciende como una alarma.",
+      "visual_description_es": "Una representación abstracta de neuronas cerebrales disparando con destellos de luz, sobre un fondo oscuro, simbolizando la actividad cerebral durante el sueño REM.",
+      "query_en": "brain neurons firing electrical activity close up abstract",
+      "media_type": "video",
+      "duration": 9.0,
+      "intent": {
+        "subject": "abstract brain neurons",
+        "action": "firing with light flashes",
+        "environment": "dark background",
+        "visual_concept": "abstract representation of REM sleep brain activity",
+        "must_include": [
+          "n",
+          "e"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 4,
+        "block_idx": 4,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "Para entender por qué tu cerebro decide convertir una noche tranquila en una película de terror, tenemos que mirar dentro de la máquina más compleja que existe. Las pesadillas no son accidentes ni caprichos de la mente: tienen una base neurobiológica sólida. Ocurren, casi siempre, durante la fase REM del sueño, ese período en el que tus ojos se mueven rápidamente bajo los párpados y tu actividad cerebral se dispara. Según la National Sleep Foundation, esta fase ocupa aproximadamente el 20 al 25 por ciento del sueño total en un adulto, y es justo ahí, en esa ventana de tiempo, donde tu amígdala —el centro de procesamiento de emociones— se enciende como una alarma.",
+        "subject": "abstract brain neurons",
+        "action": "firing with light flashes",
+        "environment": "dark background",
+        "era": "",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "abstract representation of REM sleep brain activity",
+        "mood_style": "",
+        "must_include": [
+          "n",
+          "e"
+        ],
+        "must_avoid": [],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 9.0,
+        "media_type": "video",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "Mi primera pesadilla en años: ¿qué me está diciendo mi cerebro?",
+          "query_en": "brain neurons firing electrical activity close up abstract",
+          "category": "nature",
+          "benchmark_injected_must_avoid": []
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s0299-b06",
+      "script_id": 299,
+      "video_id": 400,
+      "channel": "canal5",
+      "script_title": "Ella salió a las 2 AM y nunca volvió: el misterio de Hattie Brown",
+      "block_idx": 6,
+      "category": "other",
+      "era": "",
+      "narration_fragment": "En la madrugada del sábado 16 de mayo de 2009, Hattie Gertrude Brown desapareció tras recoger a su sobrino en una gasolinera del condado de Halifax, Virginia. Dos meses después, su auto apareció calcinado tras un granero abandonado. Han pasado 17 años y, pese a las extensas búsquedas, ni un solo rastro de Hattie ha sido encontrado.",
+      "visual_description_es": "Un granero de madera deteriorado en un campo, con los restos carbonizados de un automóvil visible detrás.",
+      "query_en": "abandoned barn rural Virginia burned car wreck",
+      "media_type": "video",
+      "duration": 10.0,
+      "intent": {
+        "subject": "deteriorated wooden barn and charred car remains",
+        "action": "standing in a rural field",
+        "environment": "rural Virginia field",
+        "visual_concept": "abandoned rural site with burned car wreck",
+        "must_include": [
+          "deteriorated wooden barn",
+          "charred car remains"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 6,
+        "block_idx": 6,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "En la madrugada del sábado 16 de mayo de 2009, Hattie Gertrude Brown desapareció tras recoger a su sobrino en una gasolinera del condado de Halifax, Virginia. Dos meses después, su auto apareció calcinado tras un granero abandonado. Han pasado 17 años y, pese a las extensas búsquedas, ni un solo rastro de Hattie ha sido encontrado.",
+        "subject": "deteriorated wooden barn and charred car remains",
+        "action": "standing in a rural field",
+        "environment": "rural Virginia field",
+        "era": "",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "abandoned rural site with burned car wreck",
+        "mood_style": "",
+        "must_include": [
+          "deteriorated wooden barn",
+          "charred car remains"
+        ],
+        "must_avoid": [],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 10.0,
+        "media_type": "video",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "Ella salió a las 2 AM y nunca volvió: el misterio de Hattie Brown",
+          "query_en": "abandoned barn rural Virginia burned car wreck",
+          "category": "other",
+          "benchmark_injected_must_avoid": []
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s1073-b14",
+      "script_id": 1073,
+      "video_id": null,
+      "channel": "canal5",
+      "script_title": "Descubriendo el Impacto de los Trastornos Neurológicos en la Vida Humana",
+      "block_idx": 14,
+      "category": "people",
+      "era": "",
+      "narration_fragment": "En el próximo capítulo, nos adentraremos en los testimonios de aquellos que viven con trastornos neurológicos, ofreciendo una perspectiva íntima que va más allá de la estadística, conectando las experiencias personales con los desafíos médicos actuales.",
+      "visual_description_es": "Un grupo de personas sentadas en un ambiente acogedor, compartiendo sus historias y experiencias sobre trastornos neurológicos.",
+      "query_en": "neurological disorder personal testimonies healthcare challenges",
+      "media_type": "video",
+      "duration": 6.0,
+      "intent": {
+        "subject": "group of people",
+        "action": "sharing personal stories",
+        "environment": "cozy setting",
+        "visual_concept": "intimate personal testimonies beyond statistics",
+        "must_include": [
+          "people seated together",
+          "cozy atmosphere"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 14,
+        "block_idx": 14,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "En el próximo capítulo, nos adentraremos en los testimonios de aquellos que viven con trastornos neurológicos, ofreciendo una perspectiva íntima que va más allá de la estadística, conectando las experiencias personales con los desafíos médicos actuales.",
+        "subject": "group of people",
+        "action": "sharing personal stories",
+        "environment": "cozy setting",
+        "era": "",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "intimate personal testimonies beyond statistics",
+        "mood_style": "",
+        "must_include": [
+          "people seated together",
+          "cozy atmosphere"
+        ],
+        "must_avoid": [],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 6.0,
+        "media_type": "video",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "Descubriendo el Impacto de los Trastornos Neurológicos en la Vida Humana",
+          "query_en": "neurological disorder personal testimonies healthcare challenges",
+          "category": "people",
+          "benchmark_injected_must_avoid": []
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s0400-b01",
+      "script_id": 400,
+      "video_id": null,
+      "channel": "canal3",
+      "script_title": "La máscara dorada de Egipto: secretos de una mujer ptolemaica",
+      "block_idx": 1,
+      "category": "space_science",
+      "era": "",
+      "narration_fragment": "Los artesanos aplicaron cada detalle con precisión ritual. Sobre la frente, una hilera de serpientes uraeus con discos solares se alza como guardianas de fuego, símbolo de la realeza divina que todo difunto aspiraba a poseer en el otro mundo. A los lados de la peluca, dos chacales recostados vigilan los extremos: son Anubis, el dios embalsamador, que custodia el umbral entre la vida y la muerte. En la parte superior, un escarabajo azul de alas doradas extiende su vuelo sobre la cabeza, emblema del sol naciente y del renacimiento eterno. No hay espacio para el azar: cada elemento fue elegido para asegurar la supervivencia del alma.",
+      "visual_description_es": "Travelling lento sobre los detalles de una máscara de cartonaje: serpientes uraeus, chacales y escarabajo alado.",
+      "query_en": "Egyptian cartonnage mask uraeus Anubis scarab detail",
+      "media_type": "video",
+      "duration": 10.0,
+      "intent": {
+        "subject": "Egyptian cartonnage mask",
+        "action": "revealing painted details",
+        "environment": "museum artifact close-up",
+        "visual_concept": "ritual precision and eternal guardianship",
+        "must_include": [
+          "uraeus snakes with sun disks",
+          "reclining Anubis jackals"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 1,
+        "block_idx": 1,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "Los artesanos aplicaron cada detalle con precisión ritual. Sobre la frente, una hilera de serpientes uraeus con discos solares se alza como guardianas de fuego, símbolo de la realeza divina que todo difunto aspiraba a poseer en el otro mundo. A los lados de la peluca, dos chacales recostados vigilan los extremos: son Anubis, el dios embalsamador, que custodia el umbral entre la vida y la muerte. En la parte superior, un escarabajo azul de alas doradas extiende su vuelo sobre la cabeza, emblema del sol naciente y del renacimiento eterno. No hay espacio para el azar: cada elemento fue elegido para asegurar la supervivencia del alma.",
+        "subject": "Egyptian cartonnage mask",
+        "action": "revealing painted details",
+        "environment": "museum artifact close-up",
+        "era": "",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "ritual precision and eternal guardianship",
+        "mood_style": "",
+        "must_include": [
+          "uraeus snakes with sun disks",
+          "reclining Anubis jackals"
+        ],
+        "must_avoid": [],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 10.0,
+        "media_type": "video",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "La máscara dorada de Egipto: secretos de una mujer ptolemaica",
+          "query_en": "Egyptian cartonnage mask uraeus Anubis scarab detail",
+          "category": "space_science",
+          "benchmark_injected_must_avoid": []
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s1008-b12",
+      "script_id": 1008,
+      "video_id": null,
+      "channel": "canal4",
+      "script_title": "TOTENCET: El Enigma de los Contactos Extraterrestres",
+      "block_idx": 12,
+      "category": "technology",
+      "era": "",
+      "narration_fragment": "Sin embargo, la introducción de tecnologías avanzadas provenientes de estas inteligencias también plantea un dilema ético considerable. La energía libre, que algunos creen que podría provenir de los sistemas de propulsión de los OVNIs, podría ser la clave para erradicar la pobreza y el daño ambiental. No obstante, en lugar de ser utilizada para el beneficio universal, la historia nos enseña que tales avances a menudo se convierten en herramientas de destrucción. La ciencia, cuando se convierte en un instrumento de poder, perpetúa ciclos de conflicto y desigualdad, lo que exige una transformación espiritual y social radical para evitar un futuro sombrío.",
+      "visual_description_es": "Una imagen que muestra un contraste entre la esperanza de la energía libre y la destrucción causada por el abuso de la tecnología.",
+      "query_en": "advanced technology ethical dilemma free energy",
+      "media_type": "image",
+      "duration": 6.0,
+      "intent": {
+        "subject": "advanced technology and free energy",
+        "action": "contrasting hope with destruction",
+        "environment": "conceptual documentary imagery",
+        "visual_concept": "ethical dilemma between free energy hope and technological destruction",
+        "must_include": [
+          "free energy imagery",
+          "destruction caused by technology abuse"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 12,
+        "block_idx": 12,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "Sin embargo, la introducción de tecnologías avanzadas provenientes de estas inteligencias también plantea un dilema ético considerable. La energía libre, que algunos creen que podría provenir de los sistemas de propulsión de los OVNIs, podría ser la clave para erradicar la pobreza y el daño ambiental. No obstante, en lugar de ser utilizada para el beneficio universal, la historia nos enseña que tales avances a menudo se convierten en herramientas de destrucción. La ciencia, cuando se convierte en un instrumento de poder, perpetúa ciclos de conflicto y desigualdad, lo que exige una transformación espiritual y social radical para evitar un futuro sombrío.",
+        "subject": "advanced technology and free energy",
+        "action": "contrasting hope with destruction",
+        "environment": "conceptual documentary imagery",
+        "era": "",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "ethical dilemma between free energy hope and technological destruction",
+        "mood_style": "",
+        "must_include": [
+          "free energy imagery",
+          "destruction caused by technology abuse"
+        ],
+        "must_avoid": [],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 6.0,
+        "media_type": "image",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "TOTENCET: El Enigma de los Contactos Extraterrestres",
+          "query_en": "advanced technology ethical dilemma free energy",
+          "category": "technology",
+          "benchmark_injected_must_avoid": []
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s0386-b04",
+      "script_id": 386,
+      "video_id": null,
+      "channel": "canal3",
+      "script_title": "El asesinato sin resolver de Kate Bushell: un misterio de 1997",
+      "block_idx": 4,
+      "category": "action",
+      "era": "",
+      "narration_fragment": "La policía también buscó a un segundo hombre: varios testigos lo vieron corriendo a toda velocidad entre las colinas de Exwick entre las cinco y las siete de la tarde del crimen. Nunca se presentó a declarar, y su figura se perdió en la niebla del recuerdo. ¿Era el asesino huyendo? ¿O un testigo aterrado que prefirió no involucrarse? Lo cierto es que, sin su testimonio, la cadena de eventos se rompió. El caso Bushell se convirtió en un archivo polvoriento, revisitado cada cierto tiempo por detectives que se negaban a rendirse, pero que chocaban una y otra vez contra el muro de la falta de respuestas.",
+      "visual_description_es": "Silueta de un hombre corriendo en la distancia sobre una colina cubierta de niebla al atardecer.",
+      "query_en": "man running on hill foggy landscape 1990s silhouette",
+      "media_type": "video",
+      "duration": 10.0,
+      "intent": {
+        "subject": "silhouette of a man",
+        "action": "running",
+        "environment": "fog-covered hill at dusk",
+        "visual_concept": "mysterious figure vanishing into fog",
+        "must_include": [
+          "distant silhouette",
+          "foggy hillside"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 4,
+        "block_idx": 4,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "La policía también buscó a un segundo hombre: varios testigos lo vieron corriendo a toda velocidad entre las colinas de Exwick entre las cinco y las siete de la tarde del crimen. Nunca se presentó a declarar, y su figura se perdió en la niebla del recuerdo. ¿Era el asesino huyendo? ¿O un testigo aterrado que prefirió no involucrarse? Lo cierto es que, sin su testimonio, la cadena de eventos se rompió. El caso Bushell se convirtió en un archivo polvoriento, revisitado cada cierto tiempo por detectives que se negaban a rendirse, pero que chocaban una y otra vez contra el muro de la falta de respuestas.",
+        "subject": "silhouette of a man",
+        "action": "running",
+        "environment": "fog-covered hill at dusk",
+        "era": "",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "mysterious figure vanishing into fog",
+        "mood_style": "",
+        "must_include": [
+          "distant silhouette",
+          "foggy hillside"
+        ],
+        "must_avoid": [],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 10.0,
+        "media_type": "video",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "El asesinato sin resolver de Kate Bushell: un misterio de 1997",
+          "query_en": "man running on hill foggy landscape 1990s silhouette",
+          "category": "action",
+          "benchmark_injected_must_avoid": []
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s1471-b23",
+      "script_id": 1471,
+      "video_id": 2590,
+      "channel": "canal5",
+      "script_title": "Nacieron con cuerpos únicos: la historia real que desafía todo lo que crees",
+      "block_idx": 23,
+      "category": "animals",
+      "era": "1920s",
+      "narration_fragment": "El legado de Josephine Myrtle Corbin sigue vivo en un lugar inesperado. Su esqueleto, donado en 1928, se conserva en la Facultad de Medicina de la Universidad de Tennessee. Allí, los estudiantes de tercer año lo estudian para aprender anatomía de duplicación pélvica, una condición que la medicina del siglo XIX apenas podía describir. Lo que para Myrtle fue una vida de exhibición, para la ciencia actual es una herramienta de formación concreta.",
+      "visual_description_es": "Estudiantes de medicina examinan un esqueleto con duplicación pélvica en un laboratorio de anatomía, tomando notas y observando con atención.",
+      "query_en": "medical students studying pelvic duplication skeleton medium shot anatomy lab",
+      "media_type": "image",
+      "duration": 5.0,
+      "intent": {
+        "subject": "medical students",
+        "action": "examining a pelvic duplication skeleton",
+        "environment": "anatomy lab",
+        "visual_concept": "students learning from a historical anatomical specimen",
+        "must_include": [
+          "medical students",
+          "pelvic duplication skeleton"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 23,
+        "block_idx": 23,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "El legado de Josephine Myrtle Corbin sigue vivo en un lugar inesperado. Su esqueleto, donado en 1928, se conserva en la Facultad de Medicina de la Universidad de Tennessee. Allí, los estudiantes de tercer año lo estudian para aprender anatomía de duplicación pélvica, una condición que la medicina del siglo XIX apenas podía describir. Lo que para Myrtle fue una vida de exhibición, para la ciencia actual es una herramienta de formación concreta.",
+        "subject": "medical students",
+        "action": "examining a pelvic duplication skeleton",
+        "environment": "anatomy lab",
+        "era": "1920s",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "students learning from a historical anatomical specimen",
+        "mood_style": "",
+        "must_include": [
+          "medical students",
+          "pelvic duplication skeleton"
+        ],
+        "must_avoid": [
+          "smartphone",
+          "laptop",
+          "modern car",
+          "neon sign"
+        ],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 5.0,
+        "media_type": "image",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "Nacieron con cuerpos únicos: la historia real que desafía todo lo que crees",
+          "query_en": "medical students studying pelvic duplication skeleton medium shot anatomy lab",
+          "category": "animals",
+          "benchmark_injected_must_avoid": [
+            "smartphone",
+            "laptop",
+            "modern car",
+            "neon sign"
+          ]
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s0517-b23",
+      "script_id": 517,
+      "video_id": 1434,
+      "channel": "canal5",
+      "script_title": "Unsolved 2003 Triple Murder in Blue Ridge Bank Robbery",
+      "block_idx": 23,
+      "category": "city",
+      "era": "",
+      "narration_fragment": "El cuerpo del delito es también un organismo que clama por ser interpretado. En el interior de esa sucursal bancaria, los investigadores se enfrentaron a una autopsia del espacio: cada herida de bala, cada mancha hemática, cada cartucho percutido era un signo clínico en el cadáver de la escena. El reloj biológico de la investigación se detuvo temprano: a la 1:30 p.m., la alarma silente disparó un estímulo nervioso hacia el sistema policial, pero cuando los primeros respondedores arribaron once minutos después, ya se había producido un fallo multiorgánico. Tres corazones habían cesado su función. La fisiología de la paz cotidiana colapsó en ese modesto edificio, cuyo aspecto de tráiler portátil no admitía la posibilidad de un trauma tan masivo. Sylvia Holtzclaw, de 52 años, cuyo cuerpo fue hallado junto a los Barnes en un pequeño armario de servicio, había recibido el impacto de una .40 Glock, un proyectil diseñado para causar la máxima disrupción tisular. En el lenguaje de la patología forense, las trayectorias balísticas narraban una coreografía violenta que se resolvió en segundos. La ausencia del casete de seguridad VHS representó una lobectomía deliberada: los criminales extirparon el lóbulo temporal de la memoria, aquel fragmento de cinta magnética que hubiera podido registrar el electroencefalograma del atraco. Sin esa pieza, el diagnóstico quedó incompleto, y el caso entró en un estado de coma inducido por la falta de evidencia.",
+      "visual_description_es": "El cuerpo del delito es también un organismo que clama por ser interpretado. En",
+      "query_en": "Unsolved 2003 Triple Murder in Blue Ridge Bank Robbery",
+      "media_type": "image",
+      "duration": 6.0,
+      "intent": {
+        "subject": "bank branch interior",
+        "action": "examining the crime scene",
+        "environment": "modest portable trailer-like bank building",
+        "visual_concept": "forensic autopsy of a space",
+        "must_include": [
+          "bullet wounds",
+          "blood stains"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 23,
+        "block_idx": 23,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "El cuerpo del delito es también un organismo que clama por ser interpretado. En el interior de esa sucursal bancaria, los investigadores se enfrentaron a una autopsia del espacio: cada herida de bala, cada mancha hemática, cada cartucho percutido era un signo clínico en el cadáver de la escena. El reloj biológico de la investigación se detuvo temprano: a la 1:30 p.m., la alarma silente disparó un estímulo nervioso hacia el sistema policial, pero cuando los primeros respondedores arribaron once minutos después, ya se había producido un fallo multiorgánico. Tres corazones habían cesado su función. La fisiología de la paz cotidiana colapsó en ese modesto edificio, cuyo aspecto de tráiler portátil no admitía la posibilidad de un trauma tan masivo. Sylvia Holtzclaw, de 52 años, cuyo cuerpo fue hallado junto a los Barnes en un pequeño armario de servicio, había recibido el impacto de una .40 Glock, un proyectil diseñado para causar la máxima disrupción tisular. En el lenguaje de la patología forense, las trayectorias balísticas narraban una coreografía violenta que se resolvió en segundos. La ausencia del casete de seguridad VHS representó una lobectomía deliberada: los criminales extirparon el lóbulo temporal de la memoria, aquel fragmento de cinta magnética que hubiera podido registrar el electroencefalograma del atraco. Sin esa pieza, el diagnóstico quedó incompleto, y el caso entró en un estado de coma inducido por la falta de evidencia.",
+        "subject": "bank branch interior",
+        "action": "examining the crime scene",
+        "environment": "modest portable trailer-like bank building",
+        "era": "",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "forensic autopsy of a space",
+        "mood_style": "",
+        "must_include": [
+          "bullet wounds",
+          "blood stains"
+        ],
+        "must_avoid": [],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 6.0,
+        "media_type": "image",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "Unsolved 2003 Triple Murder in Blue Ridge Bank Robbery",
+          "query_en": "Unsolved 2003 Triple Murder in Blue Ridge Bank Robbery",
+          "category": "city",
+          "benchmark_injected_must_avoid": []
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s0457-b16",
+      "script_id": 457,
+      "video_id": 959,
+      "channel": "canal4",
+      "script_title": "El campeonato más extraño: Alabama vs Ohio State en pandemia",
+      "block_idx": 16,
+      "category": "desert_geology",
+      "era": "",
+      "narration_fragment": "El campeonato nacional, entonces, no era solo un partido. Era la culminación de una temporada que había puesto a prueba la salud, la disciplina y la voluntad de cada jugador. El Hard Rock Stadium, vacío de aficionados, se convirtió en un escenario de silencio tenso, solo roto por el golpe de los cascos y los gritos de los entrenadores. Alabama llegó con la misión de demostrar que, incluso en medio del caos, la excelencia podía florecer. Ohio State, por su parte, llegaba con la esperanza de detener a una máquina perfecta. Lo que nadie sabía era que esa noche se escribiría una historia que trascendería el marcador.",
+      "visual_description_es": "Un estadio de fútbol americano vacío con asientos desiertos y el campo iluminado, transmitiendo una atmósfera tensa y silenciosa.",
+      "query_en": "empty football stadium wide shot silent tension",
+      "media_type": "video",
+      "duration": 10.0,
+      "intent": {
+        "subject": "empty American football stadium",
+        "action": "conveying tense silence",
+        "environment": "deserted seats and illuminated field",
+        "visual_concept": "silent tension before championship",
+        "must_include": [
+          "empty stadium",
+          "deserted seats"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 16,
+        "block_idx": 16,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "El campeonato nacional, entonces, no era solo un partido. Era la culminación de una temporada que había puesto a prueba la salud, la disciplina y la voluntad de cada jugador. El Hard Rock Stadium, vacío de aficionados, se convirtió en un escenario de silencio tenso, solo roto por el golpe de los cascos y los gritos de los entrenadores. Alabama llegó con la misión de demostrar que, incluso en medio del caos, la excelencia podía florecer. Ohio State, por su parte, llegaba con la esperanza de detener a una máquina perfecta. Lo que nadie sabía era que esa noche se escribiría una historia que trascendería el marcador.",
+        "subject": "empty American football stadium",
+        "action": "conveying tense silence",
+        "environment": "deserted seats and illuminated field",
+        "era": "",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "silent tension before championship",
+        "mood_style": "",
+        "must_include": [
+          "empty stadium",
+          "deserted seats"
+        ],
+        "must_avoid": [],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 10.0,
+        "media_type": "video",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "El campeonato más extraño: Alabama vs Ohio State en pandemia",
+          "query_en": "empty football stadium wide shot silent tension",
+          "category": "desert_geology",
+          "benchmark_injected_must_avoid": []
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s1373-b14",
+      "script_id": 1373,
+      "video_id": 2507,
+      "channel": "canal5",
+      "script_title": "La historia secreta de la humanidad: cráneos, moáis y el zumbido de Taos",
+      "block_idx": 14,
+      "category": "history",
+      "era": "medieval",
+      "narration_fragment": "En 2023, un estudio de la Universidad de Stanford analizó el ADN de los antiguos peruanos de Paracas y encontró marcadores genéticos que no coinciden con ninguna población actual. Ese hallazgo, publicado en revistas científicas, sugiere migraciones desconocidas y pone en entredicho todo lo que creíamos saber sobre el poblamiento de América. No es un caso aislado: en la Isla de Pascua, la datación por radiocarbono de 2011 estableció que fue habitada por primera vez alrededor del año 1200 d.C., y que la construcción de los moái cesó abruptamente hacia 1500 d.C., coincidiendo con un colapso ecológico y social. Ambos enigmas comparten un patrón: la ciencia moderna aún no puede explicarlos del todo, y su estudio continúa revelando que la historia humana es más compleja y misteriosa de lo que los libros de texto admiten.",
+      "visual_description_es": "Un laboratorio moderno donde científicos analizan ADN, intercalado con imágenes de las antiguas ruinas de Paracas y la Isla de Pascua.",
+      "query_en": "Paracas ancient Peru DNA study migration history",
+      "media_type": "video",
+      "duration": 6.0,
+      "intent": {
+        "subject": "scientists and ancient ruins",
+        "action": "analyzing DNA and comparing ancient sites",
+        "environment": "modern laboratory and ancient ruins of Paracas and Easter Island",
+        "visual_concept": "intercutting modern DNA science with ancient Peruvian and Easter Island ruins to suggest unexplained migrations",
+        "must_include": [
+          "modern laboratory",
+          "scientists analyzing DNA"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 14,
+        "block_idx": 14,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "En 2023, un estudio de la Universidad de Stanford analizó el ADN de los antiguos peruanos de Paracas y encontró marcadores genéticos que no coinciden con ninguna población actual. Ese hallazgo, publicado en revistas científicas, sugiere migraciones desconocidas y pone en entredicho todo lo que creíamos saber sobre el poblamiento de América. No es un caso aislado: en la Isla de Pascua, la datación por radiocarbono de 2011 estableció que fue habitada por primera vez alrededor del año 1200 d.C., y que la construcción de los moái cesó abruptamente hacia 1500 d.C., coincidiendo con un colapso ecológico y social. Ambos enigmas comparten un patrón: la ciencia moderna aún no puede explicarlos del todo, y su estudio continúa revelando que la historia humana es más compleja y misteriosa de lo que los libros de texto admiten.",
+        "subject": "scientists and ancient ruins",
+        "action": "analyzing DNA and comparing ancient sites",
+        "environment": "modern laboratory and ancient ruins of Paracas and Easter Island",
+        "era": "medieval",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "intercutting modern DNA science with ancient Peruvian and Easter Island ruins to suggest unexplained migrations",
+        "mood_style": "",
+        "must_include": [
+          "modern laboratory",
+          "scientists analyzing DNA"
+        ],
+        "must_avoid": [
+          "smartphone",
+          "laptop",
+          "modern car",
+          "neon sign"
+        ],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 6.0,
+        "media_type": "video",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "La historia secreta de la humanidad: cráneos, moáis y el zumbido de Taos",
+          "query_en": "Paracas ancient Peru DNA study migration history",
+          "category": "history",
+          "benchmark_injected_must_avoid": [
+            "smartphone",
+            "laptop",
+            "modern car",
+            "neon sign"
+          ]
+        }
+      },
+      "human_label": null
+    },
+    {
+      "scene_id": "s1670-b13",
+      "script_id": 1670,
+      "video_id": null,
+      "channel": "canal5",
+      "script_title": "El misterio de las enfermedades raras: el caso de María",
+      "block_idx": 13,
+      "category": "medical",
+      "era": "",
+      "narration_fragment": "Lo que siguió a ese diagnóstico es, quizá, la parte más luminosa de esta historia. El caso de María fue publicado en 2021 en la Revista Mexicana de Neurociencia, y los registros indican que ese artículo motivó la creación de un protocolo de diagnóstico temprano en el instituto donde fue tratada: ahora, todo paciente menor de 50 años con migrañas atípicas, lesiones en la sustancia blanca y antecedentes familiares de demencia precoz entra en una ruta de evaluación genética que antes no existía. En palabras del equipo tratante, el caso dejó de ser un misterio individual para convertirse en una herramienta de detección para otros.",
+      "visual_description_es": "Un grupo de médicos discutiendo un protocolo en una reunión, con un ambiente de colaboración y optimismo.",
+      "query_en": "medical publication early diagnosis protocol rare disease",
+      "media_type": "video",
+      "duration": 6.0,
+      "intent": {
+        "subject": "group of doctors",
+        "action": "discussing a protocol",
+        "environment": "meeting room",
+        "visual_concept": "collaborative optimism",
+        "must_include": [
+          "doctors",
+          "protocol discussion"
+        ],
+        "source": "llm_intent_extraction"
+      },
+      "scene_spec": {
+        "scene_idx": 13,
+        "block_idx": 13,
+        "parent_scene_idx": null,
+        "media_request_id": "",
+        "origin": "block",
+        "narration_fragment": "Lo que siguió a ese diagnóstico es, quizá, la parte más luminosa de esta historia. El caso de María fue publicado en 2021 en la Revista Mexicana de Neurociencia, y los registros indican que ese artículo motivó la creación de un protocolo de diagnóstico temprano en el instituto donde fue tratada: ahora, todo paciente menor de 50 años con migrañas atípicas, lesiones en la sustancia blanca y antecedentes familiares de demencia precoz entra en una ruta de evaluación genética que antes no existía. En palabras del equipo tratante, el caso dejó de ser un misterio individual para convertirse en una herramienta de detección para otros.",
+        "subject": "group of doctors",
+        "action": "discussing a protocol",
+        "environment": "meeting room",
+        "era": "",
+        "desired_shot": "wide establishing shot, documentary b-roll",
+        "visual_concept": "collaborative optimism",
+        "mood_style": "",
+        "must_include": [
+          "doctors",
+          "protocol discussion"
+        ],
+        "must_avoid": [],
+        "previous_context": "",
+        "next_context": "",
+        "duration": 6.0,
+        "media_type": "video",
+        "depiction_mode": "documentary",
+        "source": "llm_intent_extraction",
+        "confidence": 0.9,
+        "extra": {
+          "script_title": "El misterio de las enfermedades raras: el caso de María",
+          "query_en": "medical publication early diagnosis protocol rare disease",
+          "category": "medical",
+          "benchmark_injected_must_avoid": []
+        }
+      },
+      "human_label": null
+    }
+  ]
+}

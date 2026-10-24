@@ -414,7 +414,7 @@ class SemanticConfig:
 
     mode: str = "legacy"
     shadow: bool = False
-    min_relevance_score: float = 0.26
+    min_relevance_score: float = 0.18  # P03 calibration (see docs/p03)
     embedding_backend: str = "auto"  # auto | hashing | sentence_transformers | none
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     embedding_cache_path: str = ""
@@ -450,11 +450,11 @@ class SemanticConfig:
             strategy.get("semantic_ranking_weights") or {}
         )
         if "P01_MIN_RELEVANCE_SCORE" in env:
-            threshold = _as_float(env.get("P01_MIN_RELEVANCE_SCORE"), 0.26)
+            threshold = _as_float(env.get("P01_MIN_RELEVANCE_SCORE"), 0.18)
         else:
             threshold = _as_float(
                 strategy.get("min_relevance_score", strategy.get("semantic_min_relevance_score")),
-                0.26,
+                0.18,
             )
 
         return cls(

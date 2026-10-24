@@ -1,0 +1,174 @@
+{
+  "timestamp": "2026-10-24T15:59:07.725311+00:00",
+  "providers": {
+    "pexels": {
+      "status": "OK",
+      "assets": 8,
+      "sample": {
+        "duration": 12,
+        "resolution": [
+          1920,
+          802
+        ],
+        "page_url": "https://www.pexels.com/video/a-desert-with-view-of-sunset-2055056/",
+        "thumbnail_url": "https://images.pexels.com/videos/2055056/free-video-2055056.jpg?auto=compress&cs=tinysrgb&fit=crop&h=630&w=1200",
+        "preview_status": "PREVIEW_AVAILABLE",
+        "title": "",
+        "tags": [
+          "desert",
+          "with",
+          "view",
+          "sunset"
+        ]
+      },
+      "latency_ms": 488.8
+    },
+    "pixabay": {
+      "status": "OK",
+      "assets": 8,
+      "sample": {
+        "duration": 25,
+        "resolution": [
+          1920,
+          1080
+        ],
+        "page_url": "https://pixabay.com/videos/id-88660/",
+        "thumbnail_url": "https://cdn.pixabay.com/video/2021/09/15/88660-606111056_tiny.jpg",
+        "preview_status": "PREVIEW_AVAILABLE",
+        "title": "Amirirani",
+        "tags": [
+          "desert",
+          "moon",
+          "mountain",
+          "nature",
+          "landscape"
+        ]
+      },
+      "latency_ms": 332.7
+    },
+    "mixkit": {
+      "status": "OK",
+      "assets": 10,
+      "sample": {
+        "duration": 15.0,
+        "resolution": [
+          1920,
+          1080
+        ],
+        "page_url": "",
+        "thumbnail_url": "https://assets.mixkit.co/videos/41576/41576-thumb-360-0.jpg",
+        "preview_status": "PREVIEW_AVAILABLE",
+        "title": "",
+        "tags": []
+      },
+      "latency_ms": 481.1
+    },
+    "coverr": {
+      "status": "OK",
+      "assets": 10,
+      "sample": {
+        "duration": 15.0,
+        "resolution": [
+          1920,
+          1080
+        ],
+        "page_url": "",
+        "thumbnail_url": "https://cdn.coverr.co/videos/user-ai-generation-sw2TWfHVplwl/thumbnail?width=385",
+        "preview_status": "PREVIEW_AVAILABLE",
+        "title": "",
+        "tags": []
+      },
+      "latency_ms": 3215.8
+    }
+  },
+  "model": {
+    "status": "OK",
+    "model": "openai/clip-vit-base-patch32",
+    "dim": 512,
+    "load_plus_text_s": 9.52,
+    "describe": {
+      "name": "clip",
+      "model": "openai/clip-vit-base-patch32",
+      "model_version": "openai/clip-vit-base-patch32",
+      "device": "cpu",
+      "loaded": true,
+      "load_error": ""
+    }
+  },
+  "vlm": {
+    "status": "OK",
+    "model": "gpt-4o-mini",
+    "rubric_parsed": {
+      "subject_match": 0.0,
+      "action_match": 0.0,
+      "environment_match": 0.0,
+      "era_match": null,
+      "must_avoid": [],
+      "overall_relevance": 0.0,
+      "confidence": 0.0,
+      "reason": "The image depicts dental prosthetics, which are unrelated to the requested desert scene.",
+      "decision": "benchmark_rubric",
+      "model": "gpt-4o-mini"
+    },
+    "usage": {
+      "prompt_tokens": 3200,
+      "completion_tokens": 87
+    },
+    "production_verifier": {
+      "subject_match": 0.0,
+      "action_match": 0.0,
+      "environment_match": 0.0,
+      "era_match": null,
+      "must_include_match": null,
+      "must_avoid_violation": [],
+      "overall_semantic_match": 0.0,
+      "description_of_actual_visual_content": "The image shows dental prosthetics or crowns arranged on a gray surface.",
+      "confidence": 0.0,
+      "decision": "reject",
+      "recommendation": "The content does not match the requested visual intent of a desert sunset.",
+      "status": "OK",
+      "backend": "openai_compatible",
+      "model_version": "gpt-4o-mini",
+      "error": "",
+      "timing_ms": 2120.804
+    }
+  },
+  "budget": {
+    "requests": 4,
+    "bytes": 0,
+    "downloads": 0,
+    "previews": 0,
+    "frames": 0,
+    "per_provider": {
+      "coverr": {
+        "requests": 1,
+        "bytes": 0,
+        "downloads": 0,
+        "previews": 0,
+        "frames": 0
+      },
+      "mixkit": {
+        "requests": 1,
+        "bytes": 0,
+        "downloads": 0,
+        "previews": 0,
+        "frames": 0
+      },
+      "pexels": {
+        "requests": 1,
+        "bytes": 0,
+        "downloads": 0,
+        "previews": 0,
+        "frames": 0
+      },
+      "pixabay": {
+        "requests": 1,
+        "bytes": 0,
+        "downloads": 0,
+        "previews": 0,
+        "frames": 0
+      }
+    },
+    "errors": []
+  }
+}

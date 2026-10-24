@@ -57,3 +57,10 @@ frontend/node_modules/
 *.db-shm
 *.db-wal
 *.db.corrupt.*
+
+# P03 benchmark runtime artifacts (large binaries, never in git)
+benchmarks/media_semantics/runs/
+benchmarks/media_semantics/runs/**/videos/
+benchmarks/media_semantics/runs/**/previews/
+benchmarks/media_semantics/runs/**/frames/
+benchmarks/media_semantics/runs/**/eval_images/

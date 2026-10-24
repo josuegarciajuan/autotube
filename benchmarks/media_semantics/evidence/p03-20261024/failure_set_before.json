@@ -1,0 +1,1754 @@
+{
+  "LEGACY_BAD_VISUAL_GOOD": [
+    {
+      "scene_id": "s0379-b03",
+      "category": "desert_geology",
+      "era": "ancient",
+      "scores": {
+        "legacy": 0.0,
+        "semantic_text": null,
+        "semantic_visual": 0.6
+      },
+      "legacy": {
+        "provider": "pixabay",
+        "title": "Felix-Mittermeier",
+        "tags": [
+          "thunderstorm",
+          "storm",
+          "time lapse",
+          "clouds",
+          "lightning",
+          "weather",
+          "heaven",
+          "threatening",
+          "rain",
+          "nature",
+          "force of nature",
+          "thunderclouds",
+          "summer thunderstorm",
+          "mood",
+          "night",
+          "darkness",
+          "cloud roller",
+          "thunderstorm mood",
+          "atmospheric",
+          "dramatic sky",
+          "weather mood",
+          "cloud shape",
+          "dark clouds",
+          "lighting mood",
+          "cloudy",
+          "cloudscape",
+          "mystical",
+          "dramatic",
+          "drama"
+        ],
+        "page_url": "https://pixabay.com/videos/id-9451/",
+        "score": 3.0
+      },
+      "semantic_text": null,
+      "semantic_visual": {
+        "provider": "pexels",
+        "title": "ancient artifact",
+        "tags": [
+          "ancient",
+          "artifact"
+        ],
+        "page_url": "https://www.pexels.com/video/an-ancient-artifact-7575361/",
+        "score": 0.268854
+      }
+    },
+    {
+      "scene_id": "s0133-b06",
+      "category": "city",
+      "era": "",
+      "scores": {
+        "legacy": 0.0,
+        "semantic_text": null,
+        "semantic_visual": 0.85
+      },
+      "legacy": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 5.5
+      },
+      "semantic_text": null,
+      "semantic_visual": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 0.298869
+      }
+    }
+  ],
+  "LEGACY_BAD_TEXT_GOOD": [],
+  "TEXT_BAD_VISUAL_GOOD": [
+    {
+      "scene_id": "s0379-b03",
+      "category": "desert_geology",
+      "era": "ancient",
+      "scores": {
+        "legacy": 0.0,
+        "semantic_text": null,
+        "semantic_visual": 0.6
+      },
+      "legacy": {
+        "provider": "pixabay",
+        "title": "Felix-Mittermeier",
+        "tags": [
+          "thunderstorm",
+          "storm",
+          "time lapse",
+          "clouds",
+          "lightning",
+          "weather",
+          "heaven",
+          "threatening",
+          "rain",
+          "nature",
+          "force of nature",
+          "thunderclouds",
+          "summer thunderstorm",
+          "mood",
+          "night",
+          "darkness",
+          "cloud roller",
+          "thunderstorm mood",
+          "atmospheric",
+          "dramatic sky",
+          "weather mood",
+          "cloud shape",
+          "dark clouds",
+          "lighting mood",
+          "cloudy",
+          "cloudscape",
+          "mystical",
+          "dramatic",
+          "drama"
+        ],
+        "page_url": "https://pixabay.com/videos/id-9451/",
+        "score": 3.0
+      },
+      "semantic_text": null,
+      "semantic_visual": {
+        "provider": "pexels",
+        "title": "ancient artifact",
+        "tags": [
+          "ancient",
+          "artifact"
+        ],
+        "page_url": "https://www.pexels.com/video/an-ancient-artifact-7575361/",
+        "score": 0.268854
+      }
+    },
+    {
+      "scene_id": "s0133-b06",
+      "category": "city",
+      "era": "",
+      "scores": {
+        "legacy": 0.0,
+        "semantic_text": null,
+        "semantic_visual": 0.85
+      },
+      "legacy": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 5.5
+      },
+      "semantic_text": null,
+      "semantic_visual": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 0.298869
+      }
+    }
+  ],
+  "VISUAL_BAD_TEXT_GOOD": [],
+  "ALL_BAD": [
+    {
+      "scene_id": "s0777-b12",
+      "category": "history",
+      "era": "",
+      "scores": {
+        "legacy": 0.3,
+        "semantic_text": 0.3,
+        "semantic_visual": 0.3
+      },
+      "legacy": {
+        "provider": "pexels",
+        "title": "stunning aerial view ancient ruins desert",
+        "tags": [
+          "stunning",
+          "aerial",
+          "view",
+          "ancient",
+          "ruins",
+          "desert"
+        ],
+        "page_url": "https://www.pexels.com/video/stunning-aerial-view-of-ancient-ruins-in-desert-30131338/",
+        "score": 7.0
+      },
+      "semantic_text": {
+        "provider": "pexels",
+        "title": "aerial view ancient desert ruins",
+        "tags": [
+          "aerial",
+          "view",
+          "ancient",
+          "desert",
+          "ruins"
+        ],
+        "page_url": "https://www.pexels.com/video/aerial-view-of-ancient-desert-ruins-30402965/",
+        "score": 0.274971
+      },
+      "semantic_visual": {
+        "provider": "pexels",
+        "title": "stunning aerial view ancient ruins desert",
+        "tags": [
+          "stunning",
+          "aerial",
+          "view",
+          "ancient",
+          "ruins",
+          "desert"
+        ],
+        "page_url": "https://www.pexels.com/video/stunning-aerial-view-of-ancient-ruins-in-desert-30131338/",
+        "score": 0.290451
+      }
+    },
+    {
+      "scene_id": "s1406-b11",
+      "category": "medical",
+      "era": "",
+      "scores": {
+        "legacy": 0.0,
+        "semantic_text": 0.0,
+        "semantic_visual": 0.0
+      },
+      "legacy": {
+        "provider": "pixabay",
+        "title": "ChristianBodhi",
+        "tags": [
+          "skyscrapers",
+          "buildings",
+          "tower",
+          "architecture",
+          "modern",
+          "sky",
+          "clouds",
+          "sun",
+          "urban",
+          "glass",
+          "window",
+          "abstract",
+          "light",
+          "meditation",
+          "city"
+        ],
+        "page_url": "https://pixabay.com/videos/id-55933/",
+        "score": 4.5
+      },
+      "semantic_text": {
+        "provider": "pixabay",
+        "title": "RafterJr72",
+        "tags": [
+          "hospital",
+          "vision correction",
+          "doctor",
+          "eyes",
+          "glasses"
+        ],
+        "page_url": "https://pixabay.com/videos/id-21114/",
+        "score": 0.281118
+      },
+      "semantic_visual": {
+        "provider": "pixabay",
+        "title": "RafterJr72",
+        "tags": [
+          "hospital",
+          "vision correction",
+          "doctor",
+          "eyes",
+          "glasses"
+        ],
+        "page_url": "https://pixabay.com/videos/id-21114/",
+        "score": 0.332865
+      }
+    },
+    {
+      "scene_id": "s0114-b17",
+      "category": "nature",
+      "era": "",
+      "scores": {
+        "legacy": 0.3,
+        "semantic_text": null,
+        "semantic_visual": 0.3
+      },
+      "legacy": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 7.0
+      },
+      "semantic_text": null,
+      "semantic_visual": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 0.264773
+      }
+    },
+    {
+      "scene_id": "s0223-b48",
+      "category": "other",
+      "era": "",
+      "scores": {
+        "legacy": 0.0,
+        "semantic_text": 0.0,
+        "semantic_visual": 0.0
+      },
+      "legacy": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 7.0
+      },
+      "semantic_text": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 0.279538
+      },
+      "semantic_visual": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 0.317924
+      }
+    },
+    {
+      "scene_id": "s0526-b18",
+      "category": "people",
+      "era": "",
+      "scores": {
+        "legacy": 0.3,
+        "semantic_text": 0.3,
+        "semantic_visual": 0.3
+      },
+      "legacy": {
+        "provider": "pexels",
+        "title": "man standing dark room with light",
+        "tags": [
+          "man",
+          "standing",
+          "dark",
+          "room",
+          "with",
+          "light"
+        ],
+        "page_url": "https://www.pexels.com/video/a-man-standing-in-a-dark-room-with-a-light-on-16835000/",
+        "score": 7.0
+      },
+      "semantic_text": {
+        "provider": "pixabay",
+        "title": "ChristianBodhi",
+        "tags": [
+          "man",
+          "tunnel",
+          "zoom",
+          "light",
+          "rays",
+          "fog",
+          "mist",
+          "human",
+          "silhouette",
+          "person",
+          "thought",
+          "consciousness",
+          "idea",
+          "transformation",
+          "abstract",
+          "individual"
+        ],
+        "page_url": "https://pixabay.com/videos/id-81498/",
+        "score": 0.325492
+      },
+      "semantic_visual": {
+        "provider": "pixabay",
+        "title": "ChristianBodhi",
+        "tags": [
+          "man",
+          "tunnel",
+          "zoom",
+          "light",
+          "rays",
+          "fog",
+          "mist",
+          "human",
+          "silhouette",
+          "person",
+          "thought",
+          "consciousness",
+          "idea",
+          "transformation",
+          "abstract",
+          "individual"
+        ],
+        "page_url": "https://pixabay.com/videos/id-81498/",
+        "score": 0.36612
+      }
+    },
+    {
+      "scene_id": "s1629-b21",
+      "category": "action",
+      "era": "",
+      "scores": {
+        "legacy": 0.3,
+        "semantic_text": null,
+        "semantic_visual": 0.3
+      },
+      "legacy": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 9.0
+      },
+      "semantic_text": null,
+      "semantic_visual": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 0.313876
+      }
+    },
+    {
+      "scene_id": "s0714-b09",
+      "category": "animals",
+      "era": "",
+      "scores": {
+        "legacy": 0.3,
+        "semantic_text": null,
+        "semantic_visual": 0.3
+      },
+      "legacy": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 9.0
+      },
+      "semantic_text": null,
+      "semantic_visual": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 0.224219
+      }
+    },
+    {
+      "scene_id": "s0795-b11",
+      "category": "city",
+      "era": "",
+      "scores": {
+        "legacy": 0.0,
+        "semantic_text": 0.0,
+        "semantic_visual": 0.3
+      },
+      "legacy": {
+        "provider": "pexels",
+        "title": "aerial view ancient mayan pyramid the jungle",
+        "tags": [
+          "aerial",
+          "view",
+          "ancient",
+          "mayan",
+          "pyramid",
+          "the",
+          "jungle"
+        ],
+        "page_url": "https://www.pexels.com/video/aerial-view-of-ancient-mayan-pyramid-in-the-jungle-40159453/",
+        "score": 10.0
+      },
+      "semantic_text": {
+        "provider": "pexels",
+        "title": "aerial view ancient mayan pyramid the jungle",
+        "tags": [
+          "aerial",
+          "view",
+          "ancient",
+          "mayan",
+          "pyramid",
+          "the",
+          "jungle"
+        ],
+        "page_url": "https://www.pexels.com/video/aerial-view-of-ancient-mayan-pyramid-in-the-jungle-40159453/",
+        "score": 0.286298
+      },
+      "semantic_visual": {
+        "provider": "pexels",
+        "title": "aerial view pyramid the jungle",
+        "tags": [
+          "aerial",
+          "view",
+          "pyramid",
+          "the",
+          "jungle"
+        ],
+        "page_url": "https://www.pexels.com/video/an-aerial-view-of-a-pyramid-in-the-jungle-15487652/",
+        "score": 0.329338
+      }
+    },
+    {
+      "scene_id": "s0377-b02",
+      "category": "desert_geology",
+      "era": "ancient",
+      "scores": {
+        "legacy": 0.0,
+        "semantic_text": 0.3,
+        "semantic_visual": 0.3
+      },
+      "legacy": {
+        "provider": "pixabay",
+        "title": "samirsmier",
+        "tags": [
+          "solomon's pillars",
+          "timna park",
+          "negev",
+          "israel",
+          "desert",
+          "landscape",
+          "nature",
+          "sand",
+          "travel",
+          "arava",
+          "cliff",
+          "mountains",
+          "egyptian",
+          "hathor",
+          "temple"
+        ],
+        "page_url": "https://pixabay.com/videos/id-130431/",
+        "score": 7.0
+      },
+      "semantic_text": {
+        "provider": "pixabay",
+        "title": "flutie8211",
+        "tags": [
+          "ai generated",
+          "giza",
+          "egypt",
+          "pyramids",
+          "sphinx",
+          "desert",
+          "nature",
+          "ancient",
+          "history",
+          "monument",
+          "stone",
+          "landscape",
+          "egyptian",
+          "historical",
+          "archaeology",
+          "sand",
+          "travel",
+          "tourism",
+          "drone view",
+          "aerial"
+        ],
+        "page_url": "https://pixabay.com/videos/id-360197/",
+        "score": 0.279128
+      },
+      "semantic_visual": {
+        "provider": "pixabay",
+        "title": "flutie8211",
+        "tags": [
+          "ai generated",
+          "giza",
+          "egypt",
+          "pyramids",
+          "sphinx",
+          "desert",
+          "nature",
+          "ancient",
+          "history",
+          "monument",
+          "stone",
+          "landscape",
+          "egyptian",
+          "historical",
+          "archaeology",
+          "sand",
+          "travel",
+          "tourism",
+          "drone view",
+          "aerial"
+        ],
+        "page_url": "https://pixabay.com/videos/id-360197/",
+        "score": 0.324529
+      }
+    },
+    {
+      "scene_id": "s1356-b04",
+      "category": "history",
+      "era": "18th century",
+      "scores": {
+        "legacy": 0.3,
+        "semantic_text": null,
+        "semantic_visual": 0.3
+      },
+      "legacy": {
+        "provider": "pixabay",
+        "title": "doktorkleinmusic",
+        "tags": [
+          "ai generated",
+          "fleet",
+          "ships",
+          "sailing",
+          "armada",
+          "naval",
+          "ocean",
+          "sea",
+          "18th",
+          "century",
+          "historic",
+          "war",
+          "maritime",
+          "ghost",
+          "fog",
+          "mist",
+          "storm",
+          "exploration",
+          "travel",
+          "voyage",
+          "sailboats",
+          "antique",
+          "horizon",
+          "epic",
+          "legend"
+        ],
+        "page_url": "https://pixabay.com/videos/id-299916/",
+        "score": 6.5
+      },
+      "semantic_text": null,
+      "semantic_visual": {
+        "provider": "pixabay",
+        "title": "doktorkleinmusic",
+        "tags": [
+          "ai generated",
+          "fleet",
+          "ships",
+          "sailing",
+          "armada",
+          "naval",
+          "ocean",
+          "sea",
+          "18th",
+          "century",
+          "historic",
+          "war",
+          "maritime",
+          "ghost",
+          "fog",
+          "mist",
+          "storm",
+          "exploration",
+          "travel",
+          "voyage",
+          "sailboats",
+          "antique",
+          "horizon",
+          "epic",
+          "legend"
+        ],
+        "page_url": "https://pixabay.com/videos/id-299916/",
+        "score": 0.287721
+      }
+    },
+    {
+      "scene_id": "s0869-b09",
+      "category": "medical",
+      "era": "",
+      "scores": {
+        "legacy": 0.3,
+        "semantic_text": null,
+        "semantic_visual": 0.3
+      },
+      "legacy": {
+        "provider": "pexels",
+        "title": "spinal surgery procedure operating room",
+        "tags": [
+          "spinal",
+          "surgery",
+          "procedure",
+          "operating",
+          "room"
+        ],
+        "page_url": "https://www.pexels.com/video/spinal-surgery-procedure-in-operating-room-30838960/",
+        "score": 7.0
+      },
+      "semantic_text": null,
+      "semantic_visual": {
+        "provider": "pexels",
+        "title": "spinal surgery procedure operating room",
+        "tags": [
+          "spinal",
+          "surgery",
+          "procedure",
+          "operating",
+          "room"
+        ],
+        "page_url": "https://www.pexels.com/video/spinal-surgery-procedure-in-operating-room-30838960/",
+        "score": 0.318936
+      }
+    },
+    {
+      "scene_id": "s1212-b08",
+      "category": "nature",
+      "era": "ancient",
+      "scores": {
+        "legacy": 0.0,
+        "semantic_text": null,
+        "semantic_visual": 0.0
+      },
+      "legacy": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 3.0
+      },
+      "semantic_text": null,
+      "semantic_visual": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 0.215291
+      }
+    },
+    {
+      "scene_id": "s0434-b07",
+      "category": "other",
+      "era": "",
+      "scores": {
+        "legacy": 0.0,
+        "semantic_text": null,
+        "semantic_visual": 0.0
+      },
+      "legacy": {
+        "provider": "pexels",
+        "title": "close abstract dust particles light beam",
+        "tags": [
+          "close",
+          "abstract",
+          "dust",
+          "particles",
+          "light",
+          "beam"
+        ],
+        "page_url": "https://www.pexels.com/video/close-up-abstract-dust-particles-in-light-beam-36637658/",
+        "score": 7.0
+      },
+      "semantic_text": null,
+      "semantic_visual": {
+        "provider": "pexels",
+        "title": "close abstract dust particles light beam",
+        "tags": [
+          "close",
+          "abstract",
+          "dust",
+          "particles",
+          "light",
+          "beam"
+        ],
+        "page_url": "https://www.pexels.com/video/close-up-abstract-dust-particles-in-light-beam-36637658/",
+        "score": 0.262292
+      }
+    },
+    {
+      "scene_id": "s0173-b13",
+      "category": "people",
+      "era": "",
+      "scores": {
+        "legacy": 0.3,
+        "semantic_text": 0.3,
+        "semantic_visual": 0.3
+      },
+      "legacy": {
+        "provider": "pixabay",
+        "title": "NickyPe",
+        "tags": [
+          "winter",
+          "trees",
+          "snow",
+          "covered in snow",
+          "snow landscape",
+          "forest",
+          "sun",
+          "sunbeam",
+          "good weather",
+          "nature",
+          "person",
+          "to stroll",
+          "winter landscape",
+          "winter magic"
+        ],
+        "page_url": "https://pixabay.com/videos/id-143531/",
+        "score": 3.0
+      },
+      "semantic_text": {
+        "provider": "pixabay",
+        "title": "NickyPe",
+        "tags": [
+          "winter",
+          "trees",
+          "snow",
+          "covered in snow",
+          "snow landscape",
+          "forest",
+          "sun",
+          "sunbeam",
+          "good weather",
+          "nature",
+          "person",
+          "to stroll",
+          "winter landscape",
+          "winter magic"
+        ],
+        "page_url": "https://pixabay.com/videos/id-143531/",
+        "score": 0.265112
+      },
+      "semantic_visual": {
+        "provider": "pixabay",
+        "title": "NickyPe",
+        "tags": [
+          "landscape",
+          "person",
+          "walk",
+          "hike",
+          "nature",
+          "trees",
+          "path",
+          "fall"
+        ],
+        "page_url": "https://pixabay.com/videos/id-91189/",
+        "score": 0.273073
+      }
+    },
+    {
+      "scene_id": "s0080-b02",
+      "category": "space_science",
+      "era": "",
+      "scores": {
+        "legacy": 0.3,
+        "semantic_text": 0.3,
+        "semantic_visual": 0.3
+      },
+      "legacy": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 4.0
+      },
+      "semantic_text": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 0.274302
+      },
+      "semantic_visual": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 0.314162
+      }
+    },
+    {
+      "scene_id": "s0184-b13",
+      "category": "technology",
+      "era": "",
+      "scores": {
+        "legacy": 0.3,
+        "semantic_text": null,
+        "semantic_visual": 0.3
+      },
+      "legacy": {
+        "provider": "pexels",
+        "title": "woman scientist observing man",
+        "tags": [
+          "woman",
+          "scientist",
+          "observing",
+          "man"
+        ],
+        "page_url": "https://www.pexels.com/video/a-woman-scientist-observing-a-man-8877147/",
+        "score": 3.0
+      },
+      "semantic_text": null,
+      "semantic_visual": {
+        "provider": "pixabay",
+        "title": "tiburi",
+        "tags": [
+          "laboratory",
+          "architecture",
+          "modern",
+          "science",
+          "technology",
+          "office",
+          "future",
+          "lab",
+          "machine",
+          "tool",
+          "engineering",
+          "architect",
+          "creative",
+          "scientist",
+          "technical"
+        ],
+        "page_url": "https://pixabay.com/videos/id-4372/",
+        "score": 0.267336
+      }
+    },
+    {
+      "scene_id": "s1365-b02",
+      "category": "action",
+      "era": "",
+      "scores": {
+        "legacy": 0.3,
+        "semantic_text": null,
+        "semantic_visual": 0.0
+      },
+      "legacy": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 5.5
+      },
+      "semantic_text": null,
+      "semantic_visual": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 0.197166
+      }
+    },
+    {
+      "scene_id": "s1468-b12",
+      "category": "animals",
+      "era": "19th century",
+      "scores": {
+        "legacy": 0.3,
+        "semantic_text": null,
+        "semantic_visual": 0.3
+      },
+      "legacy": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 6.0
+      },
+      "semantic_text": null,
+      "semantic_visual": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 0.268416
+      }
+    },
+    {
+      "scene_id": "s1698-b06",
+      "category": "desert_geology",
+      "era": "1940s",
+      "scores": {
+        "legacy": 0.0,
+        "semantic_text": 0.3,
+        "semantic_visual": 0.3
+      },
+      "legacy": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 13.0
+      },
+      "semantic_text": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 0.284605
+      },
+      "semantic_visual": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 0.312665
+      }
+    },
+    {
+      "scene_id": "s1161-b08",
+      "category": "history",
+      "era": "",
+      "scores": {
+        "legacy": 0.0,
+        "semantic_text": null,
+        "semantic_visual": 0.3
+      },
+      "legacy": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 9.5
+      },
+      "semantic_text": null,
+      "semantic_visual": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 0.287492
+      }
+    },
+    {
+      "scene_id": "s1299-b15",
+      "category": "medical",
+      "era": "",
+      "scores": {
+        "legacy": 0.3,
+        "semantic_text": null,
+        "semantic_visual": 0.3
+      },
+      "legacy": {
+        "provider": "pexels",
+        "title": "mri machine medical facility",
+        "tags": [
+          "mri",
+          "machine",
+          "medical",
+          "facility"
+        ],
+        "page_url": "https://www.pexels.com/video/a-mri-machine-in-a-medical-facility-7088941/",
+        "score": 4.0
+      },
+      "semantic_text": null,
+      "semantic_visual": {
+        "provider": "pexels",
+        "title": "mri machine medical facility",
+        "tags": [
+          "mri",
+          "machine",
+          "medical",
+          "facility"
+        ],
+        "page_url": "https://www.pexels.com/video/a-mri-machine-in-a-medical-facility-7088941/",
+        "score": 0.229496
+      }
+    },
+    {
+      "scene_id": "s0299-b06",
+      "category": "other",
+      "era": "",
+      "scores": {
+        "legacy": 0.3,
+        "semantic_text": 0.3,
+        "semantic_visual": null
+      },
+      "legacy": {
+        "provider": "pixabay",
+        "title": "stefaniejockschat",
+        "tags": [
+          "ai generated",
+          "clothes",
+          "clothesline",
+          "laundry",
+          "country",
+          "countryside",
+          "field",
+          "wash",
+          "cabin",
+          "barn",
+          "dress",
+          "rural",
+          "farmer",
+          "western",
+          "house",
+          "summer",
+          "abandoned",
+          "nature",
+          "landscape"
+        ],
+        "page_url": "https://pixabay.com/videos/id-192138/",
+        "score": 12.5
+      },
+      "semantic_text": {
+        "provider": "pixabay",
+        "title": "Matthias_Groeneveld",
+        "tags": [
+          "field",
+          "car",
+          "traffic",
+          "sunset",
+          "farmer",
+          "netherlands",
+          "drenthe",
+          "havelte",
+          "rural",
+          "landscape",
+          "nature",
+          "summer",
+          "outdoors"
+        ],
+        "page_url": "https://pixabay.com/videos/id-217758/",
+        "score": 0.337523
+      },
+      "semantic_visual": {
+        "provider": "pixabay",
+        "title": "Matthias_Groeneveld",
+        "tags": [
+          "field",
+          "car",
+          "netherlands",
+          "drenthe",
+          "havelte",
+          "rural",
+          "nature",
+          "farmer",
+          "sunset",
+          "summer",
+          "outdoors",
+          "traffic",
+          "landscape"
+        ],
+        "page_url": "https://pixabay.com/videos/id-217753/",
+        "score": 0.312386
+      }
+    },
+    {
+      "scene_id": "s0400-b01",
+      "category": "space_science",
+      "era": "",
+      "scores": {
+        "legacy": 0.3,
+        "semantic_text": null,
+        "semantic_visual": null
+      },
+      "legacy": {
+        "provider": "pexels",
+        "title": "pedestal shot ancient egyptian artifact",
+        "tags": [
+          "pedestal",
+          "shot",
+          "ancient",
+          "egyptian",
+          "artifact"
+        ],
+        "page_url": "https://www.pexels.com/video/pedestal-shot-of-ancient-egyptian-artifact-7575359/",
+        "score": 4.0
+      },
+      "semantic_text": null,
+      "semantic_visual": {
+        "provider": "pixabay",
+        "title": "whitesession",
+        "tags": [
+          "woman applying makeup",
+          "mask",
+          "make up",
+          "attractive",
+          "melted",
+          "fashion",
+          "lips",
+          "human",
+          "woman",
+          "portrait",
+          "girl",
+          "face",
+          "close up",
+          "female",
+          "pretty",
+          "young woman",
+          "beauty"
+        ],
+        "page_url": "https://pixabay.com/videos/id-12004/",
+        "score": 0.196626
+      }
+    },
+    {
+      "scene_id": "s1008-b12",
+      "category": "technology",
+      "era": "",
+      "scores": {
+        "legacy": 0.3,
+        "semantic_text": null,
+        "semantic_visual": 0.3
+      },
+      "legacy": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 6.5
+      },
+      "semantic_text": null,
+      "semantic_visual": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 0.271784
+      }
+    },
+    {
+      "scene_id": "s0386-b04",
+      "category": "action",
+      "era": "",
+      "scores": {
+        "legacy": 0.3,
+        "semantic_text": 0.3,
+        "semantic_visual": 0.3
+      },
+      "legacy": {
+        "provider": "pexels",
+        "title": "silhouette cheerful man jumping and running field sunset",
+        "tags": [
+          "silhouette",
+          "cheerful",
+          "man",
+          "jumping",
+          "and",
+          "running",
+          "field",
+          "sunset"
+        ],
+        "page_url": "https://www.pexels.com/video/silhouette-of-a-cheerful-man-jumping-and-running-in-a-field-at-sunset-12872844/",
+        "score": 6.0
+      },
+      "semantic_text": {
+        "provider": "pexels",
+        "title": "silhouette woman running towards man and embrace him",
+        "tags": [
+          "silhouette",
+          "woman",
+          "running",
+          "towards",
+          "man",
+          "and",
+          "embrace",
+          "him"
+        ],
+        "page_url": "https://www.pexels.com/video/silhouette-of-a-woman-running-towards-a-man-and-embrace-him-4297705/",
+        "score": 0.445003
+      },
+      "semantic_visual": {
+        "provider": "pexels",
+        "title": "silhouette woman running towards man and embrace him",
+        "tags": [
+          "silhouette",
+          "woman",
+          "running",
+          "towards",
+          "man",
+          "and",
+          "embrace",
+          "him"
+        ],
+        "page_url": "https://www.pexels.com/video/silhouette-of-a-woman-running-towards-a-man-and-embrace-him-4297705/",
+        "score": 0.417062
+      }
+    },
+    {
+      "scene_id": "s1471-b23",
+      "category": "animals",
+      "era": "1920s",
+      "scores": {
+        "legacy": 0.3,
+        "semantic_text": null,
+        "semantic_visual": 0.3
+      },
+      "legacy": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 7.0
+      },
+      "semantic_text": null,
+      "semantic_visual": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 0.29042
+      }
+    },
+    {
+      "scene_id": "s0517-b23",
+      "category": "city",
+      "era": "",
+      "scores": {
+        "legacy": 0.0,
+        "semantic_text": 0.0,
+        "semantic_visual": 0.0
+      },
+      "legacy": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 7.5
+      },
+      "semantic_text": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 0.275957
+      },
+      "semantic_visual": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 0.309252
+      }
+    },
+    {
+      "scene_id": "s0457-b16",
+      "category": "desert_geology",
+      "era": "",
+      "scores": {
+        "legacy": 0.0,
+        "semantic_text": 0.0,
+        "semantic_visual": 0.0
+      },
+      "legacy": {
+        "provider": "pexels",
+        "title": "empty football stadium with colorful seats",
+        "tags": [
+          "empty",
+          "football",
+          "stadium",
+          "with",
+          "colorful",
+          "seats"
+        ],
+        "page_url": "https://www.pexels.com/video/empty-football-stadium-with-colorful-seats-28598596/",
+        "score": 7.0
+      },
+      "semantic_text": {
+        "provider": "pexels",
+        "title": "empty football stadium with colorful seats",
+        "tags": [
+          "empty",
+          "football",
+          "stadium",
+          "with",
+          "colorful",
+          "seats"
+        ],
+        "page_url": "https://www.pexels.com/video/empty-football-stadium-with-colorful-seats-28598596/",
+        "score": 0.300012
+      },
+      "semantic_visual": {
+        "provider": "pexels",
+        "title": "empty football stadium with colorful seats",
+        "tags": [
+          "empty",
+          "football",
+          "stadium",
+          "with",
+          "colorful",
+          "seats"
+        ],
+        "page_url": "https://www.pexels.com/video/empty-football-stadium-with-colorful-seats-28598596/",
+        "score": 0.303359
+      }
+    },
+    {
+      "scene_id": "s1373-b14",
+      "category": "history",
+      "era": "medieval",
+      "scores": {
+        "legacy": 0.0,
+        "semantic_text": 0.3,
+        "semantic_visual": 0.3
+      },
+      "legacy": {
+        "provider": "pixabay",
+        "title": "JoshuaWoroniecki",
+        "tags": [
+          "castle",
+          "castle ruins",
+          "waves",
+          "dunluce",
+          "ireland",
+          "game of thrones",
+          "irish",
+          "narnia",
+          "ruins",
+          "coast",
+          "island",
+          "emerald",
+          "green",
+          "sky",
+          "ancient",
+          "famous",
+          "old",
+          "beautiful",
+          "walls",
+          "dungeon"
+        ],
+        "page_url": "https://pixabay.com/videos/id-217515/",
+        "score": 11.5
+      },
+      "semantic_text": {
+        "provider": "pixabay",
+        "title": "samirsmier",
+        "tags": [
+          "drone footage",
+          "beit guvrin national park",
+          "amphitheater",
+          "ancient",
+          "archaeology",
+          "modern and ancient",
+          "medieval ruins",
+          "roman ruins",
+          "gladiator",
+          "history"
+        ],
+        "page_url": "https://pixabay.com/videos/id-130294/",
+        "score": 0.325433
+      },
+      "semantic_visual": {
+        "provider": "pixabay",
+        "title": "samirsmier",
+        "tags": [
+          "drone footage",
+          "beit guvrin national park",
+          "amphitheater",
+          "ancient",
+          "archaeology",
+          "modern and ancient",
+          "medieval ruins",
+          "roman ruins",
+          "gladiator",
+          "history"
+        ],
+        "page_url": "https://pixabay.com/videos/id-130294/",
+        "score": 0.311766
+      }
+    }
+  ],
+  "ALL_GOOD": [
+    {
+      "scene_id": "s0203-b16",
+      "category": "space_science",
+      "era": "",
+      "scores": {
+        "legacy": 1.0,
+        "semantic_text": 1.0,
+        "semantic_visual": 1.0
+      },
+      "legacy": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 20.5
+      },
+      "semantic_text": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 0.457704
+      },
+      "semantic_visual": {
+        "provider": "pixabay_photo",
+        "title": "",
+        "tags": null,
+        "page_url": "",
+        "score": 0.470912
+      }
+    },
+    {
+      "scene_id": "s0826-b40",
+      "category": "technology",
+      "era": "",
+      "scores": {
+        "legacy": 0.85,
+        "semantic_text": 0.85,
+        "semantic_visual": 0.85
+      },
+      "legacy": {
+        "provider": "pexels",
+        "title": "hands holding smartphone with social media app",
+        "tags": [
+          "hands",
+          "holding",
+          "smartphone",
+          "with",
+          "social",
+          "media",
+          "app"
+        ],
+        "page_url": "https://www.pexels.com/video/hands-holding-smartphone-with-social-media-app-38667504/",
+        "score": 12.0
+      },
+      "semantic_text": {
+        "provider": "pexels",
+        "title": "hands holding smartphone with social media app",
+        "tags": [
+          "hands",
+          "holding",
+          "smartphone",
+          "with",
+          "social",
+          "media",
+          "app"
+        ],
+        "page_url": "https://www.pexels.com/video/hands-holding-smartphone-with-social-media-app-38667504/",
+        "score": 0.38441
+      },
+      "semantic_visual": {
+        "provider": "pexels",
+        "title": "hands holding smartphone with social media app",
+        "tags": [
+          "hands",
+          "holding",
+          "smartphone",
+          "with",
+          "social",
+          "media",
+          "app"
+        ],
+        "page_url": "https://www.pexels.com/video/hands-holding-smartphone-with-social-media-app-38667504/",
+        "score": 0.399742
+      }
+    },
+    {
+      "scene_id": "s0767-b04",
+      "category": "nature",
+      "era": "",
+      "scores": {
+        "legacy": 0.85,
+        "semantic_text": 0.85,
+        "semantic_visual": 0.85
+      },
+      "legacy": {
+        "provider": "pexels",
+        "title": "brain with pink glow the dark background",
+        "tags": [
+          "brain",
+          "with",
+          "pink",
+          "glow",
+          "the",
+          "dark",
+          "background"
+        ],
+        "page_url": "https://www.pexels.com/video/a-brain-with-a-pink-glow-in-the-dark-background-18388881/",
+        "score": 8.5
+      },
+      "semantic_text": {
+        "provider": "pexels",
+        "title": "dynamic abstract light art dark background",
+        "tags": [
+          "dynamic",
+          "abstract",
+          "light",
+          "art",
+          "dark",
+          "background"
+        ],
+        "page_url": "https://www.pexels.com/video/dynamic-abstract-light-art-on-dark-background-37099937/",
+        "score": 0.358127
+      },
+      "semantic_visual": {
+        "provider": "pexels",
+        "title": "dynamic abstract light art dark background",
+        "tags": [
+          "dynamic",
+          "abstract",
+          "light",
+          "art",
+          "dark",
+          "background"
+        ],
+        "page_url": "https://www.pexels.com/video/dynamic-abstract-light-art-on-dark-background-37099937/",
+        "score": 0.346889
+      }
+    },
+    {
+      "scene_id": "s1073-b14",
+      "category": "people",
+      "era": "",
+      "scores": {
+        "legacy": 1.0,
+        "semantic_text": 0.85,
+        "semantic_visual": 0.85
+      },
+      "legacy": {
+        "provider": "pexels",
+        "title": "group women sharing ideas the room",
+        "tags": [
+          "group",
+          "women",
+          "sharing",
+          "ideas",
+          "the",
+          "room"
+        ],
+        "page_url": "https://www.pexels.com/video/group-of-women-sharing-ideas-in-the-room-7935031/",
+        "score": 4.5
+      },
+      "semantic_text": {
+        "provider": "pexels",
+        "title": "group people having conversation while eating and drinking",
+        "tags": [
+          "group",
+          "people",
+          "having",
+          "conversation",
+          "while",
+          "eating",
+          "and",
+          "drinking"
+        ],
+        "page_url": "https://www.pexels.com/video/a-group-of-people-having-conversation-while-eating-and-drinking-9306260/",
+        "score": 0.322698
+      },
+      "semantic_visual": {
+        "provider": "pexels",
+        "title": "group people having conversation while eating and drinking",
+        "tags": [
+          "group",
+          "people",
+          "having",
+          "conversation",
+          "while",
+          "eating",
+          "and",
+          "drinking"
+        ],
+        "page_url": "https://www.pexels.com/video/a-group-of-people-having-conversation-while-eating-and-drinking-9306260/",
+        "score": 0.321782
+      }
+    },
+    {
+      "scene_id": "s1670-b13",
+      "category": "medical",
+      "era": "",
+      "scores": {
+        "legacy": 0.6,
+        "semantic_text": 0.6,
+        "semantic_visual": 0.6
+      },
+      "legacy": {
+        "provider": "pixabay",
+        "title": "Coverr-Free-Footage",
+        "tags": [
+          "discussion",
+          "desk",
+          "people",
+          "office",
+          "team",
+          "meeting",
+          "business",
+          "businessman",
+          "brainstorming",
+          "group",
+          "table",
+          "workplace",
+          "worker",
+          "corporate",
+          "creative",
+          "discussing",
+          "communication",
+          "teamwork",
+          "talking"
+        ],
+        "page_url": "https://pixabay.com/videos/id-8252/",
+        "score": 6.0
+      },
+      "semantic_text": {
+        "provider": "pixabay",
+        "title": "Coverr-Free-Footage",
+        "tags": [
+          "discussion",
+          "desk",
+          "people",
+          "office",
+          "team",
+          "meeting",
+          "business",
+          "businessman",
+          "brainstorming",
+          "group",
+          "table",
+          "workplace",
+          "worker",
+          "corporate",
+          "creative",
+          "discussing",
+          "communication",
+          "teamwork",
+          "talking"
+        ],
+        "page_url": "https://pixabay.com/videos/id-8252/",
+        "score": 0.293021
+      },
+      "semantic_visual": {
+        "provider": "pixabay",
+        "title": "Coverr-Free-Footage",
+        "tags": [
+          "discussion",
+          "desk",
+          "people",
+          "office",
+          "team",
+          "meeting",
+          "business",
+          "businessman",
+          "brainstorming",
+          "group",
+          "table",
+          "workplace",
+          "worker",
+          "corporate",
+          "creative",
+          "discussing",
+          "communication",
+          "teamwork",
+          "talking"
+        ],
+        "page_url": "https://pixabay.com/videos/id-8252/",
+        "score": 0.299693
+      }
+    }
+  ],
+  "INCONCLUSIVE": []
+}
