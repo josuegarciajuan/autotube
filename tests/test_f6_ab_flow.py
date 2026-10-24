@@ -5,12 +5,17 @@ from api.services.ab_test_worker import ABTestWorker
 
 
 class _DB:
-    """DB mínima con _get_conn() para el worker A/B."""
+    """DB mínima con el contrato real del worker A/B (``_connect``).
+
+    ``ExtendedDatabase`` no expone ``_get_conn``: ``ABTestWorker._get_db_conn``
+    usa ``self.db._connect()``. Mantener el mismo nombre aquí evita que el
+    doble se desincronice del contrato de producción.
+    """
 
     def __init__(self, path):
         self.path = str(path)
 
-    def _get_conn(self):
+    def _connect(self):
         conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row
         return conn
