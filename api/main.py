@@ -1879,6 +1879,30 @@ async def _schedule_checker_loop():
     except Exception:
         pass
 
+    # ── Keepalive del heartbeat durante operaciones largas ──────────────
+    # El loop pasa mucho tiempo AWAITING trabajo en to_thread (dispatch,
+    # upload, replan, cálculo de slots). Eso NO es un loop muerto: el event
+    # loop sigue vivo. Antes, cualquier operación >30 min dejaba
+    # `task_heartbeat_schedule_checker` sin refrescar y el watchdog reiniciaba
+    # la API a mitad de faena (incidente 2026-10-24 08:43). Este task corre en
+    # el MISMO event loop: si el loop se bloquea de verdad (llamada síncrona),
+    # tampoco late y el watchdog sigue detectándolo.
+    async def _heartbeat_keepalive(task_name: str, interval: float = 60.0):
+        from api.services.lifecycle_monitor import touch_task_heartbeat
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                touch_task_heartbeat(task_name)
+        except asyncio.CancelledError:
+            pass
+
+    _keepalive = asyncio.create_task(
+        _heartbeat_keepalive("schedule_checker"), name="heartbeat:schedule_checker",
+    )
+    _self_task = asyncio.current_task()
+    if _self_task is not None:
+        _self_task.add_done_callback(lambda _t: _keepalive.cancel())
+
     while True:
         try:
             from api.services.lifecycle_monitor import touch_task_heartbeat as _tth
@@ -2597,7 +2621,12 @@ async def _calculate_optimal_slots():
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
         
-        result = calculate_and_replan_all(db)
+        # Cálculo + replan: I/O de YouTube Analytics y escrituras de slots.
+        # Estaba llamándose SÍNCRONAMENTE dentro del event loop: bloqueaba
+        # TODOS los loops y el ping del watchdog de systemd (incidente
+        # 2026-10-24 08:43, heartbeat stale >30 min).
+        import asyncio as _asyncio_opt
+        result = await _asyncio_opt.to_thread(calculate_and_replan_all, db)
         
         channels = result.get("channels_processed", 0)
         slots = result.get("slots_calculated", 0)

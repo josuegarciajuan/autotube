@@ -285,3 +285,25 @@ def test_is_llm_credit_error_detects_deepseek_402():
     assert observability.is_llm_credit_error("Render slot timeout") is False
     assert observability.is_llm_credit_error("") is False
     assert observability.is_llm_credit_error(None) is False
+
+
+# ── Severity calibration for aggregated error_* alerts ────────────────
+
+def test_transient_error_is_demoted_to_warning():
+    severity = observability._calibrated_error_severity(
+        "critical",
+        "ScenePlanError: local_fallback_deferred: render: otro long-form en curso",
+    )
+    assert severity == "warning"
+
+
+def test_non_transient_error_stays_critical():
+    assert observability._calibrated_error_severity(
+        "critical", "database disk image is malformed",
+    ) == "critical"
+
+
+def test_warning_severity_is_not_changed():
+    assert observability._calibrated_error_severity(
+        "warning", "local_fallback_deferred",
+    ) == "warning"

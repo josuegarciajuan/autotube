@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import {
   ShieldAlert,
   Shield,
@@ -226,7 +227,8 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
   const [applyingAll, setApplyingAll] = useState(false)
   const [sessionWarnings, setSessionWarnings] = useState<{ account: string; channels: string[] }[]>([])
   const [monitorAlerts, setMonitorAlerts] = useState<EnforcementAlert[]>([])
-  const { data: restrictions } = useChannelRestrictions()
+  const { data: restrictions, refetch: refetchRestrictions } = useChannelRestrictions()
+  const queryClient = useQueryClient()
   const { data: quotaStatus } = useQuotaStatus()
 
   const channels: ChannelRestriction[] = useMemo(
@@ -380,7 +382,17 @@ export default function AlertCenter({ onOpenReport }: AlertCenterProps) {
 
   async function handleRefresh() {
     setBusy(0)
-    try { await api.getChannelRestrictions() } catch { /* noop */ }
+    try {
+      // Antes se hacía una petición suelta cuyo resultado se descartaba: el
+      // botón "refrescaba" sin actualizar la tarjeta. Refrescamos la caché de
+      // React Query (restricciones + alertas persistidas).
+      await Promise.all([
+        refetchRestrictions(),
+        queryClient.invalidateQueries({ queryKey: ['channel-restrictions'] }),
+      ])
+      const data = await api.getMonitorAlerts('active', undefined, undefined, undefined, 100)
+      setMonitorAlerts((data.alerts || []) as EnforcementAlert[])
+    } catch { /* noop */ }
     setBusy(null)
   }
 

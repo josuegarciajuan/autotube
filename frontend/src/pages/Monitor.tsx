@@ -22,7 +22,10 @@ interface DashboardData {
 
 export default function Monitor() {
   const { data, isLoading: loading, refetch: refreshDashboard } = useMonitorDashboard()
-  const { connected } = useMonitorWebSocket()
+  // Una ÚNICA conexión WebSocket por página. Antes AlertsPanel abría la suya y
+  // EventTimeline no recibía los eventos del padre: el indicador decía "Live"
+  // mientras el timeline quedaba mudo y se duplicaban conexiones.
+  const { connected, lastUpdate } = useMonitorWebSocket()
 
   const dashboardData = data as DashboardData | undefined
 
@@ -114,12 +117,12 @@ export default function Monitor() {
         </div>
         {/* Alerts (1/3 width) */}
         <div className="xl:col-span-1">
-          <AlertsPanel />
+          <AlertsPanel lastUpdate={lastUpdate} />
         </div>
       </div>
 
       {/* ═══ Section 5: Event timeline (full width, shares parent WS) ═══ */}
-      <EventTimeline wsConnected={connected} />
+      <EventTimeline wsConnected={connected} lastUpdate={lastUpdate} />
     </div>
   )
 }

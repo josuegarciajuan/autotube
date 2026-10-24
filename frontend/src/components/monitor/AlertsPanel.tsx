@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Bell, BellOff, CheckCircle, Eye, XCircle } from 'lucide-react'
 import { api, formatApiDate } from '../../lib/api'
-import { useMonitorWebSocket } from '../../hooks/useMonitorWebSocket'
+import type { MonitorUpdate } from '../../hooks/useMonitorWebSocket'
 
 interface Alert {
   id: number
@@ -21,7 +21,12 @@ interface Alert {
 
 type SevFilter = 'todas' | 'critical' | 'warning' | 'info'
 
-export default function AlertsPanel() {
+interface AlertsPanelProps {
+  /** Eventos del WebSocket único de la página Monitor (el padre es el dueño). */
+  lastUpdate?: MonitorUpdate | null
+}
+
+export default function AlertsPanel({ lastUpdate }: AlertsPanelProps) {
   const [alerts, setAlerts] = useState<Alert[]>([])
   const [filter, setFilter] = useState<'active' | 'all'>('active')
   const [sevFilter, setSevFilter] = useState<SevFilter>('todas')
@@ -46,12 +51,13 @@ export default function AlertsPanel() {
   useEffect(() => { fetchAlerts() }, [fetchAlerts])
   useEffect(() => { fetchSilenced() }, [fetchSilenced])
 
-  // v50: refresca la lista cuando llega una alerta nueva por WebSocket (el
-  // panel ya abierto no esperaba a recargar la página para mostrar alertas
-  // de reminders/cobertura de stats).
-  const { lastUpdate } = useMonitorWebSocket()
+  // Refresca la lista con el WebSocket del padre (sin abrir una conexión
+  // propia). También al resolverse alertas: antes solo se refrescaba al crear.
   useEffect(() => {
-    if (lastUpdate?.type === 'health_update' && (lastUpdate.alerts_created || 0) > 0) {
+    if (
+      lastUpdate?.type === 'health_update'
+      && ((lastUpdate.alerts_created || 0) > 0 || (lastUpdate.alerts_resolved || 0) > 0)
+    ) {
       fetchAlerts()
     }
   }, [lastUpdate, fetchAlerts])
@@ -60,10 +66,14 @@ export default function AlertsPanel() {
     sevFilter === 'todas' || a.severity === sevFilter
   )
 
-  const critical = alerts.filter(a => a.severity === 'critical' && !a.resolved).length
-  const warning = alerts.filter(a => a.severity === 'warning' && !a.resolved).length
-  const info = alerts.filter(a => a.severity === 'info' && !a.resolved).length
-  const unacked = alerts.filter(a => !a.acknowledged && !a.resolved).length
+  // Contadores SIEMPRE sobre alertas activas: antes "Todas" era alerts.length
+  // (incluía resueltas) y las pestañas de severidad no, así que el mismo panel
+  // mostraba dos universos distintos.
+  const activeAlerts = alerts.filter(a => !a.resolved)
+  const critical = activeAlerts.filter(a => a.severity === 'critical').length
+  const warning = activeAlerts.filter(a => a.severity === 'warning').length
+  const info = activeAlerts.filter(a => a.severity === 'info').length
+  const unacked = activeAlerts.filter(a => !a.acknowledged).length
 
   async function handleAck(id: number) {
     await api.acknowledgeMonitorAlert(id)
@@ -76,8 +86,13 @@ export default function AlertsPanel() {
   }
 
   async function handleResolveAll() {
-    if (!confirm('¿Resolver TODAS las alertas activas?')) return
-    await api.resolveAllMonitorAlerts()
+    const scope = sevFilter === 'todas'
+      ? 'TODAS las alertas activas'
+      : `TODAS las alertas activas de severidad ${sevFilter}`
+    if (!confirm(`¿Resolver ${scope}?`)) return
+    // Respeta el filtro visible: antes resolvía también las alertas ocultas
+    // por la pestaña de severidad, incluidas críticas no revisadas.
+    await api.resolveAllMonitorAlerts(sevFilter === 'todas' ? undefined : sevFilter)
     fetchAlerts()
   }
 
@@ -133,7 +148,7 @@ export default function AlertsPanel() {
   }
 
   const sevTabs: { key: SevFilter; label: string; count: number; cls: string }[] = [
-    { key: 'todas', label: 'Todas', count: alerts.length, cls: 'text-gray-400' },
+    { key: 'todas', label: 'Todas', count: activeAlerts.length, cls: 'text-gray-400' },
     { key: 'critical', label: 'Críticas', count: critical, cls: 'text-red-400' },
     { key: 'warning', label: 'Avisos', count: warning, cls: 'text-amber-400' },
     { key: 'info', label: 'Info', count: info, cls: 'text-blue-400' },
