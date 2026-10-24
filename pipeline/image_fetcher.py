@@ -235,10 +235,19 @@ class UnsplashProvider(ImageProvider):
         data = resp.json()
         results: list[dict] = []
         for photo in data.get("results", []):
+            preview = (
+                photo.get("urls", {}).get("small")
+                or photo.get("urls", {}).get("thumb")
+                or ""
+            )
             results.append({
                 "id": photo.get("id", ""),
                 "url": photo.get("links", {}).get("html", ""),
                 "download_url": photo.get("urls", {}).get("regular", ""),
+                "preview_url": preview,
+                "thumbnail_url": preview,
+                "preview_type": "image" if preview else "",
+                "visual_source": "unsplash:small" if preview else "",
                 "photographer": (
                     photo.get("user", {}).get("name", "Unknown")
                 ),
@@ -327,11 +336,20 @@ class PexelsProvider(ImageProvider):
         data = resp.json()
         results: list[dict] = []
         for photo in data.get("photos", []):
+            preview = (
+                photo.get("src", {}).get("medium")
+                or photo.get("src", {}).get("small")
+                or ""
+            )
             results.append({
                 "id": str(photo.get("id", "")),
                 "url": photo.get("url", ""),
                 "download_url": photo.get("src", {}).get("large2x", "")
                 or photo.get("src", {}).get("large", ""),
+                "preview_url": preview,
+                "thumbnail_url": preview,
+                "preview_type": "image" if preview else "",
+                "visual_source": "pexels:medium" if preview else "",
                 "photographer": photo.get("photographer", "Unknown"),
                 "width": photo.get("width", 0),
                 "height": photo.get("height", 0),
@@ -379,11 +397,20 @@ class PexelsProvider(ImageProvider):
         total_results = data.get("total_results", 0)
         results: list[dict] = []
         for photo in data.get("photos", []):
+            preview = (
+                photo.get("src", {}).get("medium")
+                or photo.get("src", {}).get("small")
+                or ""
+            )
             results.append({
                 "id": str(photo.get("id", "")),
                 "url": photo.get("url", ""),
                 "download_url": photo.get("src", {}).get("large2x", "")
                 or photo.get("src", {}).get("large", ""),
+                "preview_url": preview,
+                "thumbnail_url": preview,
+                "preview_type": "image" if preview else "",
+                "visual_source": "pexels:medium" if preview else "",
                 "photographer": photo.get("photographer", "Unknown"),
                 "width": photo.get("width", 0),
                 "height": photo.get("height", 0),
@@ -487,6 +514,12 @@ class PixabayImageProvider(ImageProvider):
                 "url": photo.get("pageURL", ""),
                 "download_url": download_url,
                 "fallback_download_url": fallback_download_url,
+                "preview_url": web_url or download_url,
+                "thumbnail_url": web_url or download_url,
+                "preview_type": "image",
+                "preview_width": photo.get("webformatWidth", 0) or None,
+                "preview_height": photo.get("webformatHeight", 0) or None,
+                "visual_source": "pixabay:webformat",
                 "photographer": photo.get("user", "Unknown"),
                 "width": img_w,
                 "height": img_h,
@@ -549,6 +582,12 @@ class PixabayImageProvider(ImageProvider):
                 "url": photo.get("pageURL", ""),
                 "download_url": download_url,
                 "fallback_download_url": fallback_download_url,
+                "preview_url": web_url or download_url,
+                "thumbnail_url": web_url or download_url,
+                "preview_type": "image",
+                "preview_width": photo.get("webformatWidth", 0) or None,
+                "preview_height": photo.get("webformatHeight", 0) or None,
+                "visual_source": "pixabay:webformat",
                 "photographer": photo.get("user", "Unknown"),
                 "width": img_w,
                 "height": img_h,

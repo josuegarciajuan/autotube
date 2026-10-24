@@ -485,7 +485,12 @@ def get_alerts(
             if status == "active":
                 conditions.append("resolved = 0")
             elif status == "acknowledged":
-                conditions.append("acknowledged = 1")
+                # "Reconocida" = vista por el operador pero AÚN ACTIVA. Antes
+                # incluía resueltas y una pestaña de reconocidas mostraba ruido
+                # histórico mezclado con trabajo pendiente.
+                conditions.append("acknowledged = 1 AND resolved = 0")
+            elif status == "unacknowledged":
+                conditions.append("acknowledged = 0 AND resolved = 0")
             elif status == "resolved":
                 conditions.append("resolved = 1")
 

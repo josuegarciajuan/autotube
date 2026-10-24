@@ -7966,6 +7966,8 @@ class ExtendedDatabase(Database):
             reach_by_date: dict = {}
             total_impressions = 0
             reach_ctr = 0.0
+            impressions_prev = 0
+            reach_ctr_prev = 0.0
             try:
                 reach_spark_rows = conn.execute(
                     f"""SELECT date,
@@ -7991,6 +7993,21 @@ class ExtendedDatabase(Database):
                 reach_ctr = (
                     round(float(reach_tot["clicks"] or 0) / total_impressions * 100, 2)
                     if total_impressions else 0.0
+                )
+                # Periodo anterior (30-60 días atrás) para el % de crecimiento.
+                # Mismo criterio: CTR ponderado por impresiones, no media simple.
+                reach_prev_tot = conn.execute(
+                    f"""SELECT COALESCE(SUM(impressions), 0) AS imp,
+                               COALESCE(SUM(impressions * impressions_ctr / 100.0), 0) AS clicks
+                        FROM video_reach_daily
+                        WHERE date >= date('now', '-60 days')
+                          AND date < date('now', '-30 days') {reach_where}""",
+                    ch_params,
+                ).fetchone()
+                impressions_prev = int(reach_prev_tot["imp"] or 0)
+                reach_ctr_prev = (
+                    round(float(reach_prev_tot["clicks"] or 0) / impressions_prev * 100, 2)
+                    if impressions_prev else 0.0
                 )
             except sqlite3.OperationalError:
                 # Migración v60 pendiente: el dashboard degrada a ceros sin romper.
@@ -8223,12 +8240,12 @@ class ExtendedDatabase(Database):
                 # tras crear el job): el 0 NO es un dato real.
                 "impressions": {
                     "value": total_impressions,
-                    "delta": None,
+                    "delta": _delta_pct(total_impressions, impressions_prev),
                     "available": total_impressions > 0,
                 },
                 "ctr": {
                     "value": reach_ctr,
-                    "delta": None,
+                    "delta": _delta_pct(reach_ctr, reach_ctr_prev),
                     "available": total_impressions > 0,
                 },
                 "reach": {

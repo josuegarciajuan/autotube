@@ -1310,6 +1310,69 @@ def _auto_resolve_completed(db) -> int:
                 )
                 resolved += 1
 
+            # ── Fallo transitorio ya reencolado ──────────────────────────────
+            # Un `failed`/`error_*` deja de ser vigente en cuanto el worker
+            # programa un reintento (progress_phase='queued_retry' o un job
+            # queued/running para el vídeo). Antes la alerta seguía CRÍTICA
+            # hasta que el vídeo terminaba (o 7 días), aunque el reintento ya
+            # estuviera en marcha: el operador veía fallos que el sistema ya
+            # estaba resolviendo solo (#2760/#2761).
+            rows = conn.execute(
+                """SELECT pa.id
+                   FROM pipeline_alerts pa
+                   JOIN videos v ON v.id = pa.entity_id
+                   WHERE pa.entity_type = 'video' AND pa.resolved = 0
+                     AND (pa.alert_type = 'failed' OR pa.alert_type LIKE 'error_%')
+                     AND (
+                       v.progress_phase = 'queued_retry'
+                       OR EXISTS (
+                         SELECT 1 FROM generation_jobs gj
+                         WHERE gj.video_id = v.id
+                           AND gj.status IN ('queued', 'running')
+                       )
+                     )"""
+            ).fetchall()
+            for alert in rows:
+                conn.execute(
+                    """UPDATE pipeline_alerts
+                       SET resolved = 1, resolved_at = datetime('now'), acknowledged = 1,
+                           message = COALESCE(message, '') ||
+                             ' [Auto-resuelto: reintento en curso]'
+                       WHERE id = ?""",
+                    (alert["id"],),
+                )
+                resolved += 1
+
+            # ── Agrupar diagnósticos derivados bajo la alerta canónica ──────
+            # Un mismo fallo genera 'failed' + 'error_<módulo>' (worker,
+            # orchestrator...). Para el operador son el MISMO problema: se
+            # conserva 'failed' como alerta activa y los derivados pasan a
+            # resueltos con la nota de agrupación (sin perder el traceback).
+            rows = conn.execute(
+                """SELECT pa.id
+                   FROM pipeline_alerts pa
+                   WHERE pa.resolved = 0
+                     AND pa.entity_type IN ('video', 'short')
+                     AND pa.alert_type LIKE 'error_%'
+                     AND EXISTS (
+                       SELECT 1 FROM pipeline_alerts f
+                       WHERE f.resolved = 0
+                         AND f.alert_type = 'failed'
+                         AND f.entity_type = pa.entity_type
+                         AND f.entity_id = pa.entity_id
+                     )"""
+            ).fetchall()
+            for alert in rows:
+                conn.execute(
+                    """UPDATE pipeline_alerts
+                       SET resolved = 1, resolved_at = datetime('now'), acknowledged = 1,
+                           message = COALESCE(message, '') ||
+                             ' [Agrupado: mismo fallo que la alerta failed]'
+                       WHERE id = ?""",
+                    (alert["id"],),
+                )
+                resolved += 1
+
             # Resolve alerts for videos that are now uploaded/published.
             # Incluye 'failed': si el vídeo ya no está en 'error' (p.ej. recuperado
             # por Glass Box y reencolado), el fallo que originó la alerta ya no es
@@ -1321,7 +1384,10 @@ def _auto_resolve_completed(db) -> int:
                    JOIN videos v ON v.id = pa.entity_id AND pa.entity_type = 'video'
                     WHERE pa.resolved = 0
                       AND v.status NOT IN ('error', 'generating', 'draft', 'validation_failed')
-                      AND pa.alert_type IN ('stuck', 'timeout', 'awaiting_upload_stuck', 'failed', 'packaging_invalid')"""
+                      AND (
+                        pa.alert_type IN ('stuck', 'timeout', 'awaiting_upload_stuck', 'failed', 'packaging_invalid')
+                        OR pa.alert_type LIKE 'error_%'
+                      )"""
             ).fetchall()
 
             for alert in alerts:
@@ -2270,30 +2336,47 @@ def _resolve_recovered_task_alerts(db, conn) -> int:
             continue
         if age_s < 0 or age_s > timeout_s:
             continue
-        cur = conn.execute(
-            """UPDATE pipeline_alerts
-               SET resolved = 1, resolved_at = datetime('now'), acknowledged = 1,
-                   message = COALESCE(message, '') ||
-                     ' [Auto-resuelto: heartbeat recuperado]'
+        # Resolver por ID seleccionado primero: un UPDATE con varios predicados
+        # sobre la misma tabla podía no casar bajo contención de WAL (el panel
+        # mostraba alertas de watchdog ya recuperadas). UPDATE ... WHERE id IN
+        # es determinista y no depende del plan del índice parcial.
+        IDs: list[int] = []
+
+        rows = conn.execute(
+            """SELECT id FROM pipeline_alerts
                WHERE entity_type = 'system' AND entity_id = ?
                  AND alert_type = 'task_stalled' AND resolved = 0""",
             (_TASK_ENTITY_IDS[task_name],),
-        )
-        resolved += cur.rowcount
+        ).fetchall()
+        IDs.extend(int(r["id"]) for r in rows)
 
-        # Also close generic watchdog error_* alerts referencing this task
-        cur = conn.execute(
-            """UPDATE pipeline_alerts
-               SET resolved = 1, resolved_at = datetime('now'), acknowledged = 1,
-                   message = COALESCE(message, '') ||
-                     ' [Auto-resuelto: heartbeat recuperado]'
-               WHERE entity_type = 'system'
-                 AND alert_type = 'error_autotube_watchdog'
-                 AND resolved = 0
+        # El watchdog de tareas emite además diagnósticos de observabilidad
+        # (`error_autotube_task_watchdog`) y por loop (`task_stalled_loop_<t>`).
+        # Ambos se quedaban abiertos para siempre aunque el heartbeat volviera.
+        rows = conn.execute(
+            """SELECT id FROM pipeline_alerts
+               WHERE entity_type = 'system' AND resolved = 0
+                 AND (
+                   alert_type IN ('error_autotube_watchdog',
+                                  'error_autotube_task_watchdog')
+                   OR alert_type = ?
+                 )
                  AND (message LIKE ? OR title LIKE ?)""",
-            (f'%{task_name}%', f'%{task_name}%'),
-        )
-        resolved += cur.rowcount
+            (f"task_stalled_loop_{task_name}", f'%{task_name}%', f'%{task_name}%'),
+        ).fetchall()
+        IDs.extend(int(r["id"]) for r in rows)
+
+        if IDs:
+            placeholders = ",".join("?" * len(IDs))
+            cur = conn.execute(
+                f"""UPDATE pipeline_alerts
+                    SET resolved = 1, resolved_at = datetime('now'), acknowledged = 1,
+                        message = COALESCE(message, '') ||
+                          ' [Auto-resuelto: heartbeat recuperado]'
+                    WHERE id IN ({placeholders}) AND resolved = 0""",
+                tuple(IDs),
+            )
+            resolved += cur.rowcount
     if resolved:
         conn.commit()
     return resolved

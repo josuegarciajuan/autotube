@@ -1026,6 +1026,33 @@ class _ErrorAlertSink:
 
 _error_sink = _ErrorAlertSink()
 
+# Fallos transitorios/degradación conocida: merecen diagnóstico, pero NO una
+# alerta crítica. El fallo terminal (si lo hay) ya lo emite el pipeline como
+# `failed`; elevar cada intento a crítico producía cascadas (#2747-#2760) y
+# ocultaba las alertas que sí requieren acción humana.
+_TRANSIENT_ERROR_HINTS = (
+    "local_fallback_deferred",
+    "dist_repair_exhausted",
+    "insufficient balance",
+    "llm json parse failed",
+    "no blocks produced audio",
+    "connection closed while reading from the driver",
+    "target page, context or browser has been closed",
+    "temporarily unavailable",
+    "rate limit",
+    "timeout",
+)
+
+
+def _calibrated_error_severity(severity: str, message: Optional[str]) -> str:
+    """Degrada a warning los diagnósticos de fallos transitorios conocidos."""
+    if severity != "critical":
+        return severity
+    low = (message or "").lower()
+    if any(hint in low for hint in _TRANSIENT_ERROR_HINTS):
+        return "warning"
+    return severity
+
 
 def _submit_error_alert(
     *,
@@ -1045,6 +1072,7 @@ def _submit_error_alert(
     """Shared entry point for the handler and :func:`obs_error`."""
     if not _load_error_alert_settings().get("enabled"):
         return False
+    severity = _calibrated_error_severity(severity, message)
     return _error_sink.submit(
         alert_type=alert_type,
         title=title,

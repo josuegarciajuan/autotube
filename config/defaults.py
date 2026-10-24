@@ -500,6 +500,56 @@ MEDIA_STRATEGY = {
         "no_metadata_ceiling": 0.12,
     },
 
+    # ── P02: visual intelligence (opt-in, disabled by default) ──
+    # Modes: off | text_only | embedding_only | frame_embedding_only |
+    #        full_visual.  MEDIA_SELECTOR remains legacy by default.
+    "visual_mode": "off",
+    "visual_embedding_backend": "none",
+    "visual_embedding_model": "openai/clip-vit-base-patch32",
+    "visual_model_version": "",
+    "visual_device": "cpu",
+    "visual_allow_model_download": False,
+    "visual_cache_enabled": True,
+    "visual_cache_path": "",
+    "visual_preview_fetch": True,
+    "visual_frames_enabled": True,
+    "visual_vlm_mode": "none",
+    "visual_vlm_model": "",
+    "visual_vlm_enabled": True,
+    "visual_min_similarity": 0.26,
+    "visual_preview_min_similarity": 0.18,
+    "visual_frame_min_similarity": 0.20,
+    "visual_combined_threshold": 0.26,
+    "visual_vlm_min_confidence": 0.45,
+    "visual_constraints_enabled": True,
+    "visual_era_check_enabled": True,
+    "visual_reject_on_negative": True,
+    "visual_reject_on_era": True,
+    "visual_budget": {
+        "visual_preview_candidates": 12,
+        "visual_shortlist": 6,
+        "visual_download_candidates": 2,
+        "visual_preview_bytes": 524288,
+        "visual_preview_total_bytes": 6291456,
+        "visual_preview_timeout": 8.0,
+        "visual_embedding_batch_size": 8,
+        "visual_frame_count": 6,
+        "visual_frame_max_count": 8,
+        "visual_vlm_candidates": 2,
+        "visual_vlm_max_frames": 4,
+        "visual_vlm_timeout": 45.0,
+    },
+    "visual_weights": {
+        "text": 0.50,
+        "preview": 0.15,
+        "frame": 0.20,
+        "vlm": 0.15,
+        "technical_quality": 0.05,
+        "negative_penalty": 0.60,
+        "era_penalty": 0.30,
+        "must_include_penalty": 0.25,
+    },
+
     # ── Stock image resolution preference (Fase 1) ──────────────
     # When True, image candidates whose declared width is known and below
     # `min_stock_image_width` are deferred in favour of larger candidates.
