@@ -300,6 +300,67 @@ def _safe_publish_at(target_upload_at, channel_slug: str, channel_id: int = None
         return str(target_upload_at)
 
 
+def _wait_until_publish_target(target, *, slot_id: int | None = None,
+                               max_wait_hours: float = 8.0,
+                               poll_seconds: float = 20.0,
+                               _sleep=time.sleep, _now=None) -> float:
+    """Block until ``target`` (the planned public time) has arrived.
+
+    Atomic shorts are rendered ``lead`` minutes before their franja and upload
+    immediately when rendering finishes. If rendering is faster than the
+    estimated lead, the upload must WAIT until the target instead of publishing
+    early (root cause of the "everything at the first franja" incident).
+
+    Raises when the target is absurdly far away: a worker should never be
+    dispatched hours early, and publishing early is worse than failing.
+    Returns the seconds actually waited (0 when the target already passed).
+    """
+    target_dt = parse_utc(target)
+    if target_dt is None:
+        return 0.0
+    now_fn = _now or (lambda: datetime.now(UTC))
+    now = now_fn()
+    if now >= target_dt:
+        return 0.0
+    remaining = (target_dt - now).total_seconds()
+    max_wait_s = max(0.0, float(max_wait_hours) * 3600.0)
+    if max_wait_s and remaining > max_wait_s:
+        raise RuntimeError(
+            f"short slot {slot_id or '-'} dispatched too early for its publish "
+            f"target {target_dt.isoformat()} (wait {remaining/3600:.1f}h > "
+            f"{max_wait_hours:.1f}h)"
+        )
+    logger.info(
+        "Short slot %s rendered before its franja — waiting %.0fs until %s",
+        slot_id or "-", remaining, target_dt.strftime("%Y-%m-%d %H:%M:%S UTC"),
+    )
+    waited = 0.0
+    while True:
+        now = now_fn()
+        remaining = (target_dt - now).total_seconds()
+        if remaining <= 0:
+            break
+        chunk = min(max(0.05, float(poll_seconds)), remaining)
+        _sleep(chunk)
+        waited += chunk
+    return waited
+
+
+def _publish_target_is_stale(target, *, grace_minutes: float = 15.0,
+                             now=None) -> bool:
+    """True when a queued short's target is older than the allowed grace.
+
+    A stale target means the planned franja was missed (backlog, cap, restart).
+    It must be REPLANNED to a future franja, never published immediately in the
+    first tick of the day (that is exactly the morning avalanche).
+    """
+    target_dt = parse_utc(target)
+    if target_dt is None:
+        return True
+    now = now or datetime.now(UTC)
+    return target_dt < now - timedelta(minutes=max(0.0, float(grace_minutes)))
+
+
 def _youtube_quota_blocked(db=None, channel_slug: str = "") -> bool:
     """Return True when the channel's PROJECT quota breaker is active.
 
@@ -1433,7 +1494,13 @@ def _build_shorts_slots_for_channel(
         earliest = datetime.combine(
             start_day, datetime.min.time(), tzinfo=tz,
         )
-        # HOY: si quedan menos franjas futuras que shorts, no apilar todos en
+        # HOY: una franja ya pasada no es planificable. Antes se asignaba desde
+        # medianoche y se descartaba después, dejando el hueco sin rellenar con
+        # la siguiente franja. El límite es AHORA, no medianoche.
+        _now_local = datetime.now(UTC).astimezone(tz)
+        if start_day == _now_local.date():
+            earliest = max(earliest, _now_local)
+        # Si quedan menos franjas futuras que shorts, no apilar todos en
         # la última; se planifican solo las alcanzables.
         franja_times = [
             datetime.combine(start_day, datetime.min.time(), tzinfo=tz).replace(
@@ -1842,6 +1909,40 @@ def _global_publish_spacing_minutes(db) -> int:
         return 45
 
 
+def _pending_native_distribution_ok(pending: list[dict], db, channel_id: int,
+                                    *, min_separation_min: int = 20) -> bool:
+    """Whether existing pending native slots are already spread by franja.
+
+    Used to avoid rewriting a correct plan on every reconciliation while still
+    repairing the historical bug where every slot sat in the first franja (same
+    target/rank or targets only a few minutes apart).
+    """
+    if len(pending) <= 1:
+        return True
+    targets = []
+    ranks = []
+    for slot in pending:
+        raw = slot.get("target_publish_at") or slot.get("target_upload_at")
+        dt = parse_utc(raw)
+        if dt is None:
+            return False
+        targets.append(dt)
+        try:
+            ranks.append(int(slot.get("slot_rank") or 0))
+        except (TypeError, ValueError):
+            ranks.append(0)
+    targets.sort()
+    span_min = (targets[-1] - targets[0]).total_seconds() / 60.0
+    if span_min < min_separation_min:
+        return False
+    franjas = _load_shorts_franjas(db, channel_id)
+    if franjas and len(pending) <= len(franjas):
+        positive_ranks = {r for r in ranks if r > 0}
+        if len(positive_ranks) < len(pending):
+            return False
+    return True
+
+
 def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
     """Compute shorts slots per active channel for a given date (YYYY-MM-DD).
 
@@ -1949,26 +2050,57 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
         if native_count == 0 and clips_per_long == 0:
             continue
 
-        # ── Idempotency guard: skip if channel already has enough native slots ──
-        # Prevents duplicate slot creation when compute_daily_shorts_slots is
-        # called multiple times for the same date (e.g. server restart, recovery).
+        # ── Idempotency + repair guard ──────────────────────────────
+        # Protected slots are work already done or queued (render finished /
+        # running / completed). Pending slots are (re)buildable. We skip only
+        # when the day already has ENOUGH protected slots, or when its pending
+        # slots are correctly spread across franjas. A clustered legacy plan
+        # (all targets in the first franja) is rebuilt instead of preserved.
+        protected_native: list[dict] = []
+        pending_native: list[dict] = []
         try:
             existing_ch_slots = db.get_shorts_planned_slots(
                 date_key=date_str, channel_id=ch_id,
             )
-            existing_native = [
-                s for s in existing_ch_slots
-                if s.get("short_type") == "native"
-                and s.get("status") in ("pending", "running", "completed")
-            ]
-            if len(existing_native) >= native_count:
-                logger.debug(
-                    "[%s] Skipping %s: %d native slots already exist (>=%d configured)",
-                    slug, date_str, len(existing_native), native_count,
-                )
-                continue
+            for s in existing_ch_slots:
+                if s.get("short_type") != "native":
+                    continue
+                status = s.get("status")
+                if status in ("running", "completed", "generated") or s.get("short_id"):
+                    protected_native.append(s)
+                elif status == "pending":
+                    pending_native.append(s)
         except Exception:
-            pass
+            protected_native, pending_native = [], []
+
+        if len(protected_native) >= native_count:
+            logger.debug(
+                "[%s] Skipping %s: %d protected native slots already exist (>=%d configured)",
+                slug, date_str, len(protected_native), native_count,
+            )
+            continue
+        if (pending_native
+                and len(protected_native) + len(pending_native) >= native_count
+                and _pending_native_distribution_ok(pending_native, db, ch_id)):
+            logger.debug(
+                "[%s] Keeping %s: %d pending native slots already spread by franja",
+                slug, date_str, len(pending_native),
+            )
+            continue
+
+        build_count = max(0, native_count - len(protected_native))
+        if build_count <= 0:
+            continue
+
+        # Protected slots already occupy franjas: keep the rebuild away from them.
+        _protected_busy = []
+        for _s in protected_native:
+            _raw = _s.get("target_publish_at") or _s.get("target_upload_at")
+            _dt = parse_utc(_raw)
+            if _dt is not None:
+                _protected_busy.append(
+                    _dt.astimezone(_resolve_channel_tz(db, ch_id, slug))
+                )
 
         # Dynamic: how many long-form videos were published yesterday?
         # Clip slots are now based on YESTERDAY's published videos, not today's planned.
@@ -1977,11 +2109,12 @@ def compute_daily_shorts_slots(date_str: str, db=None) -> list[dict]:
         long_target_hours: list[int] = []
 
         channel_slots, global_pos = _build_shorts_slots_for_channel(
-            ch, date_str, native_count, clips_per_long,
+            ch, date_str, build_count, clips_per_long,
             yesterday_count, long_target_hours, global_pos,
             db=db,
-            global_busy=assigned_global,
+            global_busy=list(assigned_global) + _protected_busy,
         )
+        assigned_global.extend(_protected_busy)
         assigned_global.extend(
             datetime.strptime(s["target_publish_at"], "%Y-%m-%d %H:%M:%S")
             .replace(tzinfo=UTC).astimezone(
@@ -2203,26 +2336,38 @@ def normalize_pending_shorts_starts(db=None) -> int:
     return updated
 
 
-def retime_overdue_shorts_slots(db=None, now=None) -> int:
-    """Move pending native slots whose START time is already unviable.
+def retime_overdue_shorts_slots(db=None, now=None, *,
+                                statuses: tuple[str, ...] = ("pending", "generated"),
+                                stale_after_min: int | None = None) -> int:
+    """Move native slots whose planned franja is no longer reachable.
 
-    A slot is overdue when ``target_publish_at - lead`` is in the past. It is
-    moved to the next valid ranked franja (never published immediately), so an
-    API restart or a busy host does not create a burst. The target public time
-    and the derived start time are both rewritten.
+    - ``pending`` slots: overdue when ``target_publish_at - lead`` is in the
+      past (the render cannot finish before the franja). They move to the next
+      ranked franja, so an API restart does not create a burst.
+    - ``generated`` slots (already rendered, queued): there is no render lead,
+      so they are only retimed when their target is STALE (older than
+      ``stale_after_min``). A stale target would otherwise be drained by the
+      upload valve in the first tick of the day (the night avalanche).
+
+    The target public time and the derived start time are both rewritten. The
+    status of the slot is never changed here.
     """
     if db is None:
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
     now_utc = now or datetime.now(UTC)
     moved = 0
-    try:
-        pending = db.get_shorts_planned_slots(status="pending")
-    except Exception:
-        return 0
+    slots_to_retime: list[dict] = []
+    for _status in statuses:
+        try:
+            slots_to_retime.extend(
+                db.get_shorts_planned_slots(status=_status) or []
+            )
+        except Exception:
+            continue
 
     by_channel: dict[int, list[dict]] = {}
-    for slot in pending:
+    for slot in slots_to_retime:
         if (slot.get("short_type") or "native") != "native":
             continue
         by_channel.setdefault(int(slot["channel_id"]), []).append(slot)
@@ -2255,10 +2400,22 @@ def retime_overdue_shorts_slots(db=None, now=None) -> int:
                 ).replace(tzinfo=UTC)
             except (ValueError, TypeError):
                 continue
-            if target_utc >= now_utc + timedelta(minutes=lead):
-                continue
-
-            earliest = (max(now_utc, target_utc) + timedelta(minutes=lead + 5)).astimezone(tz)
+            is_generated = (slot.get("status") == "generated")
+            if is_generated:
+                # Ya está renderizado: no hay lead de render. Solo se
+                # replanifica si la franja quedó MUY atrás (backlog); un target
+                # recién vencido debe publicarse ya, no moverse.
+                grace = timedelta(minutes=max(0, int(stale_after_min or 10)))
+                if target_utc >= now_utc - grace:
+                    continue
+                slot_lead = 0
+                earliest = (now_utc + timedelta(minutes=5)).astimezone(tz)
+            else:
+                if target_utc >= now_utc + timedelta(minutes=lead):
+                    continue
+                slot_lead = lead
+                earliest = (max(now_utc, target_utc)
+                            + timedelta(minutes=lead + 5)).astimezone(tz)
             allocated = []
             try:
                 for day_offset in range(0, 5):
@@ -2299,7 +2456,7 @@ def retime_overdue_shorts_slots(db=None, now=None) -> int:
                         """SELECT target_publish_at, slot_rank, franja_dup_index
                            FROM shorts_planned_slots
                            WHERE channel_id = ? AND date_key = ? AND id != ?
-                             AND status IN ('pending', 'running')
+                             AND status IN ('pending', 'running', 'generated')
                              AND short_type = 'native'""",
                         (channel_id, new_local.date().isoformat(), slot["id"]),
                     ).fetchall()
@@ -2321,7 +2478,7 @@ def retime_overdue_shorts_slots(db=None, now=None) -> int:
                 logger.debug("[%s] retime collision check skipped: %s", slug, exc)
 
             new_utc = new_local.astimezone(UTC)
-            start_utc = new_utc - timedelta(minutes=lead)
+            start_utc = new_utc - timedelta(minutes=slot_lead)
             try:
                 with db._connect() as conn:
                     conn.execute(
@@ -2330,12 +2487,12 @@ def retime_overdue_shorts_slots(db=None, now=None) -> int:
                                   target_publish_at = ?, date_key = ?,
                                   slot_rank = ?, franja_dup_index = ?,
                                   updated_at = CURRENT_TIMESTAMP
-                            WHERE id = ? AND status = 'pending'""",
+                            WHERE id = ? AND status = ?""",
                         (start_utc.strftime("%Y-%m-%d %H:%M:%S"),
                          new_utc.strftime("%Y-%m-%d %H:%M:%S"),
                          new_utc.strftime("%Y-%m-%d %H:%M:%S"),
                          new_local.date().isoformat(), new_rank, dup_index,
-                         slot["id"]),
+                         slot["id"], slot.get("status") or "pending"),
                     )
                     conn.commit()
                 busy_local.append(new_local)
@@ -2350,6 +2507,40 @@ def retime_overdue_shorts_slots(db=None, now=None) -> int:
                                slug, slot["id"], exc)
     if moved:
         logger.info("Shorts reconcile: %d overdue slot(s) retimed", moved)
+    return moved
+
+
+_LAST_STALE_QUEUE_RETIME_AT = 0.0
+
+
+def _maybe_retime_stale_queued_shorts(db=None, *, interval_s: float = 300.0,
+                                      stale_after_min: int = 10) -> int:
+    """Replanifica slots YA GENERADOS cuya franja quedó atrás (backlog).
+
+    Se ejecuta en el tick del dispatcher, ANTES de la válvula de subida. Sin
+    esto, un slot `generated` con target de madrugada se drena en el primer
+    tick del día (patrón de ráfaga). Con esto, su target se mueve a la próxima
+    franja válida y la válvula lo retiene hasta entonces. Throttled para no
+    reescribir la cola en cada minuto.
+    """
+    global _LAST_STALE_QUEUE_RETIME_AT
+    now_ts = time.time()
+    if now_ts - _LAST_STALE_QUEUE_RETIME_AT < max(0.0, float(interval_s)):
+        return 0
+    _LAST_STALE_QUEUE_RETIME_AT = now_ts
+    if db is None:
+        from database.db_extended import ExtendedDatabase
+        db = ExtendedDatabase()
+    try:
+        moved = retime_overdue_shorts_slots(
+            db, statuses=("generated",), stale_after_min=stale_after_min,
+        )
+    except Exception as exc:
+        logger.warning("Stale queued short retime failed: %s", exc)
+        return 0
+    if moved:
+        logger.info("Shorts dispatch: %d stale queued slot(s) moved to a future franja",
+                    moved)
     return moved
 
 
@@ -3079,6 +3270,13 @@ def dispatch_next_due_shorts_slot(db=None, loop=None) -> dict | None:
     if _shorts_paused(db):
         logger.info("Shorts dispatch: shorts pausados por kill-switch (shorts_paused)")
         return None
+
+    # ── Backlog con franja vencida: replanificar ANTES de subir. Sin esto, un
+    # short `generated` con target de madrugada se drenaba en el primer tick.
+    try:
+        _maybe_retime_stale_queued_shorts(db)
+    except Exception as exc:
+        logger.warning("Shorts dispatch: stale queued retime failed: %s", exc)
 
     # ── Válvula de goteo PRIMERO: drena la cola de shorts en todos los ticks.
     # Único punto de subida de la cola. Respeta internamente TODOS los topes
@@ -5667,6 +5865,35 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
         )
         return short_id
 
+    # ── 4b. Esperar la franja pública ────────────────────────────────
+    # El render puede terminar ANTES del target (lead estimado de más). La
+    # subida es pública e inmediata, así que hay que esperar aquí: sin esta
+    # espera, todos los shorts del día se publicaban en cuanto terminaba el
+    # primer render (bug de distribución de franjas).
+    _publish_target = target_upload_at
+    if not _publish_target and slot_id:
+        try:
+            with dbx._connect() as _conn:
+                _row = _conn.execute(
+                    """SELECT target_publish_at, target_upload_at
+                         FROM shorts_planned_slots WHERE id = ?""",
+                    (slot_id,),
+                ).fetchone()
+            if _row:
+                _publish_target = (_row["target_publish_at"]
+                                   or _row["target_upload_at"])
+        except Exception as _t_exc:
+            logger.debug("[%s] publish target lookup failed: %s",
+                         channel_slug, _t_exc)
+    if _publish_target:
+        try:
+            _wait_until_publish_target(_publish_target, slot_id=slot_id)
+        except RuntimeError as _wait_exc:
+            logger.error("[%s] No se publica el short fuera de su franja: %s",
+                         channel_slug, _wait_exc)
+            _native_fail(slot_id, job_id, f"franja no alcanzable: {str(_wait_exc)[:200]}")
+            return None
+
     # 5. Upload
     from pipeline.youtube_uploader import YouTubeUploader
     uploader = YouTubeUploader(account_name=channel_slug, channel_slug=channel_slug)
@@ -5883,6 +6110,50 @@ def _upload_queued_short(short_record: dict, db=None, force_immediate: bool = Fa
         return False
     slug = ch["slug"]
 
+    # ── Franja planificada: nunca publicar antes de tiempo ni drenar backlog
+    # con target vencido (se replanifica). La subida manual forzada es la única
+    # excepción explícita del operador.
+    _target_raw = (short_record.get("target_publish_at")
+                   or short_record.get("target_upload_at"))
+    if not _target_raw:
+        # Callers that list the queue without joining slots (p. ej. el endpoint
+        # manual) deben respetar igualmente la franja: se resuelve desde el slot.
+        try:
+            with db._connect() as _tconn:
+                _trow = _tconn.execute(
+                    """SELECT target_publish_at, target_upload_at
+                         FROM shorts_planned_slots
+                        WHERE short_id = ? ORDER BY id DESC LIMIT 1""",
+                    (short_id,),
+                ).fetchone()
+            if _trow:
+                _target_raw = (_trow["target_publish_at"]
+                               or _trow["target_upload_at"])
+        except Exception:
+            pass
+    if not force_immediate:
+        _now_utc = datetime.now(UTC)
+        _target_dt = parse_utc(_target_raw) if _target_raw else None
+        if _target_dt is None:
+            logger.info(
+                "[%s] Queued short #%d sin franja planificada — se mantiene en cola "
+                "(no se publica a ciegas)", slug, short_id,
+            )
+            return False
+        if _target_dt > _now_utc + timedelta(minutes=1):
+            logger.debug(
+                "[%s] Queued short #%d retenido: su franja %s aún no llegó",
+                slug, short_id, _target_dt.strftime("%Y-%m-%d %H:%M"),
+            )
+            return False
+        if _publish_target_is_stale(_target_raw, grace_minutes=15, now=_now_utc):
+            logger.info(
+                "[%s] Queued short #%d con franja vencida (%s) — se replanifica "
+                "a la próxima franja en vez de publicarse en ráfaga",
+                slug, short_id, _target_dt.strftime("%Y-%m-%d %H:%M"),
+            )
+            return False
+
     file_path = short_record.get("file_path", "")
     if not file_path or not Path(file_path).exists():
         logger.warning("Queued short #%d: archivo no existe (%s) — marcando error", short_id, file_path)
@@ -5996,6 +6267,16 @@ def _upload_queued_short(short_record: dict, db=None, force_immediate: bool = Fa
                     return False
             except Exception as exc2:
                 logger.debug("[%s] spacing re-check skipped (fail-open): %s", slug, exc2)
+
+        # Re-check de franja con el lock adquirido: si mientras se esperaban
+        # los gates el target quedó vencido, se replanifica (no se publica).
+        if not force_immediate and _publish_target_is_stale(
+                _target_raw, grace_minutes=15):
+            logger.info(
+                "[%s] Queued short #%d: franja vencida durante la espera — "
+                "se replanifica", slug, short_id,
+            )
+            return False
 
         uploader = YouTubeUploader(account_name=slug, channel_slug=slug)
         if not uploader.authenticate():
@@ -6260,8 +6541,9 @@ def _upload_queued_shorts(db=None, max_per_pass: int = 3) -> int:
                 continue
         except Exception:
             pass
-        # Siguiente short en cola (FIFO, cualquier tipo)
-        queued = db.get_queued_shorts(cid, limit=1)
+        # Siguiente short en cola CUYA FRANJA YA LLEGÓ (orden por target, no
+        # por id). No se drena inventario futuro en cada tick.
+        queued = db.get_queued_shorts(cid, limit=1, due_only=True)
         if not queued:
             continue
         try:

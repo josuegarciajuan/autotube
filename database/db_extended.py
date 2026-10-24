@@ -11262,30 +11262,49 @@ class ExtendedDatabase(Database):
         """
         return self.get_queued_shorts(channel_id, limit=limit)
 
-    def get_queued_shorts(self, channel_id: int, limit: int = 1) -> list[dict]:
-        """Shorts nativos en cola listos para subir (FIFO).
+    def get_queued_shorts(self, channel_id: int, limit: int = 1,
+                          due_only: bool = False) -> list[dict]:
+        """Shorts nativos en cola listos para subir, ordenados por franja.
 
         Los clips están desactivados permanentemente y no pueden entrar en la
         cola. ``standalone`` fue un tipo histórico de generación y ya no se
         acepta como tipo persistido: las nuevas filas usan ``native``.
 
-        Devuelve los más antiguos primero (por id). Solo shorts con archivo en
-        disco y aún sin youtube_id.
+        Cada short se enlaza con su slot planificado (``short_id``) para
+        conocer su ``target_publish_at``. El orden es por HORA DE PUBLICACIÓN,
+        no por id: una cola FIFO ciega publicaba todo el backlog en la primera
+        oportunidad del día (bug de distribución de franjas).
+
+        ``due_only=True`` devuelve solo shorts cuya franja ya llegó. La válvula
+        de subida lo usa para no drenar inventario futuro en cada tick. Los
+        shorts sin slot/franja NO entran en ``due_only`` (no se publican a
+        ciegas): se quedan en cola hasta que el replanificador les asigne una.
         """
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                """SELECT id, channel_id, type, title, hook_title, hook_text, topic,
-                          source_video_id, file_path, status, created_at
-                    FROM shorts
-                     WHERE channel_id = ?
-                      AND type = 'native'
-                      AND status = 'generated'
-                     AND file_path IS NOT NULL AND file_path != ''
-                     AND (youtube_id IS NULL OR youtube_id = '')
-                   ORDER BY id ASC LIMIT ?""",
-                (channel_id, limit),
-            ).fetchall()
+            query = """SELECT s.id, s.channel_id, s.type, s.title, s.hook_title,
+                              s.hook_text, s.topic, s.source_video_id,
+                              s.file_path, s.status, s.created_at,
+                              sps.id AS slot_id,
+                              sps.target_publish_at AS target_publish_at,
+                              sps.scheduled_at AS scheduled_at
+                       FROM shorts s
+                       LEFT JOIN shorts_planned_slots sps
+                         ON sps.id = (
+                              SELECT MAX(x.id) FROM shorts_planned_slots x
+                               WHERE x.short_id = s.id
+                         )
+                       WHERE s.channel_id = ?
+                         AND s.type = 'native'
+                         AND s.status = 'generated'
+                         AND s.file_path IS NOT NULL AND s.file_path != ''
+                         AND (s.youtube_id IS NULL OR s.youtube_id = '')"""
+            if due_only:
+                query += (" AND sps.target_publish_at IS NOT NULL"
+                          " AND sps.target_publish_at <= datetime('now')")
+            query += (" ORDER BY COALESCE(sps.target_publish_at, '9999-12-31') ASC,"
+                      " s.id ASC LIMIT ?")
+            rows = conn.execute(query, (channel_id, limit)).fetchall()
         return [dict(r) for r in rows]
 
     def get_queued_generated_shorts(self) -> list[dict]:

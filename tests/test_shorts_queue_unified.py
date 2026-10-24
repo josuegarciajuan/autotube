@@ -62,6 +62,7 @@ def _db(tmp_path):
                 date_key TEXT NOT NULL,
                 scheduled_at TIMESTAMP NOT NULL,
                 target_upload_at TIMESTAMP,
+                target_publish_at TIMESTAMP,
                 short_type TEXT NOT NULL DEFAULT 'native',
                 status TEXT NOT NULL DEFAULT 'pending',
                 job_id INTEGER, short_id INTEGER,
@@ -113,17 +114,38 @@ def _db(tmp_path):
 
 
 def _seed_queued(db, channel_id: int, n: int, short_type: str = "native",
-                 status: str = "generated", file_path: str | None = None):
+                 status: str = "generated", file_path: str | None = None,
+                 target_publish_at: str | None = None):
+    """Inserta shorts en cola y su slot planificado.
+
+    Por defecto el target es 1 minuto en el pasado (franja ya llegada) para que
+    la válvula los considere ``due``; los tests de retención pasan un target
+    futuro o vencido explícito.
+    """
     from pathlib import Path
+    if target_publish_at is None:
+        target_publish_at = (
+            datetime.utcnow() - timedelta(minutes=1)
+        ).strftime("%Y-%m-%d %H:%M:%S")
     with db._connect() as conn:
         for i in range(n):
             fp = file_path or f"/tmp/queued_unified_{channel_id}_{i}.mp4"
             Path(fp).write_bytes(b"fake")
-            conn.execute(
+            cur = conn.execute(
                 """INSERT INTO shorts (channel_id, type, title, status, file_path)
                    VALUES (?, ?, ?, ?, ?)""",
                 (channel_id, short_type, f"{short_type}-{i}", status, fp),
             )
+            if short_type == "native" and status == "generated":
+                conn.execute(
+                    """INSERT INTO shorts_planned_slots
+                       (channel_id, date_key, scheduled_at, target_upload_at,
+                        target_publish_at, short_type, status, short_id)
+                       VALUES (?, date('now'), datetime('now'), ?, ?,
+                               'native', 'generated', ?)""",
+                    (channel_id, target_publish_at, target_publish_at,
+                     cur.lastrowid),
+                )
         conn.commit()
 
 
@@ -301,6 +323,60 @@ def test_valve_uploads_native_immediately_without_publish_at(patch_database_path
     assert ss._upload_queued_shorts(db, max_per_pass=1) == 1
     assert fake_uploader["uploads"][0]["privacy"] == "public"
     assert fake_uploader["uploads"][0]["publish_at"] is None
+
+
+def test_valve_holds_short_whose_franja_is_in_the_future(patch_database_path, fake_uploader):
+    """Nunca publicar un short antes de su target_publish_at."""
+    db, _ = patch_database_path
+    future = (datetime.utcnow() + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")
+    _seed_queued(db, 1, 1, target_publish_at=future)
+
+    assert ss._upload_queued_shorts(db, max_per_pass=1) == 0
+    assert fake_uploader["uploads"] == []
+    with db._connect() as conn:
+        row = conn.execute("SELECT status FROM shorts WHERE id=1").fetchone()
+    assert row["status"] == "generated"
+
+
+def test_valve_replans_stale_target_instead_of_publishing_in_a_burst(
+        patch_database_path, fake_uploader):
+    """Un target vencido se replanifica; no se drena en el primer tick."""
+    db, _ = patch_database_path
+    stale = (datetime.utcnow() - timedelta(hours=4)).strftime("%Y-%m-%d %H:%M:%S")
+    _seed_queued(db, 1, 1, target_publish_at=stale)
+
+    assert ss._upload_queued_shorts(db, max_per_pass=1) == 0
+    assert fake_uploader["uploads"] == []
+
+
+def test_valve_orders_due_queue_by_target_not_by_id(patch_database_path, fake_uploader):
+    """Con dos shorts due, primero el de franja más temprana (no el id menor)."""
+    db, _ = patch_database_path
+    now = datetime.utcnow()
+    _seed_queued(db, 1, 1, target_publish_at=(
+        now - timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S"))
+    _seed_queued(db, 1, 1, target_publish_at=(
+        now - timedelta(minutes=8)).strftime("%Y-%m-%d %H:%M:%S"))
+
+    assert ss._upload_queued_shorts(db, max_per_pass=1) == 1
+    # El segundo short (id mayor) tiene la franja más temprana.
+    with db._connect() as conn:
+        first = conn.execute("SELECT youtube_id FROM shorts WHERE id=1").fetchone()
+        second = conn.execute("SELECT youtube_id FROM shorts WHERE id=2").fetchone()
+    assert first["youtube_id"] is None
+    assert second["youtube_id"] == "fake-1"
+
+
+def test_queued_shorts_due_only_excludes_future_and_unplanned(tmp_path):
+    db, _ = _db(tmp_path)
+    _seed_queued(db, 1, 1, target_publish_at=(
+        datetime.utcnow() + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S"))
+    _seed_queued(db, 1, 1, target_publish_at=(
+        datetime.utcnow() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S"))
+
+    due = db.get_queued_shorts(1, limit=10, due_only=True)
+    assert len(due) == 1
+    assert due[0]["target_publish_at"] is not None
 
 
 # ── 4. Cooldown por última subida ────────────────────────────────
