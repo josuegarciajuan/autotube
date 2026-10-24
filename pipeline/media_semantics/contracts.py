@@ -204,9 +204,92 @@ def _positive_float(value: Any) -> float | None:
     return fvalue if fvalue > 0 else None
 
 
+def _first_str(data: dict[str, Any], *keys: str) -> str:
+    """Return the first non-empty string field (provider response order)."""
+    for key in keys:
+        value = data.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _infer_preview_type(url: str, declared: Any = "") -> str:
+    declared = str(declared or "").strip().lower()
+    if declared in ("image", "video"):
+        return declared
+    path = str(url or "").split("?", 1)[0].lower()
+    if path.endswith((".mp4", ".webm", ".mov", ".m4v")):
+        return "video"
+    if path.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif")):
+        return "image"
+    return ""
+
+
+def _preview_from_raw(raw: dict[str, Any]) -> dict[str, Any]:
+    """Extract a lightweight, provider-declared visual representation.
+
+    This only reads fields already present in the provider response.  It never
+    constructs a CDN URL.  Pexels exposes ``image`` plus ``video_pictures``;
+    Pixabay images expose ``webformatURL``; scraped providers may expose a
+    card ``<img>``.  Everything else is explicitly ``PREVIEW_UNAVAILABLE``.
+    """
+    thumbnail = _first_str(
+        raw, "thumbnail_url", "thumbnail", "image", "poster", "picture",
+        "preview_image",
+    )
+    explicit_preview = _first_str(
+        raw, "preview_url", "preview", "preview_video", "preview_video_url",
+        "video_preview", "preview_image",
+    )
+    preview = explicit_preview or _first_str(raw, "image")
+    # Pexels: video_pictures = [{"picture": "...", "nr": 0}, ...]
+    pictures = raw.get("video_pictures")
+    if isinstance(pictures, list) and pictures:
+        first = pictures[0]
+        if isinstance(first, dict):
+            picture = _first_str(first, "picture", "url", "src")
+            if picture:
+                preview = explicit_preview or picture
+                thumbnail = thumbnail or picture
+    if not thumbnail and preview:
+        ptype = _infer_preview_type(preview)
+        if ptype == "image":
+            thumbnail = preview
+    if not preview and thumbnail:
+        preview = thumbnail
+    ptype = _infer_preview_type(preview or thumbnail, raw.get("preview_type"))
+    # The P02 visual stage consumes still images.  A video-only preview is
+    # recorded (preview_type=video) but is not a fetchable still.
+    has_still = bool(thumbnail) or (bool(preview) and ptype == "image")
+    status = "PREVIEW_AVAILABLE" if has_still else "PREVIEW_UNAVAILABLE"
+    return {
+        "thumbnail_url": thumbnail,
+        "preview_url": preview,
+        "preview_type": ptype,
+        "preview_width": _positive_int(
+            raw.get("preview_width", raw.get("thumbnail_width"))
+        ),
+        "preview_height": _positive_int(
+            raw.get("preview_height", raw.get("thumbnail_height"))
+        ),
+        "preview_duration": _positive_float(
+            raw.get("preview_duration", raw.get("preview_duration_sec"))
+        ),
+        "visual_source": _first_str(raw, "visual_source") or "",
+        "preview_status": str(raw.get("preview_status") or status).upper(),
+    }
+
+
+PREVIEW_AVAILABLE = "PREVIEW_AVAILABLE"
+PREVIEW_UNAVAILABLE = "PREVIEW_UNAVAILABLE"
+
+
 @dataclass
 class Candidate:
-    """Provider-independent normalised candidate (metadata only, no download)."""
+    """Provider-independent normalised candidate (metadata + preview refs)."""
 
     provider: str
     provider_asset_id: str = ""
@@ -232,6 +315,12 @@ class Candidate:
     metadata_status: MetadataStatus = MetadataStatus.NO_METADATA
     metadata_completeness: float = 0.0
     searchable_text: str = ""
+    preview_type: str = ""
+    preview_width: int | None = None
+    preview_height: int | None = None
+    preview_duration: float | None = None
+    visual_source: str = ""
+    preview_status: str = PREVIEW_UNAVAILABLE
     raw_candidate: dict[str, Any] | None = field(default=None, repr=False, compare=False)
 
     # ── construction ──────────────────────────────────────────
@@ -265,14 +354,19 @@ class Candidate:
             parts.extend(tags)
         searchable = _norm_text(" ".join(parts))
         mtype = media_type or str(raw.get("type") or "video")
+        preview = _preview_from_raw(raw)
+        visual_source = (
+            preview.get("visual_source")
+            or (str(provider or raw.get("provider") or raw.get("source") or "unknown"))
+        )
         candidate = cls(
             provider=str(provider or raw.get("provider") or raw.get("source") or "unknown"),
             provider_asset_id=str(raw.get("id") or ""),
             asset_url=str(raw.get("url") or raw.get("download_url") or ""),
             download_url=str(raw.get("download_url") or raw.get("url") or ""),
             page_url=page_url,
-            preview_url=str(raw.get("preview_url") or ""),
-            thumbnail_url=str(raw.get("thumbnail_url") or ""),
+            preview_url=preview["preview_url"],
+            thumbnail_url=preview["thumbnail_url"],
             title=title,
             description=description,
             tags=tags,
@@ -287,6 +381,12 @@ class Candidate:
             provider_rank=int(provider_rank),
             page=int(page),
             media_type=mtype,
+            preview_type=preview["preview_type"],
+            preview_width=preview["preview_width"],
+            preview_height=preview["preview_height"],
+            preview_duration=preview["preview_duration"],
+            visual_source=visual_source,
+            preview_status=preview["preview_status"],
             raw_candidate=raw,
         )
         candidate.metadata_completeness = candidate.compute_completeness()
@@ -327,6 +427,27 @@ class Candidate:
         )
         return status != MetadataStatus.NO_METADATA.value and bool(self.searchable_text)
 
+    @property
+    def has_preview(self) -> bool:
+        """True only when a provider-declared lightweight still exists."""
+        return bool(
+            self.visual_representation_url
+            and str(self.preview_status or "").upper() != PREVIEW_UNAVAILABLE
+        )
+
+    @property
+    def visual_representation_url(self) -> str:
+        """Best still image for visual inspection (never the full video)."""
+        if self.thumbnail_url:
+            ttype = _infer_preview_type(self.thumbnail_url)
+            if ttype in ("", "image"):
+                return self.thumbnail_url
+        if self.preview_url and (
+            self.preview_type or _infer_preview_type(self.preview_url)
+        ) == "image":
+            return self.preview_url
+        return ""
+
     def to_dict(self) -> dict[str, Any]:
         status = (
             self.metadata_status.value
@@ -358,6 +479,12 @@ class Candidate:
             "metadata_status": status,
             "metadata_completeness": self.metadata_completeness,
             "searchable_text": self.searchable_text,
+            "preview_type": self.preview_type,
+            "preview_width": self.preview_width,
+            "preview_height": self.preview_height,
+            "preview_duration": self.preview_duration,
+            "visual_source": self.visual_source,
+            "preview_status": self.preview_status,
         }
 
     @classmethod
@@ -394,6 +521,19 @@ class Candidate:
             metadata_status=status,
             metadata_completeness=float(data.get("metadata_completeness") or 0.0),
             searchable_text=str(data.get("searchable_text") or ""),
+            preview_type=str(data.get("preview_type") or ""),
+            preview_width=data.get("preview_width"),
+            preview_height=data.get("preview_height"),
+            preview_duration=data.get("preview_duration"),
+            visual_source=str(data.get("visual_source") or ""),
+            preview_status=str(
+                data.get("preview_status")
+                or (
+                    PREVIEW_AVAILABLE
+                    if (data.get("thumbnail_url") or data.get("preview_type") == "image")
+                    else PREVIEW_UNAVAILABLE
+                )
+            ),
             raw_candidate=dict(data.get("raw_candidate") or {}) or None,
         )
 
@@ -445,6 +585,27 @@ class SelectionDecision:
     cost: dict[str, Any] = field(default_factory=dict)
     extra: dict[str, Any] = field(default_factory=dict)
 
+    # ── P02 visual intelligence provenance (additive, replayable) ──
+    visual_mode: str = ""
+    visual_backend: str = ""
+    visual_model: str = ""
+    visual_similarity: float | None = None
+    frame_scores: list[dict[str, Any]] = field(default_factory=list)
+    visual_constraints: dict[str, Any] = field(default_factory=dict)
+    visual_rejection_reason: str = ""
+    frames_sampled: int = 0
+    visual_verification_status: str = ""
+    visual_timing_ms: float = 0.0
+    visual_cost: dict[str, Any] = field(default_factory=dict)
+    degradation_level: str = ""
+    text_score: float = 0.0
+    visual_preview_relevance: float = 0.0
+    frame_relevance: float = 0.0
+    vlm_relevance: float = 0.0
+    negative_penalty: float = 0.0
+    era_penalty: float = 0.0
+    combined_score: float = 0.0
+
     @property
     def selected(self) -> bool:
         return self.status in (
@@ -471,6 +632,47 @@ class SelectionDecision:
             "timing_ms": round(float(self.timing_ms), 3),
             "cost": dict(self.cost),
             "extra": dict(self.extra),
+            "visual_mode": self.visual_mode,
+            "visual_backend": self.visual_backend,
+            "visual_model": self.visual_model,
+            "visual_similarity": (
+                None if self.visual_similarity is None
+                else round(float(self.visual_similarity), 6)
+            ),
+            "frame_scores": list(self.frame_scores),
+            "visual_constraints": dict(self.visual_constraints),
+            "visual_rejection_reason": self.visual_rejection_reason,
+            "frames_sampled": int(self.frames_sampled),
+            "visual_verification_status": self.visual_verification_status,
+            "visual_timing_ms": round(float(self.visual_timing_ms), 3),
+            "visual_cost": dict(self.visual_cost),
+            "degradation_level": self.degradation_level,
+            "text_score": round(float(self.text_score), 6),
+            "visual_preview_relevance": round(float(self.visual_preview_relevance), 6),
+            "frame_relevance": round(float(self.frame_relevance), 6),
+            "vlm_relevance": round(float(self.vlm_relevance), 6),
+            "negative_penalty": round(float(self.negative_penalty), 6),
+            "era_penalty": round(float(self.era_penalty), 6),
+            "combined_score": round(float(self.combined_score), 6),
+        }
+
+    def visual_summary(self) -> dict[str, Any]:
+        """Compact JSON-safe P02 summary for assets/logs (no blobs)."""
+        return {
+            "visual_mode": self.visual_mode,
+            "degradation_level": self.degradation_level,
+            "visual_backend": self.visual_backend,
+            "visual_model": self.visual_model,
+            "visual_similarity": self.visual_similarity,
+            "frame_scores": list(self.frame_scores),
+            "visual_constraints": dict(self.visual_constraints),
+            "visual_rejection_reason": self.visual_rejection_reason,
+            "frames_sampled": self.frames_sampled,
+            "visual_verification_status": self.visual_verification_status,
+            "visual_timing_ms": self.visual_timing_ms,
+            "visual_cost": dict(self.visual_cost),
+            "text_score": self.text_score,
+            "combined_score": self.combined_score,
         }
 
     @classmethod
@@ -500,4 +702,26 @@ class SelectionDecision:
             timing_ms=float(data.get("timing_ms") or 0.0),
             cost=dict(data.get("cost") or {}),
             extra=dict(data.get("extra") or {}),
+            visual_mode=str(data.get("visual_mode") or ""),
+            visual_backend=str(data.get("visual_backend") or ""),
+            visual_model=str(data.get("visual_model") or ""),
+            visual_similarity=(
+                None if data.get("visual_similarity") is None
+                else float(data.get("visual_similarity"))
+            ),
+            frame_scores=list(data.get("frame_scores") or []),
+            visual_constraints=dict(data.get("visual_constraints") or {}),
+            visual_rejection_reason=str(data.get("visual_rejection_reason") or ""),
+            frames_sampled=int(data.get("frames_sampled") or 0),
+            visual_verification_status=str(data.get("visual_verification_status") or ""),
+            visual_timing_ms=float(data.get("visual_timing_ms") or 0.0),
+            visual_cost=dict(data.get("visual_cost") or {}),
+            degradation_level=str(data.get("degradation_level") or ""),
+            text_score=float(data.get("text_score") or 0.0),
+            visual_preview_relevance=float(data.get("visual_preview_relevance") or 0.0),
+            frame_relevance=float(data.get("frame_relevance") or 0.0),
+            vlm_relevance=float(data.get("vlm_relevance") or 0.0),
+            negative_penalty=float(data.get("negative_penalty") or 0.0),
+            era_penalty=float(data.get("era_penalty") or 0.0),
+            combined_score=float(data.get("combined_score") or 0.0),
         )

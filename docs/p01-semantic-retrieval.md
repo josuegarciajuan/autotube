@@ -18,8 +18,9 @@ that path with:
 7. download only after ranking, with ordered fallback across approved candidates,
 8. a serialisable `SelectionDecision` persisted for audit and replay.
 
-Visual embeddings (CLIP/SigLIP), frame analysis and new providers are **out of
-scope** for P01. The embedding backend is pluggable so P02 can add them.
+Visual embeddings (CLIP/SigLIP), frame analysis and new providers were **out of
+scope** for P01. P02 now extends this same namespace under an explicit visual
+flag; see `docs/p02-visual-intelligence.md`. P01 remains the default.
 
 ## Feature flags
 
@@ -133,7 +134,8 @@ human review. Target corpus: 20–50 real scenes.
 
 ## Known limitations (deferred)
 
-* No visual embeddings / frame understanding yet (P02).
+* P01 itself has no visual embeddings / frame understanding; P02 adds them
+  behind `P02_VISUAL_MODE` and keeps P01 as the default.
 * The default `hashing` backend is HASH_VECTOR (lexical/distributional), not a
   neural semantic embedding. `sentence_transformers` is optional and isolated.
 * Default weights/threshold are uncalibrated until the benchmark is labelled.

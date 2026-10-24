@@ -30,6 +30,10 @@ def decision_record(
     data = decision.to_dict()
     spec = data.get("scene_spec") or {}
     winner = data.get("winner") or {}
+    cost = dict(data.get("cost") or {})
+    if decision.visual_mode:
+        # Persisted through the existing v72 cost_json column (no migration).
+        cost["visual"] = decision.visual_summary()
     return {
         "video_id": video_id,
         "channel_id": channel_id,
@@ -65,7 +69,16 @@ def decision_record(
             data.get("download_attempts") or [], ensure_ascii=False
         ),
         "timing_ms": float(data.get("timing_ms") or 0.0),
-        "cost_json": json.dumps(data.get("cost") or {}, ensure_ascii=False),
+        "cost_json": json.dumps(cost, ensure_ascii=False),
+        # P02 visual provenance is JSON-only (no images/base64), so the
+        # existing v72 table can persist it without a schema migration.
+        "visual_mode": data.get("visual_mode") or "",
+        "visual_backend": data.get("visual_backend") or "",
+        "degradation_level": data.get("degradation_level") or "",
+        "visual_rejection_reason": data.get("visual_rejection_reason") or "",
+        "visual_verification_status": data.get("visual_verification_status") or "",
+        "visual_timing_ms": float(data.get("visual_timing_ms") or 0.0),
+        "visual_json": json.dumps(decision.visual_summary(), ensure_ascii=False),
     }
 
 
@@ -98,6 +111,17 @@ def emit_decision_event(decision: SelectionDecision, **identity: Any) -> None:
             queries=(decision.queries or [])[:12],
             providers=(decision.providers_consulted or [])[:8],
             timing_ms=decision.timing_ms,
+            visual_mode=decision.visual_mode,
+            visual_backend=decision.visual_backend,
+            visual_model=decision.visual_model,
+            visual_similarity=decision.visual_similarity,
+            frames_sampled=decision.frames_sampled,
+            visual_verification_status=decision.visual_verification_status,
+            visual_rejection_reason=decision.visual_rejection_reason,
+            degradation_level=decision.degradation_level,
+            combined_score=decision.combined_score,
+            visual_timing_ms=decision.visual_timing_ms,
+            visual_cost=decision.visual_cost,
             **identity,
         )
     except Exception:

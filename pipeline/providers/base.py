@@ -30,6 +30,16 @@ class VideoAsset:
     title: str = ""
     tags: list[str] = field(default_factory=list)
     page_url: str = ""
+    # P02: provider-declared lightweight visual representation.  No full
+    # video download is required to populate these fields.
+    thumbnail_url: str = ""
+    preview_url: str = ""
+    preview_type: str = ""
+    preview_width: int | None = None
+    preview_height: int | None = None
+    preview_duration: float | None = None
+    visual_source: str = ""
+    preview_status: str = ""
 
 
 @dataclass

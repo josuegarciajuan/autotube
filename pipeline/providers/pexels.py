@@ -44,6 +44,24 @@ class PexelsVideoProvider(BaseVideoProvider):
     def name(self) -> str:
         return "pexels"
 
+    @staticmethod
+    def _visual_fields(video: dict) -> dict:
+        """Pexels response fields that describe a still preview (no download)."""
+        thumb = str(video.get("image") or "").strip()
+        pictures = video.get("video_pictures") or []
+        preview = ""
+        if isinstance(pictures, list) and pictures and isinstance(pictures[0], dict):
+            preview = str(pictures[0].get("picture") or "").strip()
+        thumb = thumb or preview
+        preview = preview or thumb
+        return {
+            "thumbnail_url": thumb,
+            "preview_url": preview,
+            "preview_type": "image" if preview else "",
+            "visual_source": "pexels:image" if preview else "",
+            "preview_status": "PREVIEW_AVAILABLE" if preview else "PREVIEW_UNAVAILABLE",
+        }
+
     def search(
         self,
         query: str,
@@ -119,6 +137,7 @@ class PexelsVideoProvider(BaseVideoProvider):
                 provider=self.name,
                 page_url=video.get("url", "") or "",
                 tags=self._slug_tags(video.get("url", "") or ""),
+                **self._visual_fields(video),
             )
 
         logger.info("Pexels: no suitable video for query=%r [%.1f–%.1fs]", query, min_duration, max_duration)
@@ -186,6 +205,7 @@ class PexelsVideoProvider(BaseVideoProvider):
                 provider=self.name,
                 page_url=video.get("url", "") or "",
                 tags=self._slug_tags(video.get("url", "") or ""),
+                **self._visual_fields(video),
             ))
 
         # total_results includes all pages; per_page * max_accessible_pages

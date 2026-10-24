@@ -46,6 +46,33 @@ class PixabayVideoProvider(BaseVideoProvider):
     def name(self) -> str:
         return "pixabay"
 
+    @staticmethod
+    def _visual_fields(hit: dict) -> dict:
+        """Use only fields the Pixabay response already provides.
+
+        The Videos API does not currently document a poster URL; if a future
+        response includes ``image``/``thumbnail``/``picture`` we use it, else
+        we explicitly mark PREVIEW_UNAVAILABLE (never invent a CDN URL).
+        """
+        thumb = str(
+            hit.get("image") or hit.get("thumbnail") or hit.get("picture") or ""
+        ).strip()
+        videos = hit.get("videos") or {}
+        if not thumb and isinstance(videos, dict):
+            for item in videos.values():
+                if isinstance(item, dict):
+                    candidate = str(item.get("thumbnail") or item.get("picture") or "").strip()
+                    if candidate:
+                        thumb = candidate
+                        break
+        return {
+            "thumbnail_url": thumb,
+            "preview_url": thumb,
+            "preview_type": "image" if thumb else "",
+            "visual_source": "pixabay:thumbnail" if thumb else "",
+            "preview_status": "PREVIEW_AVAILABLE" if thumb else "PREVIEW_UNAVAILABLE",
+        }
+
     def search(
         self,
         query: str,
@@ -120,6 +147,7 @@ class PixabayVideoProvider(BaseVideoProvider):
                 title=hit.get("user", "") or "",
                 tags=self._parse_tags(hit.get("tags", "")),
                 page_url=hit.get("pageURL", "") or "",
+                **self._visual_fields(hit),
             )
 
         logger.info("Pixabay: no suitable video for query=%r [%.1f–%.1fs]", query, min_duration, max_duration)
@@ -195,6 +223,7 @@ class PixabayVideoProvider(BaseVideoProvider):
                 title=hit.get("user", "") or "",
                 tags=self._parse_tags(hit.get("tags", "")),
                 page_url=hit.get("pageURL", "") or "",
+                **self._visual_fields(hit),
             ))
 
         return SearchPage(

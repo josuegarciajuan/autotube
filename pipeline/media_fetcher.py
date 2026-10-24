@@ -4468,6 +4468,10 @@ class MediaFetcher:
         asset["selection_score"] = decision.winner_score
         asset["scene_idx"] = scene_idx
         asset["scene_spec"] = spec.to_dict()
+        if decision.visual_mode:
+            asset["visual_selector"] = decision.visual_mode
+            asset["degradation_level"] = decision.degradation_level
+            asset["visual"] = decision.visual_summary()
         if decision.winner is not None:
             asset["candidate"] = decision.winner.to_dict()
         return asset
@@ -4670,6 +4674,14 @@ class MediaFetcher:
                     "title": getattr(asset, "title", ""),
                     "tags": getattr(asset, "tags", []) or [],
                     "page_url": getattr(asset, "page_url", ""),
+                    "thumbnail_url": getattr(asset, "thumbnail_url", "") or "",
+                    "preview_url": getattr(asset, "preview_url", "") or "",
+                    "preview_type": getattr(asset, "preview_type", "") or "",
+                    "preview_width": getattr(asset, "preview_width", None),
+                    "preview_height": getattr(asset, "preview_height", None),
+                    "preview_duration": getattr(asset, "preview_duration", None),
+                    "visual_source": getattr(asset, "visual_source", "") or "",
+                    "preview_status": getattr(asset, "preview_status", "") or "",
                     "_total_available": sp.total_available,
                     "_per_page": sp.per_page,
                 })
@@ -4709,6 +4721,12 @@ class MediaFetcher:
                     "width": img.get("width", 0) or 0,
                     "height": img.get("height", 0) or 0,
                     "description": img.get("description", "") or "",
+                    "thumbnail_url": img.get("thumbnail_url", "") or "",
+                    "preview_url": img.get("preview_url", "") or "",
+                    "preview_type": img.get("preview_type", "") or "",
+                    "preview_width": img.get("preview_width"),
+                    "preview_height": img.get("preview_height"),
+                    "visual_source": img.get("visual_source", "") or "",
                     "_total_available": total_available,
                     "_per_page": 50,
                 })

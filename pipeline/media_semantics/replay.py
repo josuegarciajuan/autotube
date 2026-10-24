@@ -31,7 +31,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .config import SemanticConfig
 from .contracts import Candidate, SceneSpec, SelectionDecision, SelectionStatus
@@ -257,6 +257,75 @@ class ReplayHarness:
                     "legacy": legacy.to_dict(),
                     "semantic": semantic.to_dict(),
                 },
+            })
+        return results
+
+    def replay_visual(
+        self,
+        *,
+        config: SemanticConfig | None = None,
+        visual_backend: Any = None,
+        preview_fetcher: Any = None,
+        frame_sampler: Any = None,
+        vlm_backend: Any = None,
+        source_loader: Callable[[Candidate], dict | None] | None = None,
+        threshold: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Replay the P02 visual funnel with local fixtures only.
+
+        ``source_loader`` maps a frozen candidate to a local asset dict (e.g.
+        ``{"path": "/fixtures/clip.mp4", "type": "video"}``).  Preview URLs in
+        the fixture may be local paths.  Nothing in this method touches the
+        network.
+        """
+        from .config import VisualConfig
+        from .selector import SemanticMediaSelector
+        from .visual_pipeline import VisualIntelligencePipeline
+
+        if config is None:
+            config = SemanticConfig(
+                mode="semantic",
+                visual=VisualConfig(mode="full_visual"),
+            )
+        elif config.visual.mode in ("", "off"):
+            config.visual = VisualConfig(mode="full_visual")
+        selector = SemanticMediaSelector(config=config)
+
+        def download_fn(candidate: Candidate) -> dict | None:
+            if source_loader is None:
+                return None
+            try:
+                return source_loader(candidate)
+            except Exception:
+                return None
+
+        pipeline = VisualIntelligencePipeline(
+            config=config,
+            textual_selector=selector,
+            visual_backend=visual_backend,
+            vlm_backend=vlm_backend,
+            preview_fetcher=preview_fetcher,
+            frame_sampler=frame_sampler,
+            download_fn=download_fn,
+        )
+        results: list[dict[str, Any]] = []
+        for scene in self.scenes:
+            decision = pipeline.select_and_download(
+                scene.scene_spec, scene.candidates, download_fn,
+                threshold=threshold,
+            )
+            decision.timing_ms = 0.0
+            decision.visual_timing_ms = 0.0
+            payload = decision.to_dict()
+            results.append({
+                "scene_id": scene.scene_id,
+                "candidate_count": len(scene.candidates),
+                "status": decision.status.value,
+                "winner": (
+                    decision.winner.to_dict() if decision.winner is not None else None
+                ),
+                "visual": decision.visual_summary(),
+                "detail": payload,
             })
         return results
 

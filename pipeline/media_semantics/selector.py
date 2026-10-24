@@ -36,9 +36,11 @@ class SemanticMediaSelector:
         self,
         config: SemanticConfig | None = None,
         ranker: SemanticTextRanker | None = None,
+        visual_pipeline: Any = None,
     ) -> None:
         self.config = config or SemanticConfig()
         self.ranker = ranker or SemanticTextRanker(weights=self.config.weights)
+        self._visual_pipeline = visual_pipeline
 
     # ── ranking only (metadata) ───────────────────────────────
     def rank(
@@ -177,6 +179,20 @@ class SemanticMediaSelector:
         approved candidate is tried without re-running retrieval.
         """
         started = time.time()
+        # P02: when visual mode is enabled, extend (not replace) the same
+        # selector with the bounded visual funnel.  Default mode stays off.
+        if (
+            self.config.visual.enabled
+            and str(self.config.visual.mode).lower() not in ("off", "text_only")
+        ):
+            pipeline = self._get_visual_pipeline()
+            if pipeline is not None:
+                return pipeline.select_and_download(
+                    scene_spec, candidates, download_fn,
+                    threshold=threshold,
+                    pre_filter=pre_filter,
+                    pre_download_filter=pre_download_filter,
+                )
         decision = self.rank(
             scene_spec, candidates, threshold=threshold, pre_filter=pre_filter
         )
@@ -258,3 +274,22 @@ class SemanticMediaSelector:
             "downloads_attempted": len(decision.download_attempts),
         }
         return decision
+
+    def _get_visual_pipeline(self):
+        """Lazily build the P02 funnel with this selector as its text stage."""
+        if self._visual_pipeline is not None:
+            return self._visual_pipeline
+        try:
+            from .visual_pipeline import VisualIntelligencePipeline
+
+            self._visual_pipeline = VisualIntelligencePipeline(
+                config=self.config, textual_selector=self,
+            )
+            return self._visual_pipeline
+        except Exception as exc:  # fail-open to textual behaviour
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "P02 visual pipeline unavailable (%s) — degrading to text", exc
+            )
+            return None
