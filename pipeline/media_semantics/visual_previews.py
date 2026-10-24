@@ -33,6 +33,13 @@ _IMAGE_MAGIC = (
 )
 
 
+def _is_avif(data: bytes) -> bool:
+    """AVIF/HEIF container detection (``....ftypavif``)."""
+    return len(data) >= 12 and data[4:8] == b"ftyp" and data[8:12] in (
+        b"avif", b"avis", b"heic", b"heix", b"mif1",
+    )
+
+
 def _detect_image_mime(data: bytes) -> str:
     for magic, mime in _IMAGE_MAGIC:
         if data.startswith(magic):
@@ -247,9 +254,13 @@ class PreviewFetcher:
             def getter(u, **kwargs):
                 return requests.get(u, **kwargs)
 
+        # Do NOT advertise AVIF: Pexels honours it, but the embedding stack
+        # (Pillow without an AVIF plugin) cannot decode it, and the preview
+        # would be silently discarded as ``not_an_image``.  Request formats the
+        # encoder can actually read.
         headers = {
             "User-Agent": "Mozilla/5.0 (compatible; autotube-p02/1.0)",
-            "Accept": "image/avif,image/webp,image/png,image/jpeg,image/*;q=0.8",
+            "Accept": "image/webp,image/png,image/jpeg,image/*;q=0.8",
         }
         if "pixabay" in str(candidate.provider).lower():
             headers["Referer"] = "https://pixabay.com/"
@@ -292,9 +303,10 @@ class PreviewFetcher:
                 pass
         mime = _detect_image_mime(data)
         if not mime:
+            error = "avif_unsupported" if _is_avif(data) else "not_an_image"
             return PreviewResult(
                 candidate_key=key, status=PREVIEW_UNAVAILABLE, url=url,
-                visual_source=candidate.visual_source, error="not_an_image", bytes=len(data),
+                visual_source=candidate.visual_source, error=error, bytes=len(data),
             )
         self._work_dir.mkdir(parents=True, exist_ok=True)
         suffix = {

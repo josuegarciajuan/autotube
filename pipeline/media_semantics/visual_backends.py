@@ -40,6 +40,22 @@ def _normalise(vector: Any) -> list[float]:
     return values
 
 
+def _feature_tensor(features: Any) -> Any:
+    """Return the projected embedding tensor from a Transformers output.
+
+    Transformers <5 returned a plain tensor from ``get_text_features`` /
+    ``get_image_features``.  Transformers 5 wraps it in a
+    ``BaseModelOutputWithPooling`` whose ``pooler_output`` already holds the
+    projected (e.g. 512-d) embedding.  Accept both shapes so a library upgrade
+    does not silently disable the visual backend.
+    """
+    if hasattr(features, "pooler_output"):
+        pooled = features.pooler_output
+        if pooled is not None:
+            return pooled
+    return features
+
+
 class NullVisualEmbeddingBackend:
     name = "none"
     model_version = "none"
@@ -120,7 +136,7 @@ class _TransformerVisualBackend:
             )
             inputs = {k: v.to(self._device) for k, v in inputs.items()}
             with torch.no_grad():
-                features = self._model.get_text_features(**inputs)
+                features = _feature_tensor(self._model.get_text_features(**inputs))
             features = features / features.norm(p=2, dim=-1, keepdim=True).clamp(min=1e-12)
             return [_normalise(v) for v in features.cpu().tolist()]
         except Exception as exc:  # noqa: BLE001
@@ -143,7 +159,7 @@ class _TransformerVisualBackend:
             inputs = self._processor(images=images, return_tensors="pt")
             inputs = {k: v.to(self._device) for k, v in inputs.items()}
             with torch.no_grad():
-                features = self._model.get_image_features(**inputs)
+                features = _feature_tensor(self._model.get_image_features(**inputs))
             features = features / features.norm(p=2, dim=-1, keepdim=True).clamp(min=1e-12)
             return [_normalise(v) for v in features.cpu().tolist()]
         except Exception as exc:  # noqa: BLE001

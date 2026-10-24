@@ -1,0 +1,114 @@
+{
+  "model_load": {
+    "processor_s": 0.32,
+    "model_s": 0.57,
+    "total_s": 0.89,
+    "parameters_m": 151.28,
+    "cache_bytes": 1214021544
+  },
+  "embedding_throughput": {
+    "texts": 32,
+    "images": 32,
+    "text_seconds_best": 0.261,
+    "image_seconds_best": 3.499,
+    "texts_per_second": 122.68,
+    "images_per_second": 9.15,
+    "maxrss_mb": 1326.8
+  },
+  "preview": {
+    "count_ok": 432,
+    "bytes_mean": 65002.4,
+    "latency_mean_ms": 349.88,
+    "latency_p90_ms": 506.6
+  },
+  "frame_extraction": {
+    "status": "OK",
+    "frame_count": 6,
+    "best_seconds": 1.443,
+    "per_frame_ms": 240.54,
+    "maxrss_mb": 1326.8
+  },
+  "visual_scoring": {
+    "mean_ms": 4395.47,
+    "total_ms": 158236.78
+  },
+  "vlm": {
+    "calls": 310,
+    "latency_mean_ms": 1655.15,
+    "prompt_tokens": 1032761,
+    "completion_tokens": 28538,
+    "approx_cost_usd": 0.172,
+    "pricing_note": "gpt-4o-mini public list price at measurement time; approximate"
+  },
+  "peak_rss_mb": 1326.8,
+  "network": {
+    "requests": 134,
+    "bytes": 239292218,
+    "downloads": 16,
+    "previews": 432,
+    "frames": 96,
+    "per_provider": {
+      "coverr": {
+        "requests": 10,
+        "bytes": 0,
+        "downloads": 0,
+        "previews": 0,
+        "frames": 0
+      },
+      "mixkit": {
+        "requests": 10,
+        "bytes": 0,
+        "downloads": 0,
+        "previews": 0,
+        "frames": 0
+      },
+      "pexels": {
+        "requests": 42,
+        "bytes": 188606369,
+        "downloads": 11,
+        "previews": 210,
+        "frames": 0
+      },
+      "pixabay": {
+        "requests": 42,
+        "bytes": 37819737,
+        "downloads": 5,
+        "previews": 42,
+        "frames": 0
+      },
+      "pixabay_photo": {
+        "requests": 30,
+        "bytes": 12866112,
+        "downloads": 0,
+        "previews": 180,
+        "frames": 0
+      }
+    },
+    "errors": [
+      "download too large (50867297 bytes): https://videos.pexels.com/video-files/30131338/12921229_1920_1080_30fps.mp4",
+      "download too large (38740516 bytes): https://videos.pexels.com/video-files/30402965/13029803_1920_1080_30fps.mp4",
+      "download too large (81370751 bytes): https://videos.pexels.com/video-files/30546582/13084219_1920_1080_30fps.mp4",
+      "download too large (51049731 bytes): https://videos.pexels.com/video-files/30503893/13069316_1920_1080_30fps.mp4",
+      "download too large (34675500 bytes): https://videos.pexels.com/video-files/40159453/17153072_1920_1080_24fps.mp4",
+      "download too large (73611759 bytes): https://videos.pexels.com/video-files/26860633/12023138_1920_1080_60fps.mp4"
+    ]
+  },
+  "typical_video": {
+    "average_scenes_per_video": 37.74,
+    "min": 1,
+    "max": 1632,
+    "videos_with_scenes": 568
+  },
+  "estimate_20min_video": {
+    "scenes_per_video": 37.74,
+    "formula": "scenes × (previews×preview_latency + downloads×frames×frame_latency + visual_scoring_latency + vlm_candidates×vlm_latency); bytes = scenes × (previews×avg_preview_bytes + downloads×avg_video_bytes)",
+    "preview_seconds": 158.5,
+    "frame_extraction_seconds": 108.9,
+    "visual_scoring_seconds": 165.9,
+    "vlm_seconds": 124.9,
+    "total_seconds_excluding_downloads": 558.2,
+    "preview_bytes": 29438280,
+    "video_bytes": 996388774,
+    "total_bytes": 1025827055
+  }
+}

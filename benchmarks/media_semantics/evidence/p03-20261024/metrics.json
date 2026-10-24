@@ -1,0 +1,779 @@
+{
+  "run_id": "p03-20261024",
+  "before": {
+    "arms": {
+      "legacy": {
+        "scenes": 36,
+        "auto_evaluated": 36,
+        "auto_coverage": 1.0,
+        "candidate_auto_evaluated": 108,
+        "top1_relevance_mean": 0.2694,
+        "top1_relevance_median": 0.3,
+        "relevant_rate": 0.1389,
+        "subject_match_mean": 0.2083,
+        "action_match_mean": 0.125,
+        "environment_match_mean": 0.4167,
+        "era_violations": 3,
+        "era_scenes": 4,
+        "must_avoid_violations": 0,
+        "no_good_candidate_rate": 0.0,
+        "generic_fallback_rate": 0.4167,
+        "provider_distribution": {
+          "pexels": 13,
+          "pixabay": 8,
+          "pixabay_photo": 15
+        },
+        "latency_mean_ms": 4983.85,
+        "latency_total_ms": 179418.47,
+        "candidate_top3_relevance_mean": 0.2889
+      },
+      "semantic_text": {
+        "scenes": 36,
+        "auto_evaluated": 19,
+        "auto_coverage": 0.5278,
+        "candidate_auto_evaluated": 108,
+        "top1_relevance_mean": 0.3605,
+        "top1_relevance_median": 0.3,
+        "relevant_rate": 0.2632,
+        "subject_match_mean": 0.3158,
+        "action_match_mean": 0.2368,
+        "environment_match_mean": 0.5263,
+        "era_violations": 1,
+        "era_scenes": 2,
+        "must_avoid_violations": 0,
+        "no_good_candidate_rate": 0.4722,
+        "generic_fallback_rate": 0.2632,
+        "provider_distribution": {
+          "pexels": 7,
+          "pixabay": 7,
+          "pixabay_photo": 5
+        },
+        "latency_mean_ms": 4930.97,
+        "latency_total_ms": 177515.07,
+        "candidate_top3_relevance_mean": 0.3306
+      },
+      "semantic_visual": {
+        "scenes": 36,
+        "auto_evaluated": 34,
+        "auto_coverage": 0.9444,
+        "candidate_auto_evaluated": 108,
+        "top1_relevance_mean": 0.3412,
+        "top1_relevance_median": 0.3,
+        "relevant_rate": 0.2059,
+        "subject_match_mean": 0.2794,
+        "action_match_mean": 0.1471,
+        "environment_match_mean": 0.5147,
+        "era_violations": 2,
+        "era_scenes": 5,
+        "must_avoid_violations": 0,
+        "no_good_candidate_rate": 0.1389,
+        "generic_fallback_rate": 0.4167,
+        "provider_distribution": {
+          "pexels": 11,
+          "pixabay": 10,
+          "pixabay_photo": 15
+        },
+        "latency_mean_ms": 4904.58,
+        "latency_total_ms": 176564.98,
+        "candidate_top3_relevance_mean": 0.3761
+      }
+    },
+    "paired": {
+      "legacy_vs_semantic_text": {
+        "n": 19,
+        "mean_delta": 0.0395,
+        "wins": 3,
+        "losses": 1,
+        "ties": 15
+      },
+      "legacy_vs_semantic_visual": {
+        "n": 34,
+        "mean_delta": 0.0735,
+        "wins": 7,
+        "losses": 2,
+        "ties": 25
+      },
+      "semantic_text_vs_semantic_visual": {
+        "n": 18,
+        "mean_delta": 0.0167,
+        "wins": 1,
+        "losses": 0,
+        "ties": 17
+      }
+    },
+    "overall": {
+      "network": {
+        "requests": 134,
+        "bytes": 239292218,
+        "downloads": 16,
+        "previews": 432,
+        "frames": 0,
+        "per_provider": {
+          "coverr": {
+            "requests": 10,
+            "bytes": 0,
+            "downloads": 0,
+            "previews": 0,
+            "frames": 0
+          },
+          "mixkit": {
+            "requests": 10,
+            "bytes": 0,
+            "downloads": 0,
+            "previews": 0,
+            "frames": 0
+          },
+          "pexels": {
+            "requests": 42,
+            "bytes": 188606369,
+            "downloads": 11,
+            "previews": 210,
+            "frames": 0
+          },
+          "pixabay": {
+            "requests": 42,
+            "bytes": 37819737,
+            "downloads": 5,
+            "previews": 42,
+            "frames": 0
+          },
+          "pixabay_photo": {
+            "requests": 30,
+            "bytes": 12866112,
+            "downloads": 0,
+            "previews": 180,
+            "frames": 0
+          }
+        },
+        "errors": [
+          "download too large (50867297 bytes): https://videos.pexels.com/video-files/30131338/12921229_1920_1080_30fps.mp4",
+          "download too large (38740516 bytes): https://videos.pexels.com/video-files/30402965/13029803_1920_1080_30fps.mp4",
+          "download too large (81370751 bytes): https://videos.pexels.com/video-files/30546582/13084219_1920_1080_30fps.mp4",
+          "download too large (51049731 bytes): https://videos.pexels.com/video-files/30503893/13069316_1920_1080_30fps.mp4",
+          "download too large (34675500 bytes): https://videos.pexels.com/video-files/40159453/17153072_1920_1080_24fps.mp4",
+          "download too large (73611759 bytes): https://videos.pexels.com/video-files/26860633/12023138_1920_1080_60fps.mp4"
+        ]
+      },
+      "scenes": 36,
+      "auto_eval_records": 324,
+      "auto_eval_ok": 89,
+      "frames_sampled": 96,
+      "vlm_calls": 89,
+      "vlm_prompt_tokens": 296335,
+      "vlm_completion_tokens": 8066,
+      "vlm_latency_mean_ms": 1613.57
+    },
+    "label": "before",
+    "timestamp": "2026-10-24T16:11:47.196249+00:00"
+  },
+  "after": {
+    "arms": {
+      "legacy": {
+        "scenes": 36,
+        "auto_evaluated": 36,
+        "auto_coverage": 1.0,
+        "candidate_auto_evaluated": 108,
+        "top1_relevance_mean": 0.2694,
+        "top1_relevance_median": 0.3,
+        "relevant_rate": 0.1667,
+        "subject_match_mean": 0.2083,
+        "action_match_mean": 0.125,
+        "environment_match_mean": 0.4167,
+        "era_violations": 3,
+        "era_scenes": 4,
+        "must_avoid_violations": 0,
+        "no_good_candidate_rate": 0.0,
+        "generic_fallback_rate": 0.4167,
+        "provider_distribution": {
+          "pexels": 13,
+          "pixabay": 8,
+          "pixabay_photo": 15
+        },
+        "latency_mean_ms": 4459.1,
+        "latency_total_ms": 160527.61,
+        "candidate_top3_relevance_mean": 0.2889
+      },
+      "semantic_text": {
+        "scenes": 36,
+        "auto_evaluated": 31,
+        "auto_coverage": 0.8611,
+        "candidate_auto_evaluated": 108,
+        "top1_relevance_mean": 0.35,
+        "top1_relevance_median": 0.3,
+        "relevant_rate": 0.1935,
+        "subject_match_mean": 0.2419,
+        "action_match_mean": 0.1774,
+        "environment_match_mean": 0.5161,
+        "era_violations": 1,
+        "era_scenes": 3,
+        "must_avoid_violations": 0,
+        "no_good_candidate_rate": 0.1389,
+        "generic_fallback_rate": 0.3871,
+        "provider_distribution": {
+          "pexels": 9,
+          "pixabay": 10,
+          "pixabay_photo": 12
+        },
+        "latency_mean_ms": 4416.98,
+        "latency_total_ms": 159011.19,
+        "candidate_top3_relevance_mean": 0.3269
+      },
+      "semantic_visual": {
+        "scenes": 36,
+        "auto_evaluated": 34,
+        "auto_coverage": 0.9444,
+        "candidate_auto_evaluated": 108,
+        "top1_relevance_mean": 0.3544,
+        "top1_relevance_median": 0.3,
+        "relevant_rate": 0.2059,
+        "subject_match_mean": 0.25,
+        "action_match_mean": 0.1618,
+        "environment_match_mean": 0.5147,
+        "era_violations": 2,
+        "era_scenes": 5,
+        "must_avoid_violations": 0,
+        "no_good_candidate_rate": 0.1389,
+        "generic_fallback_rate": 0.4167,
+        "provider_distribution": {
+          "pexels": 11,
+          "pixabay": 10,
+          "pixabay_photo": 15
+        },
+        "latency_mean_ms": 4395.47,
+        "latency_total_ms": 158236.78,
+        "candidate_top3_relevance_mean": 0.3686
+      }
+    },
+    "paired": {
+      "legacy_vs_semantic_text": {
+        "n": 31,
+        "mean_delta": 0.0661,
+        "wins": 7,
+        "losses": 1,
+        "ties": 23
+      },
+      "legacy_vs_semantic_visual": {
+        "n": 34,
+        "mean_delta": 0.0956,
+        "wins": 9,
+        "losses": 1,
+        "ties": 24
+      },
+      "semantic_text_vs_semantic_visual": {
+        "n": 29,
+        "mean_delta": 0.0103,
+        "wins": 1,
+        "losses": 0,
+        "ties": 28
+      }
+    },
+    "overall": {
+      "network": {
+        "requests": 134,
+        "bytes": 239292218,
+        "downloads": 16,
+        "previews": 432,
+        "frames": 0,
+        "per_provider": {
+          "coverr": {
+            "requests": 10,
+            "bytes": 0,
+            "downloads": 0,
+            "previews": 0,
+            "frames": 0
+          },
+          "mixkit": {
+            "requests": 10,
+            "bytes": 0,
+            "downloads": 0,
+            "previews": 0,
+            "frames": 0
+          },
+          "pexels": {
+            "requests": 42,
+            "bytes": 188606369,
+            "downloads": 11,
+            "previews": 210,
+            "frames": 0
+          },
+          "pixabay": {
+            "requests": 42,
+            "bytes": 37819737,
+            "downloads": 5,
+            "previews": 42,
+            "frames": 0
+          },
+          "pixabay_photo": {
+            "requests": 30,
+            "bytes": 12866112,
+            "downloads": 0,
+            "previews": 180,
+            "frames": 0
+          }
+        },
+        "errors": [
+          "download too large (50867297 bytes): https://videos.pexels.com/video-files/30131338/12921229_1920_1080_30fps.mp4",
+          "download too large (38740516 bytes): https://videos.pexels.com/video-files/30402965/13029803_1920_1080_30fps.mp4",
+          "download too large (81370751 bytes): https://videos.pexels.com/video-files/30546582/13084219_1920_1080_30fps.mp4",
+          "download too large (51049731 bytes): https://videos.pexels.com/video-files/30503893/13069316_1920_1080_30fps.mp4",
+          "download too large (34675500 bytes): https://videos.pexels.com/video-files/40159453/17153072_1920_1080_24fps.mp4",
+          "download too large (73611759 bytes): https://videos.pexels.com/video-files/26860633/12023138_1920_1080_60fps.mp4"
+        ]
+      },
+      "scenes": 36,
+      "auto_eval_records": 324,
+      "auto_eval_ok": 101,
+      "frames_sampled": 96,
+      "vlm_calls": 101,
+      "vlm_prompt_tokens": 336447,
+      "vlm_completion_tokens": 9254,
+      "vlm_latency_mean_ms": 1635.56
+    },
+    "label": "after",
+    "timestamp": "2026-10-24T16:11:47.399574+00:00"
+  },
+  "calibration": {
+    "p01_min_relevance_score": {
+      "before": 0.26,
+      "after": 0.18,
+      "rationale": "sweep P=0.24 R=0.85 coverage=0.73 at 0.18",
+      "sweep": [
+        {
+          "threshold": 0.1,
+          "evaluated_candidates": 158,
+          "accepted": 158,
+          "precision": 0.2089,
+          "recall": 1.0,
+          "coverage": 1.0
+        },
+        {
+          "threshold": 0.12,
+          "evaluated_candidates": 158,
+          "accepted": 150,
+          "precision": 0.2133,
+          "recall": 0.9697,
+          "coverage": 0.9494
+        },
+        {
+          "threshold": 0.14,
+          "evaluated_candidates": 158,
+          "accepted": 139,
+          "precision": 0.2158,
+          "recall": 0.9091,
+          "coverage": 0.8797
+        },
+        {
+          "threshold": 0.16,
+          "evaluated_candidates": 158,
+          "accepted": 132,
+          "precision": 0.2121,
+          "recall": 0.8485,
+          "coverage": 0.8354
+        },
+        {
+          "threshold": 0.18,
+          "evaluated_candidates": 158,
+          "accepted": 115,
+          "precision": 0.2435,
+          "recall": 0.8485,
+          "coverage": 0.7278
+        },
+        {
+          "threshold": 0.2,
+          "evaluated_candidates": 158,
+          "accepted": 97,
+          "precision": 0.2577,
+          "recall": 0.7576,
+          "coverage": 0.6139
+        },
+        {
+          "threshold": 0.22,
+          "evaluated_candidates": 158,
+          "accepted": 74,
+          "precision": 0.2838,
+          "recall": 0.6364,
+          "coverage": 0.4684
+        },
+        {
+          "threshold": 0.24,
+          "evaluated_candidates": 158,
+          "accepted": 65,
+          "precision": 0.3077,
+          "recall": 0.6061,
+          "coverage": 0.4114
+        },
+        {
+          "threshold": 0.26,
+          "evaluated_candidates": 158,
+          "accepted": 47,
+          "precision": 0.3404,
+          "recall": 0.4848,
+          "coverage": 0.2975
+        },
+        {
+          "threshold": 0.3,
+          "evaluated_candidates": 158,
+          "accepted": 20,
+          "precision": 0.4,
+          "recall": 0.2424,
+          "coverage": 0.1266
+        }
+      ]
+    },
+    "visual_combined_threshold": {
+      "before": 0.26,
+      "after": 0.26,
+      "rationale": "sweep P=0.28 R=0.76 coverage=0.57 at 0.26",
+      "sweep": [
+        {
+          "threshold": 0.06,
+          "evaluated_candidates": 155,
+          "accepted": 155,
+          "precision": 0.2129,
+          "recall": 1.0,
+          "coverage": 1.0
+        },
+        {
+          "threshold": 0.08,
+          "evaluated_candidates": 155,
+          "accepted": 155,
+          "precision": 0.2129,
+          "recall": 1.0,
+          "coverage": 1.0
+        },
+        {
+          "threshold": 0.1,
+          "evaluated_candidates": 155,
+          "accepted": 155,
+          "precision": 0.2129,
+          "recall": 1.0,
+          "coverage": 1.0
+        },
+        {
+          "threshold": 0.12,
+          "evaluated_candidates": 155,
+          "accepted": 155,
+          "precision": 0.2129,
+          "recall": 1.0,
+          "coverage": 1.0
+        },
+        {
+          "threshold": 0.14,
+          "evaluated_candidates": 155,
+          "accepted": 155,
+          "precision": 0.2129,
+          "recall": 1.0,
+          "coverage": 1.0
+        },
+        {
+          "threshold": 0.16,
+          "evaluated_candidates": 155,
+          "accepted": 152,
+          "precision": 0.2171,
+          "recall": 1.0,
+          "coverage": 0.9806
+        },
+        {
+          "threshold": 0.18,
+          "evaluated_candidates": 155,
+          "accepted": 150,
+          "precision": 0.22,
+          "recall": 1.0,
+          "coverage": 0.9677
+        },
+        {
+          "threshold": 0.2,
+          "evaluated_candidates": 155,
+          "accepted": 138,
+          "precision": 0.2319,
+          "recall": 0.9697,
+          "coverage": 0.8903
+        },
+        {
+          "threshold": 0.24,
+          "evaluated_candidates": 155,
+          "accepted": 105,
+          "precision": 0.2476,
+          "recall": 0.7879,
+          "coverage": 0.6774
+        },
+        {
+          "threshold": 0.26,
+          "evaluated_candidates": 155,
+          "accepted": 88,
+          "precision": 0.2841,
+          "recall": 0.7576,
+          "coverage": 0.5677
+        }
+      ]
+    },
+    "ranking_weights": {
+      "before": {
+        "semantic": 0.35,
+        "lexical": 0.15,
+        "action": 0.18,
+        "subject": 0.12,
+        "environment": 0.08,
+        "era": 0.05,
+        "metadata_quality": 0.04,
+        "provider_prior": 0.03,
+        "negative_constraint": 0.5,
+        "no_metadata_ceiling": 0.12
+      },
+      "after": {
+        "semantic": 0.35,
+        "lexical": 0.15,
+        "action": 0.18,
+        "subject": 0.12,
+        "environment": 0.08,
+        "era": 0.05,
+        "metadata_quality": 0.04,
+        "provider_prior": 0.03,
+        "negative_constraint": 0.5,
+        "no_metadata_ceiling": 0.12
+      },
+      "rationale": "kept: auto-evaluation did not show a large component advantage",
+      "correlations": {
+        "n": 158,
+        "score": 0.3607,
+        "semantic": 0.2809,
+        "lexical": 0.1215,
+        "subject_match": 0.2076,
+        "action_match": 0.0662,
+        "environment_match": 0.0833,
+        "text": null,
+        "preview": null,
+        "frame": null
+      }
+    },
+    "visual_weights": {
+      "before": {
+        "text": 0.5,
+        "preview": 0.15,
+        "frame": 0.2,
+        "vlm": 0.15,
+        "technical_quality": 0.05,
+        "negative_penalty": 0.6,
+        "era_penalty": 0.3,
+        "must_include_penalty": 0.25
+      },
+      "after": {
+        "text": 0.5,
+        "preview": 0.15,
+        "frame": 0.2,
+        "vlm": 0.15,
+        "technical_quality": 0.05,
+        "negative_penalty": 0.6,
+        "era_penalty": 0.3,
+        "must_include_penalty": 0.25
+      },
+      "rationale": "preview embeddings correlate positively with candidate-level auto relevance, but winner-level evidence was insufficient to justify reweighting; defaults kept to avoid overfitting",
+      "correlations": {
+        "n": 155,
+        "score": 0.4112,
+        "semantic": null,
+        "lexical": null,
+        "subject_match": null,
+        "action_match": null,
+        "environment_match": null,
+        "text": 0.3804,
+        "preview": 0.5128,
+        "frame": 0.1254
+      }
+    },
+    "notes": [
+      "AUTO_EVALUATION is a VLM auxiliary signal, not human ground truth.",
+      "Only threshold + one weight family were changed to limit overfitting.",
+      "human_label remains null for every scene."
+    ],
+    "timestamp": "2026-10-24T16:11:47.239704+00:00"
+  },
+  "comparison": {
+    "legacy.top1_relevance_mean": {
+      "before": 0.2694,
+      "after": 0.2694
+    },
+    "semantic_text.top1_relevance_mean": {
+      "before": 0.3605,
+      "after": 0.35
+    },
+    "semantic_visual.top1_relevance_mean": {
+      "before": 0.3412,
+      "after": 0.3544
+    },
+    "legacy.relevant_rate": {
+      "before": 0.1389,
+      "after": 0.1667
+    },
+    "semantic_text.relevant_rate": {
+      "before": 0.2632,
+      "after": 0.1935
+    },
+    "semantic_visual.relevant_rate": {
+      "before": 0.2059,
+      "after": 0.2059
+    },
+    "legacy.subject_match_mean": {
+      "before": 0.2083,
+      "after": 0.2083
+    },
+    "semantic_text.subject_match_mean": {
+      "before": 0.3158,
+      "after": 0.2419
+    },
+    "semantic_visual.subject_match_mean": {
+      "before": 0.2794,
+      "after": 0.25
+    },
+    "legacy.action_match_mean": {
+      "before": 0.125,
+      "after": 0.125
+    },
+    "semantic_text.action_match_mean": {
+      "before": 0.2368,
+      "after": 0.1774
+    },
+    "semantic_visual.action_match_mean": {
+      "before": 0.1471,
+      "after": 0.1618
+    },
+    "legacy.environment_match_mean": {
+      "before": 0.4167,
+      "after": 0.4167
+    },
+    "semantic_text.environment_match_mean": {
+      "before": 0.5263,
+      "after": 0.5161
+    },
+    "semantic_visual.environment_match_mean": {
+      "before": 0.5147,
+      "after": 0.5147
+    },
+    "legacy.no_good_candidate_rate": {
+      "before": 0.0,
+      "after": 0.0
+    },
+    "semantic_text.no_good_candidate_rate": {
+      "before": 0.4722,
+      "after": 0.1389
+    },
+    "semantic_visual.no_good_candidate_rate": {
+      "before": 0.1389,
+      "after": 0.1389
+    }
+  },
+  "performance": {
+    "model_load": {
+      "processor_s": 0.32,
+      "model_s": 0.57,
+      "total_s": 0.89,
+      "parameters_m": 151.28,
+      "cache_bytes": 1214021544
+    },
+    "embedding_throughput": {
+      "texts": 32,
+      "images": 32,
+      "text_seconds_best": 0.261,
+      "image_seconds_best": 3.499,
+      "texts_per_second": 122.68,
+      "images_per_second": 9.15,
+      "maxrss_mb": 1326.8
+    },
+    "preview": {
+      "count_ok": 432,
+      "bytes_mean": 65002.4,
+      "latency_mean_ms": 349.88,
+      "latency_p90_ms": 506.6
+    },
+    "frame_extraction": {
+      "status": "OK",
+      "frame_count": 6,
+      "best_seconds": 1.443,
+      "per_frame_ms": 240.54,
+      "maxrss_mb": 1326.8
+    },
+    "visual_scoring": {
+      "mean_ms": 4395.47,
+      "total_ms": 158236.78
+    },
+    "vlm": {
+      "calls": 310,
+      "latency_mean_ms": 1655.15,
+      "prompt_tokens": 1032761,
+      "completion_tokens": 28538,
+      "approx_cost_usd": 0.172,
+      "pricing_note": "gpt-4o-mini public list price at measurement time; approximate"
+    },
+    "peak_rss_mb": 1326.8,
+    "network": {
+      "requests": 134,
+      "bytes": 239292218,
+      "downloads": 16,
+      "previews": 432,
+      "frames": 96,
+      "per_provider": {
+        "coverr": {
+          "requests": 10,
+          "bytes": 0,
+          "downloads": 0,
+          "previews": 0,
+          "frames": 0
+        },
+        "mixkit": {
+          "requests": 10,
+          "bytes": 0,
+          "downloads": 0,
+          "previews": 0,
+          "frames": 0
+        },
+        "pexels": {
+          "requests": 42,
+          "bytes": 188606369,
+          "downloads": 11,
+          "previews": 210,
+          "frames": 0
+        },
+        "pixabay": {
+          "requests": 42,
+          "bytes": 37819737,
+          "downloads": 5,
+          "previews": 42,
+          "frames": 0
+        },
+        "pixabay_photo": {
+          "requests": 30,
+          "bytes": 12866112,
+          "downloads": 0,
+          "previews": 180,
+          "frames": 0
+        }
+      },
+      "errors": [
+        "download too large (50867297 bytes): https://videos.pexels.com/video-files/30131338/12921229_1920_1080_30fps.mp4",
+        "download too large (38740516 bytes): https://videos.pexels.com/video-files/30402965/13029803_1920_1080_30fps.mp4",
+        "download too large (81370751 bytes): https://videos.pexels.com/video-files/30546582/13084219_1920_1080_30fps.mp4",
+        "download too large (51049731 bytes): https://videos.pexels.com/video-files/30503893/13069316_1920_1080_30fps.mp4",
+        "download too large (34675500 bytes): https://videos.pexels.com/video-files/40159453/17153072_1920_1080_24fps.mp4",
+        "download too large (73611759 bytes): https://videos.pexels.com/video-files/26860633/12023138_1920_1080_60fps.mp4"
+      ]
+    },
+    "typical_video": {
+      "average_scenes_per_video": 37.74,
+      "min": 1,
+      "max": 1632,
+      "videos_with_scenes": 568
+    },
+    "estimate_20min_video": {
+      "scenes_per_video": 37.74,
+      "formula": "scenes × (previews×preview_latency + downloads×frames×frame_latency + visual_scoring_latency + vlm_candidates×vlm_latency); bytes = scenes × (previews×avg_preview_bytes + downloads×avg_video_bytes)",
+      "preview_seconds": 158.5,
+      "frame_extraction_seconds": 108.9,
+      "visual_scoring_seconds": 165.9,
+      "vlm_seconds": 124.9,
+      "total_seconds_excluding_downloads": 558.2,
+      "preview_bytes": 29438280,
+      "video_bytes": 996388774,
+      "total_bytes": 1025827055
+    }
+  }
+}

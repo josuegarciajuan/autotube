@@ -28,7 +28,7 @@ flag; see `docs/p02-visual-intelligence.md`. P01 remains the default.
 |---|---|---|---|
 | `MEDIA_SELECTOR` | `legacy`, `semantic`, `shadow` | `legacy` | Selector implementation (`shadow` = legacy runtime + semantic scoring) |
 | `MEDIA_SELECTOR_SHADOW` | `true`, `false` | `false` | In legacy mode, score the pages retrieved by the legacy loop without changing the asset |
-| `P01_MIN_RELEVANCE_SCORE` | 0.0–1.0 | `0.26` | Global relevance threshold |
+| `P01_MIN_RELEVANCE_SCORE` | 0.0–1.0 | `0.18` | Global relevance threshold (P03 calibrated) |
 | `P01_EMBEDDING_BACKEND` | `auto`, `hashing`, `sentence_transformers`, `none` | `auto` | Text embedding backend |
 | `P01_EMBEDDING_MODEL` | model id | `sentence-transformers/all-MiniLM-L6-v2` | Only used by the optional ST backend |
 
@@ -37,7 +37,7 @@ Channel `MEDIA_STRATEGY` equivalents:
 ```python
 "media_selector": "legacy",
 "media_selector_shadow": False,
-"semantic_min_relevance_score": 0.26,
+"semantic_min_relevance_score": 0.18,
 "semantic_embedding_backend": "auto",
 "semantic_retrieval_budget": {
     "max_total": 80, "max_per_provider": 30, "max_per_query": 24,

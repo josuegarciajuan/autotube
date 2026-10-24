@@ -449,7 +449,7 @@ def test_decision_record_contains_replay_and_audit_fields():
     assert record["narration_fragment"] == "an archaeologist excavates an ancient tomb"
     assert record["status"] == SelectionStatus.SELECTED.value
     assert record["winner_provider"] == "pexels"
-    assert record["threshold"] == pytest.approx(0.26)
+    assert record["threshold"] == pytest.approx(0.18)
     assert json.loads(record["scene_spec_json"])["subject"] == "archaeologist"
     assert json.loads(record["candidates_json"])
     assert json.loads(record["rejected_json"])

@@ -1,0 +1,398 @@
+{
+  "s0379-b03": {
+    "subject": "mummy wrappings and amulet",
+    "action": "unrolling to reveal amulet",
+    "environment": "dramatic lighting",
+    "visual_concept": "spiritual tool for afterlife journey",
+    "must_include": [
+      "close-up of bandages",
+      "amulet on chest"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s0777-b12": {
+    "subject": "Palmyra ruins in the desert",
+    "action": "showing collapsed columns and destroyed arches",
+    "environment": "arid desert sky",
+    "visual_concept": "aerial view of ancient destruction",
+    "must_include": [
+      "f",
+      "a"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s1406-b11": {
+    "subject": "doctor",
+    "action": "reviewing clinical records and diagnostic tests",
+    "environment": "modern hospital desk with natural window light",
+    "visual_concept": "clinical precision in diagnosis",
+    "must_include": [
+      "doctor",
+      "clinical records"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s0114-b17": {
+    "subject": "survivors of the USS Monitor",
+    "action": "grieving on the frozen sea",
+    "environment": "frozen ocean surface at sunrise",
+    "visual_concept": "frozen sea as a cemetery of memory",
+    "must_include": [
+      "frozen ocean surface",
+      "survivors"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s0223-b48": {
+    "subject": "open Carl Jung book",
+    "action": "showing visible text",
+    "environment": "close-up setting",
+    "visual_concept": "documenting dream series patterns",
+    "must_include": [
+      "open book",
+      "visible text"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s0526-b18": {
+    "subject": "human silhouette",
+    "action": "radiating light from chest",
+    "environment": "dark room",
+    "visual_concept": "inner light dissolving darkness",
+    "must_include": [
+      "human silhouette",
+      "light rays from chest"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s0203-b16": {
+    "subject": "astronomer",
+    "action": "observing the starry sky through a telescope",
+    "environment": "starry sky with galaxies in the background",
+    "visual_concept": "scientific exploration of space and extraterrestrial life",
+    "must_include": [
+      "astronomer",
+      "telescope"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s0826-b40": {
+    "subject": "hands holding a smartphone",
+    "action": "scrolling social media illustrations",
+    "environment": "modern room with blurred background",
+    "visual_concept": "viral Amabie illustrations on a touchscreen",
+    "must_include": [
+      "close-up of hands",
+      "smartphone screen"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s1629-b21": {
+    "subject": "remains of the Erebus and Terror ships",
+    "action": "emerging from the ice",
+    "environment": "desolate Arctic landscape",
+    "visual_concept": "involuntary monument to arrogance and endurance",
+    "must_include": [
+      "shipwreck remains",
+      "ice"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s0714-b09": {
+    "subject": "ancient winged statue with fish scales",
+    "action": "being illuminated by torchlight",
+    "environment": "torchlit cavern",
+    "visual_concept": "ancient bird-man statue detail",
+    "must_include": [
+      "close-up of statue",
+      "fish scales"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s0795-b11": {
+    "subject": "abandoned Mayan city",
+    "action": "emerging from jungle vegetation",
+    "environment": "aerial view of jungle-covered city with pyramids",
+    "visual_concept": "mystery of a lost civilization",
+    "must_include": [
+      "p",
+      "y"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s0377-b02": {
+    "subject": "Egyptian desert necropolis with open tombs",
+    "action": "revealing looted tombs and wind-blown sand",
+    "environment": "Egyptian desert, ancient Thebes necropolis",
+    "visual_concept": "looting and abandonment evoked through wind-swept sand over open tombs",
+    "must_include": [
+      "aerial view",
+      "open tombs"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s1356-b04": {
+    "subject": "Hiyaz volunteers and French fleet",
+    "action": "attacking bravely",
+    "environment": "Al-Qusayr port, 18th century",
+    "visual_concept": "triumphant resistance against French fleet",
+    "must_include": [
+      "Hiyaz volunteers",
+      "French fleet"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s0869-b09": {
+    "subject": "Rita, an elderly woman on the operating table",
+    "action": "closing her eyes amid surgery preparation",
+    "environment": "distant view of an illuminated operating room with doctors around the table",
+    "visual_concept": "surgery lights as a threshold of hope and rebirth",
+    "must_include": [
+      "Rita on the operating table",
+      "surrounding prepared doctors"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s1212-b08": {
+    "subject": "heteromeric CNGA3/CNGB3 ion channel 3D model",
+    "action": "showing ions flowing through the channel",
+    "environment": "molecular visualization",
+    "visual_concept": "ion flow through a heteromeric cone ion channel",
+    "must_include": [
+      "CNGA3 and CNGB3 subunits",
+      "heteromeric channel structure"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s0434-b07": {
+    "subject": "antenna protein complex in thylakoid",
+    "action": "absorbing light particles",
+    "environment": "thylakoid membrane",
+    "visual_concept": "molecular light-harvesting architecture",
+    "must_include": [
+      "antenna protein complex",
+      "thylakoid"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s0173-b13": {
+    "subject": "a person in a dreamlike landscape",
+    "action": "transforming a frightening scene into a liberating experience",
+    "environment": "dreamlike landscape",
+    "visual_concept": "rewriting fear narratives through lucid dream control",
+    "must_include": [
+      "person",
+      "dreamlike landscape"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s0080-b02": {
+    "subject": "ethereal figures",
+    "action": "floating",
+    "environment": "soft mist with warm dim light",
+    "visual_concept": "dreamlike fusion of smoke and light",
+    "must_include": [
+      "ethereal figures",
+      "soft mist"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s0184-b13": {
+    "subject": "scientists in a modern parapsychology laboratory",
+    "action": "observing data on bright screens",
+    "environment": "modern parapsychology laboratory",
+    "visual_concept": "21st century parapsychology research",
+    "must_include": [
+      "scientists",
+      "bright screens"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s1365-b02": {
+    "subject": "excavated Hopewell artifacts from Mound 25",
+    "action": "displaying size and elaborate details",
+    "environment": "archaeological site of Mound 25",
+    "visual_concept": "ceremonial symbols of power and prestige",
+    "must_include": [
+      "Hopewell artifacts",
+      "Mound 25"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s1468-b12": {
+    "subject": "excavator in frozen landscape",
+    "action": "discovering human bones",
+    "environment": "snow and ice",
+    "visual_concept": "archaeological evidence of cannibalism",
+    "must_include": [
+      "human bones",
+      "cut marks"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s0133-b06": {
+    "subject": "dark deserted street with flickering streetlamp",
+    "action": "casting elongated shadows",
+    "environment": "dark deserted street at night",
+    "visual_concept": "unease and mystery through shadow and flickering light",
+    "must_include": [
+      "flickering streetlamp",
+      "elongated shadows"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s1698-b06": {
+    "subject": "elderly archaeologist in field hat",
+    "action": "measuring a line with a tape measure",
+    "environment": "desert with geometric figures",
+    "visual_concept": "measuring ancient desert lines",
+    "must_include": [
+      "e",
+      "l"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s1161-b08": {
+    "subject": "19th-century scientist",
+    "action": "examining gelatinous sample under microscope",
+    "environment": "laboratory with jars and old books",
+    "visual_concept": "scientific analysis of mysterious gelatinous substance",
+    "must_include": [
+      "scientist",
+      "microscope"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s1299-b15": {
+    "subject": "neurologist",
+    "action": "examining brain MRI scans",
+    "environment": "dim hospital room",
+    "visual_concept": "medical mystery",
+    "must_include": [
+      "neurologist",
+      "brain MRI scans"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s0767-b04": {
+    "subject": "abstract brain neurons",
+    "action": "firing with light flashes",
+    "environment": "dark background",
+    "visual_concept": "abstract representation of REM sleep brain activity",
+    "must_include": [
+      "n",
+      "e"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s0299-b06": {
+    "subject": "deteriorated wooden barn and charred car remains",
+    "action": "standing in a rural field",
+    "environment": "rural Virginia field",
+    "visual_concept": "abandoned rural site with burned car wreck",
+    "must_include": [
+      "deteriorated wooden barn",
+      "charred car remains"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s1073-b14": {
+    "subject": "group of people",
+    "action": "sharing personal stories",
+    "environment": "cozy setting",
+    "visual_concept": "intimate personal testimonies beyond statistics",
+    "must_include": [
+      "people seated together",
+      "cozy atmosphere"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s0400-b01": {
+    "subject": "Egyptian cartonnage mask",
+    "action": "revealing painted details",
+    "environment": "museum artifact close-up",
+    "visual_concept": "ritual precision and eternal guardianship",
+    "must_include": [
+      "uraeus snakes with sun disks",
+      "reclining Anubis jackals"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s1008-b12": {
+    "subject": "advanced technology and free energy",
+    "action": "contrasting hope with destruction",
+    "environment": "conceptual documentary imagery",
+    "visual_concept": "ethical dilemma between free energy hope and technological destruction",
+    "must_include": [
+      "free energy imagery",
+      "destruction caused by technology abuse"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s0386-b04": {
+    "subject": "silhouette of a man",
+    "action": "running",
+    "environment": "fog-covered hill at dusk",
+    "visual_concept": "mysterious figure vanishing into fog",
+    "must_include": [
+      "distant silhouette",
+      "foggy hillside"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s1471-b23": {
+    "subject": "medical students",
+    "action": "examining a pelvic duplication skeleton",
+    "environment": "anatomy lab",
+    "visual_concept": "students learning from a historical anatomical specimen",
+    "must_include": [
+      "medical students",
+      "pelvic duplication skeleton"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s0517-b23": {
+    "subject": "bank branch interior",
+    "action": "examining the crime scene",
+    "environment": "modest portable trailer-like bank building",
+    "visual_concept": "forensic autopsy of a space",
+    "must_include": [
+      "bullet wounds",
+      "blood stains"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s0457-b16": {
+    "subject": "empty American football stadium",
+    "action": "conveying tense silence",
+    "environment": "deserted seats and illuminated field",
+    "visual_concept": "silent tension before championship",
+    "must_include": [
+      "empty stadium",
+      "deserted seats"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s1373-b14": {
+    "subject": "scientists and ancient ruins",
+    "action": "analyzing DNA and comparing ancient sites",
+    "environment": "modern laboratory and ancient ruins of Paracas and Easter Island",
+    "visual_concept": "intercutting modern DNA science with ancient Peruvian and Easter Island ruins to suggest unexplained migrations",
+    "must_include": [
+      "modern laboratory",
+      "scientists analyzing DNA"
+    ],
+    "source": "llm_intent_extraction"
+  },
+  "s1670-b13": {
+    "subject": "group of doctors",
+    "action": "discussing a protocol",
+    "environment": "meeting room",
+    "visual_concept": "collaborative optimism",
+    "must_include": [
+      "doctors",
+      "protocol discussion"
+    ],
+    "source": "llm_intent_extraction"
+  }
+}

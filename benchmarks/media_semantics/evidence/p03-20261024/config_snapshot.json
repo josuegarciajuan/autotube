@@ -1,0 +1,72 @@
+{
+  "timestamp": "2026-10-24T15:32:11.187001+00:00",
+  "production_defaults_unchanged": {
+    "MEDIA_SELECTOR": "legacy",
+    "P02_VISUAL_MODE": "off"
+  },
+  "benchmark_only": {
+    "selector_arm": "semantic",
+    "visual_mode": "full_visual (in-memory, benchmark harness only)",
+    "visual_model": "openai/clip-vit-base-patch32",
+    "visual_device": "cpu",
+    "allow_model_download": false
+  },
+  "p01": {
+    "min_relevance_score": 0.26,
+    "ranking_weights": {
+      "semantic": 0.35,
+      "lexical": 0.15,
+      "action": 0.18,
+      "subject": 0.12,
+      "environment": 0.08,
+      "era": 0.05,
+      "metadata_quality": 0.04,
+      "provider_prior": 0.03,
+      "negative_constraint": 0.5,
+      "no_metadata_ceiling": 0.12
+    },
+    "budget": {
+      "max_total": 80,
+      "max_per_provider": 30,
+      "max_per_query": 24,
+      "max_pages_per_provider": 2,
+      "top_k": 10,
+      "top_n_download": 3
+    }
+  },
+  "p02": {
+    "combined_threshold": 0.26,
+    "visual_weights": {
+      "text": 0.5,
+      "preview": 0.15,
+      "frame": 0.2,
+      "vlm": 0.15,
+      "technical_quality": 0.05,
+      "negative_penalty": 0.6,
+      "era_penalty": 0.3,
+      "must_include_penalty": 0.25
+    },
+    "visual_budget": {
+      "preview_candidates": 12,
+      "shortlist": 6,
+      "download_candidates": 2,
+      "preview_bytes": 524288,
+      "preview_total_bytes": 4194304,
+      "frame_count": 6,
+      "vlm_candidates": 0
+    }
+  },
+  "providers": {
+    "pexels": "PRESENT",
+    "pixabay": "PRESENT",
+    "mixkit": "NO_KEY_REQUIRED",
+    "coverr": "NO_KEY_REQUIRED",
+    "openai_vision": "PRESENT",
+    "llm_text": "PRESENT"
+  },
+  "secrets": {
+    "pexels": "PRESENT",
+    "pixabay": "PRESENT",
+    "openai_vision": "PRESENT"
+  }
+}

@@ -1,0 +1,256 @@
+{
+  "p01_min_relevance_score": {
+    "before": 0.26,
+    "after": 0.18,
+    "rationale": "sweep P=0.24 R=0.85 coverage=0.73 at 0.18",
+    "sweep": [
+      {
+        "threshold": 0.1,
+        "evaluated_candidates": 158,
+        "accepted": 158,
+        "precision": 0.2089,
+        "recall": 1.0,
+        "coverage": 1.0
+      },
+      {
+        "threshold": 0.12,
+        "evaluated_candidates": 158,
+        "accepted": 150,
+        "precision": 0.2133,
+        "recall": 0.9697,
+        "coverage": 0.9494
+      },
+      {
+        "threshold": 0.14,
+        "evaluated_candidates": 158,
+        "accepted": 139,
+        "precision": 0.2158,
+        "recall": 0.9091,
+        "coverage": 0.8797
+      },
+      {
+        "threshold": 0.16,
+        "evaluated_candidates": 158,
+        "accepted": 132,
+        "precision": 0.2121,
+        "recall": 0.8485,
+        "coverage": 0.8354
+      },
+      {
+        "threshold": 0.18,
+        "evaluated_candidates": 158,
+        "accepted": 115,
+        "precision": 0.2435,
+        "recall": 0.8485,
+        "coverage": 0.7278
+      },
+      {
+        "threshold": 0.2,
+        "evaluated_candidates": 158,
+        "accepted": 97,
+        "precision": 0.2577,
+        "recall": 0.7576,
+        "coverage": 0.6139
+      },
+      {
+        "threshold": 0.22,
+        "evaluated_candidates": 158,
+        "accepted": 74,
+        "precision": 0.2838,
+        "recall": 0.6364,
+        "coverage": 0.4684
+      },
+      {
+        "threshold": 0.24,
+        "evaluated_candidates": 158,
+        "accepted": 65,
+        "precision": 0.3077,
+        "recall": 0.6061,
+        "coverage": 0.4114
+      },
+      {
+        "threshold": 0.26,
+        "evaluated_candidates": 158,
+        "accepted": 47,
+        "precision": 0.3404,
+        "recall": 0.4848,
+        "coverage": 0.2975
+      },
+      {
+        "threshold": 0.3,
+        "evaluated_candidates": 158,
+        "accepted": 20,
+        "precision": 0.4,
+        "recall": 0.2424,
+        "coverage": 0.1266
+      }
+    ]
+  },
+  "visual_combined_threshold": {
+    "before": 0.26,
+    "after": 0.26,
+    "rationale": "sweep P=0.28 R=0.76 coverage=0.57 at 0.26",
+    "sweep": [
+      {
+        "threshold": 0.06,
+        "evaluated_candidates": 155,
+        "accepted": 155,
+        "precision": 0.2129,
+        "recall": 1.0,
+        "coverage": 1.0
+      },
+      {
+        "threshold": 0.08,
+        "evaluated_candidates": 155,
+        "accepted": 155,
+        "precision": 0.2129,
+        "recall": 1.0,
+        "coverage": 1.0
+      },
+      {
+        "threshold": 0.1,
+        "evaluated_candidates": 155,
+        "accepted": 155,
+        "precision": 0.2129,
+        "recall": 1.0,
+        "coverage": 1.0
+      },
+      {
+        "threshold": 0.12,
+        "evaluated_candidates": 155,
+        "accepted": 155,
+        "precision": 0.2129,
+        "recall": 1.0,
+        "coverage": 1.0
+      },
+      {
+        "threshold": 0.14,
+        "evaluated_candidates": 155,
+        "accepted": 155,
+        "precision": 0.2129,
+        "recall": 1.0,
+        "coverage": 1.0
+      },
+      {
+        "threshold": 0.16,
+        "evaluated_candidates": 155,
+        "accepted": 152,
+        "precision": 0.2171,
+        "recall": 1.0,
+        "coverage": 0.9806
+      },
+      {
+        "threshold": 0.18,
+        "evaluated_candidates": 155,
+        "accepted": 150,
+        "precision": 0.22,
+        "recall": 1.0,
+        "coverage": 0.9677
+      },
+      {
+        "threshold": 0.2,
+        "evaluated_candidates": 155,
+        "accepted": 138,
+        "precision": 0.2319,
+        "recall": 0.9697,
+        "coverage": 0.8903
+      },
+      {
+        "threshold": 0.24,
+        "evaluated_candidates": 155,
+        "accepted": 105,
+        "precision": 0.2476,
+        "recall": 0.7879,
+        "coverage": 0.6774
+      },
+      {
+        "threshold": 0.26,
+        "evaluated_candidates": 155,
+        "accepted": 88,
+        "precision": 0.2841,
+        "recall": 0.7576,
+        "coverage": 0.5677
+      }
+    ]
+  },
+  "ranking_weights": {
+    "before": {
+      "semantic": 0.35,
+      "lexical": 0.15,
+      "action": 0.18,
+      "subject": 0.12,
+      "environment": 0.08,
+      "era": 0.05,
+      "metadata_quality": 0.04,
+      "provider_prior": 0.03,
+      "negative_constraint": 0.5,
+      "no_metadata_ceiling": 0.12
+    },
+    "after": {
+      "semantic": 0.35,
+      "lexical": 0.15,
+      "action": 0.18,
+      "subject": 0.12,
+      "environment": 0.08,
+      "era": 0.05,
+      "metadata_quality": 0.04,
+      "provider_prior": 0.03,
+      "negative_constraint": 0.5,
+      "no_metadata_ceiling": 0.12
+    },
+    "rationale": "kept: auto-evaluation did not show a large component advantage",
+    "correlations": {
+      "n": 158,
+      "score": 0.3607,
+      "semantic": 0.2809,
+      "lexical": 0.1215,
+      "subject_match": 0.2076,
+      "action_match": 0.0662,
+      "environment_match": 0.0833,
+      "text": null,
+      "preview": null,
+      "frame": null
+    }
+  },
+  "visual_weights": {
+    "before": {
+      "text": 0.5,
+      "preview": 0.15,
+      "frame": 0.2,
+      "vlm": 0.15,
+      "technical_quality": 0.05,
+      "negative_penalty": 0.6,
+      "era_penalty": 0.3,
+      "must_include_penalty": 0.25
+    },
+    "after": {
+      "text": 0.5,
+      "preview": 0.15,
+      "frame": 0.2,
+      "vlm": 0.15,
+      "technical_quality": 0.05,
+      "negative_penalty": 0.6,
+      "era_penalty": 0.3,
+      "must_include_penalty": 0.25
+    },
+    "rationale": "preview embeddings correlate positively with candidate-level auto relevance, but winner-level evidence was insufficient to justify reweighting; defaults kept to avoid overfitting",
+    "correlations": {
+      "n": 155,
+      "score": 0.4112,
+      "semantic": null,
+      "lexical": null,
+      "subject_match": null,
+      "action_match": null,
+      "environment_match": null,
+      "text": 0.3804,
+      "preview": 0.5128,
+      "frame": 0.1254
+    }
+  },
+  "notes": [
+    "AUTO_EVALUATION is a VLM auxiliary signal, not human ground truth.",
+    "Only threshold + one weight family were changed to limit overfitting.",
+    "human_label remains null for every scene."
+  ],
+  "timestamp": "2026-10-24T16:11:47.239704+00:00"
+}

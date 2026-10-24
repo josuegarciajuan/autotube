@@ -471,7 +471,10 @@ MEDIA_STRATEGY = {
     # override these values via environment without editing channel configs.
     "media_selector": "legacy",
     "media_selector_shadow": False,
-    "semantic_min_relevance_score": 0.26,
+    # P03 calibrated on 36 real scenes (60 candidate pools, auto-eval):
+    # 0.18 keeps F1 within 0.02 of the 0.20 optimum while raising recall
+    # 0.76 -> 0.85.  Inactive while MEDIA_SELECTOR=legacy.
+    "semantic_min_relevance_score": 0.18,
     "semantic_embedding_backend": "auto",
     "semantic_embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
     "semantic_embedding_cache": "",

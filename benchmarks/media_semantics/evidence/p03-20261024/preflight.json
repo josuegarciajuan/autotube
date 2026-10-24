@@ -1,0 +1,35 @@
+{
+  "timestamp": "2026-10-24T15:32:05.691900+00:00",
+  "python": "3.10.12",
+  "platform": "Linux-5.15.0-191-generic-x86_64-with-glibc2.35",
+  "cpu_count": 10,
+  "git": {
+    "branch": "work/20261024-p03-benchmark",
+    "head": "ebc526116d249e0e741fe76427221d4828cb7cee",
+    "status_short": "M .gitignore\n M pipeline/media_semantics/visual_backends.py\n M pipeline/media_semantics/visual_pipeline.py\n M pipeline/media_semantics/visual_previews.py\n M pipeline/media_semantics/visual_scoring.py\n M pipeline/providers/pixabay.py\n?? benchmarks/\n?? tests/test_p03_benchmark.py"
+  },
+  "torch": "2.13.0+cpu",
+  "torch_cuda": false,
+  "transformers": "5.12.1",
+  "ram_total_mb": 18524.3,
+  "ram_maxrss_mb": 256.8,
+  "disk_free_gb": 171.4,
+  "disk_total_gb": 484.5,
+  "providers": {
+    "pexels": "PRESENT",
+    "pixabay": "PRESENT",
+    "mixkit": "NO_KEY_REQUIRED",
+    "coverr": "NO_KEY_REQUIRED",
+    "openai_vision": "PRESENT",
+    "llm_text": "PRESENT"
+  },
+  "clip_cache": {
+    "path": "/root/.cache/huggingface/hub/models--openai--clip-vit-base-patch32",
+    "present": true,
+    "bytes": 2428043008
+  },
+  "defaults": {
+    "MEDIA_SELECTOR": "legacy",
+    "P02_VISUAL_MODE": "off"
+  }
+}

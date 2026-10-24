@@ -1,0 +1,61 @@
+{
+  "run_id": "p03-20261024",
+  "created_at": "2026-10-24T16:12:13.218374+00:00",
+  "corpus_scenes": 36,
+  "corpus_diversity": {
+    "scenes": 36,
+    "categories": {
+      "action": 3,
+      "animals": 3,
+      "city": 3,
+      "desert_geology": 4,
+      "history": 4,
+      "medical": 4,
+      "nature": 3,
+      "other": 3,
+      "people": 3,
+      "space_science": 3,
+      "technology": 3
+    },
+    "channels": {
+      "canal2": 9,
+      "canal3": 9,
+      "canal4": 9,
+      "canal5": 9
+    },
+    "media_types": {
+      "image": 15,
+      "video": 21
+    },
+    "era_scenes": 8,
+    "must_avoid_scenes": 8
+  },
+  "pool_candidates_total": 1458,
+  "decisions_before": 36,
+  "decisions_after": 36,
+  "model": "openai/clip-vit-base-patch32",
+  "artifacts": [
+    "preflight.json",
+    "model_identity.json",
+    "config_snapshot.json",
+    "provider_canary.json",
+    "live_canary.json",
+    "corpus.json",
+    "intent_cache.json",
+    "pools.json",
+    "previews.json",
+    "frames.json",
+    "decisions_before.json",
+    "decisions_after.json",
+    "auto_eval_before.json",
+    "auto_eval_after.json",
+    "metrics.json",
+    "failure_set_before.json",
+    "failure_set_after.json",
+    "calibration.json",
+    "performance.json",
+    "review_pack.html",
+    "labels_template.json"
+  ],
+  "large_assets_note": "previews/, videos/, frames/ and eval_images/ are runtime artifacts and are gitignored. Only JSON/HTML evidence is committed."
+}

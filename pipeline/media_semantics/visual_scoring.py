@@ -233,8 +233,18 @@ def compute_combined_score(
     era_penalty: float = 0.0,
     must_include_penalty: float = 0.0,
     weights: VisualWeights | None = None,
+    available_components: dict[str, bool] | None = None,
 ) -> dict[str, Any]:
-    """Weighted positive score minus explicit constraint penalties."""
+    """Weighted positive score minus explicit constraint penalties.
+
+    ``available_components`` implements the P02 rule that *missing evidence is
+    not negative evidence*.  When a mode does not run a stage (e.g. preview-only
+    with no frames/VLM), the denominator is the sum of the weights that could
+    actually be observed.  The ratios between available components are
+    unchanged, so ranking is unaffected; only the score scale (and therefore
+    threshold eligibility) becomes comparable across modes.  ``None`` keeps the
+    historical behaviour for callers that do not opt in.
+    """
     w = weights or VisualWeights()
     components = {
         "text": max(0.0, min(1.0, float(text_relevance))),
@@ -243,13 +253,29 @@ def compute_combined_score(
         "vlm": max(0.0, min(1.0, float(vlm_relevance))),
         "technical_quality": max(0.0, min(1.0, float(technical_quality))),
     }
-    base = (
-        w.text * components["text"]
-        + w.preview * components["preview"]
-        + w.frame * components["frame"]
-        + w.vlm * components["vlm"]
-        + w.technical_quality * components["technical_quality"]
-    ) / w.positive_total()
+    component_weights = {
+        "text": w.text,
+        "preview": w.preview,
+        "frame": w.frame,
+        "vlm": w.vlm,
+        "technical_quality": w.technical_quality,
+    }
+    if available_components is None:
+        denominator = w.positive_total()
+    else:
+        denominator = sum(
+            weight
+            for name, weight in component_weights.items()
+            if available_components.get(name, name in ("text", "technical_quality"))
+        )
+        if denominator <= 0:
+            denominator = w.positive_total()
+    base = sum(
+        component_weights[name] * components[name]
+        for name in components
+        if available_components is None
+        or available_components.get(name, name in ("text", "technical_quality"))
+    ) / denominator
     penalties = (
         max(0.0, float(negative_penalty)) * w.negative_penalty
         + max(0.0, float(era_penalty)) * w.era_penalty
