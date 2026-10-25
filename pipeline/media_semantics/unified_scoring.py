@@ -387,11 +387,16 @@ def bounded_coherence(
         key = str(row.provider or "")
         counts[key] = counts.get(key, 0) + 1
         penalty = 0.0
-        if counts[key] > 1:
+        # Rows that already carry a P04 context penalty (provider/still/shot/
+        # style/era) must not be penalised twice for the same repetition.
+        has_context_penalty = float(
+            row.meta.get("coherence_applied_penalty") or 0.0
+        ) > 0.0
+        if not has_context_penalty and counts[key] > 1:
             penalty += min(provider_penalty, 0.5 * provider_penalty * counts[key])
         if str(row.media_type) == "image":
             still_run += 1
-            if still_run > 1:
+            if not has_context_penalty and still_run > 1:
                 penalty += still_penalty
         if penalty > 0:
             row.score.shot_diversity = round(row.score.shot_diversity + penalty, 6)

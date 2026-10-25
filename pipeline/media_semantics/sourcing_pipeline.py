@@ -43,6 +43,7 @@ from .asset_strategy import (
 )
 from .attribution import provenance_for_candidate
 from .coherence import CoherenceConfig, SelectionCoherence
+from .failure_cache import FailedAssetCache
 from .config import SemanticConfig
 from .contracts import (
     Candidate,
@@ -138,6 +139,19 @@ class SourcingConfig:
     ai_validation_required: bool = True
     adaptive_budget: bool = True
     entity_archive_queries: bool = True
+    # ── Post-failover quality floor (R1) ──────────────────────────────────
+    # Calibrated from P03/P05 evidence, not invented:
+    #   * ``min_relevance_score`` (0.18) is the P03 relevance floor.
+    #   * ``strong_relevance_score`` (0.30) − floor = 0.12 is the tolerable
+    #     drop from a strong candidate to an adequate one.
+    # A candidate that only wins because a stronger one failed may not fall
+    # below ``max(min_relevance_score, top_final - degradation)``.
+    post_failover_min_score: float | None = None
+    post_failover_max_degradation: float | None = None
+    post_failover_fallback_floor: float | None = None
+    # Per-run failed-asset cache: TTL + hard bound, never a global blacklist.
+    failure_cache_ttl_s: float = 1800.0
+    failure_cache_max_entries: int = 512
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "SourcingConfig":
@@ -185,6 +199,20 @@ class SourcingConfig:
             ai_validation_required=_b("P05_AI_VALIDATION_REQUIRED", True),
             adaptive_budget=_b("P05_ADAPTIVE_BUDGET", True),
             entity_archive_queries=_b("P05_ENTITY_ARCHIVE_QUERIES", True),
+            post_failover_min_score=(
+                _f("P04_POST_FAILOVER_MIN_SCORE", 0.18)
+                if env.get("P04_POST_FAILOVER_MIN_SCORE") is not None else None
+            ),
+            post_failover_max_degradation=(
+                _f("P04_POST_FAILOVER_MAX_DEGRADATION", 0.12)
+                if env.get("P04_POST_FAILOVER_MAX_DEGRADATION") is not None else None
+            ),
+            post_failover_fallback_floor=(
+                _f("P04_POST_FAILOVER_FALLBACK_FLOOR", 0.10)
+                if env.get("P04_POST_FAILOVER_FALLBACK_FLOOR") is not None else None
+            ),
+            failure_cache_ttl_s=max(1.0, _f("P04_FAILURE_CACHE_TTL_S", 1800.0)),
+            failure_cache_max_entries=max(1, _i("P04_FAILURE_CACHE_MAX_ENTRIES", 512)),
         )
 
 
@@ -346,7 +374,17 @@ class SourcedMediaSelector:
             phash_threshold=self.config.phash_threshold,
             dhash_threshold=self.config.dhash_threshold,
         )
-        self.coherence = SelectionCoherence(CoherenceConfig())
+        # Integrated rerank and final-winner recording MUST share one context;
+        # otherwise the rerank reads empty signals while a second object is
+        # advanced after download.
+        if self.integrated_selector is not None:
+            self.coherence = self.integrated_selector.coherence
+        else:
+            self.coherence = SelectionCoherence(CoherenceConfig())
+        self.failure_cache = FailedAssetCache(
+            ttl_s=self.config.failure_cache_ttl_s,
+            max_entries=self.config.failure_cache_max_entries,
+        )
         self.ai_used = 0
 
     # ── public API ────────────────────────────────────────────
@@ -475,20 +513,62 @@ class SourcedMediaSelector:
         winner_row: dict[str, Any] | None = None
         downloaded: dict | None = None
         attempts = 0
+        top_final = (
+            float(approved_rows[0][1].get("final") or 0.0)
+            if approved_rows else None
+        )
+        failover_active = False
+        failed_cache_hits = 0
+        quality_floor_rejections = 0
+        floor_rejections_detail: list[dict[str, Any]] = []
+
+        def _post_failover_floor() -> float:
+            base = self.config.post_failover_min_score
+            if base is None:
+                base = self.config.min_relevance_score
+            degradation = self.config.post_failover_max_degradation
+            if degradation is None:
+                degradation = max(
+                    0.0,
+                    float(self.config.strong_relevance_score)
+                    - float(self.config.min_relevance_score),
+                )
+            if top_final is None:
+                return float(base)
+            return max(float(base), float(top_final) - float(degradation))
+
         for candidate, row in approved_rows:
+            if self.failure_cache.is_failed(candidate):
+                # A known-broken asset/URL is skipped WITHOUT consuming a
+                # download attempt or hitting the network again in this run.
+                failover_active = True
+                failed_cache_hits += 1
+                decision.download_attempts.append({
+                    "provider": candidate.provider,
+                    "url": candidate.download_url or candidate.asset_url,
+                    "result": "skipped_cached_failure",
+                    "failure_category": "cached_download_failure",
+                })
+                continue
             if attempts >= self.config.max_downloads_per_scene:
                 break
             attempts += 1
             asset = self._download(candidate)
             if asset is None:
+                failover_active = True
+                self.failure_cache.record(
+                    candidate, failure_category="download_or_validation_failed",
+                )
                 decision.download_attempts.append({
                     "provider": candidate.provider,
                     "url": candidate.download_url or candidate.asset_url,
                     "result": "failed",
+                    "failure_category": "download_or_validation_failed",
                 })
                 continue
             duplicate = self._duplicate_check(candidate, asset)
             if duplicate:
+                failover_active = True
                 decision.duplicate_rejections += 1
                 decision.download_attempts.append({
                     "provider": candidate.provider,
@@ -497,6 +577,26 @@ class SourcedMediaSelector:
                     "duplicate": duplicate.to_dict(),
                 })
                 continue
+            if failover_active:
+                floor = _post_failover_floor()
+                candidate_final = float(row.get("final") or 0.0)
+                if candidate_final + 1e-9 < floor:
+                    quality_floor_rejections += 1
+                    floor_rejections_detail.append({
+                        "provider": candidate.provider,
+                        "candidate_id": candidate.provider_asset_id,
+                        "final": round(candidate_final, 6),
+                        "floor": round(floor, 6),
+                        "top_final": None if top_final is None else round(top_final, 6),
+                    })
+                    decision.download_attempts.append({
+                        "provider": candidate.provider,
+                        "url": candidate.download_url or candidate.asset_url,
+                        "result": "rejected_quality_floor",
+                        "candidate_final": round(candidate_final, 6),
+                        "floor": round(floor, 6),
+                    })
+                    continue
             winner, winner_row, downloaded = candidate, row, asset
             decision.download_attempts.append({
                 "provider": candidate.provider,
@@ -504,6 +604,23 @@ class SourcedMediaSelector:
                 "result": "downloaded" if asset.get("path") else "selected",
             })
             break
+
+        post_failover_floor = _post_failover_floor() if failover_active else None
+        fallback_floor = self.config.post_failover_fallback_floor
+        if fallback_floor is None:
+            fallback_floor = self.config.conceptual_min_score
+        decision.extra["failover"] = {
+            "active": bool(failover_active),
+            "top_final": None if top_final is None else round(top_final, 6),
+            "quality_floor": (
+                None if post_failover_floor is None
+                else round(post_failover_floor, 6)
+            ),
+            "fallback_floor": round(float(fallback_floor), 6),
+            "failed_cache_hits": failed_cache_hits,
+            "quality_floor_rejections": quality_floor_rejections,
+            "quality_floor_rejections_detail": floor_rejections_detail,
+        }
 
         # If no downloader is configured the metadata winner is still selected;
         # this keeps offline benchmarks and shadow scoring pure-metadata.
@@ -523,7 +640,10 @@ class SourcedMediaSelector:
             self._finalize_selected(
                 decision, spec, route, strategy, winner, winner_row, downloaded,
             )
-            self._record(winner, spec, winner_row["asset_type"], decision.asset_type)
+            self._record(
+                winner, spec, winner_row["asset_type"],
+                media_type_for_asset_type(winner_row["asset_type"], winner),
+            )
         else:
             ai_result = self._try_ai(spec, route, strategy, decision)
             if ai_result is not None:
@@ -534,23 +654,39 @@ class SourcedMediaSelector:
                 )
                 self._record(winner, spec, AssetType.AI_IMAGE.value, "image")
             else:
-                conceptual = self._try_conceptual(spec, route, strategy, decision)
+                conceptual = self._try_conceptual(
+                    spec, route, strategy, decision,
+                    post_failover_floor=(
+                        float(fallback_floor) if failover_active else None
+                    ),
+                )
                 if conceptual is not None:
                     winner, downloaded, winner_row = conceptual
                     self._finalize_selected(
                         decision, spec, route, strategy, winner, winner_row, downloaded,
                         fallback_type="CONCEPTUAL", literal=False,
                     )
-                    self._record(winner, spec, winner_row["asset_type"], decision.asset_type)
+                    self._record(
+                        winner, spec, winner_row["asset_type"],
+                        media_type_for_asset_type(winner_row["asset_type"], winner),
+                    )
                 else:
-                    generic = self._try_generic(spec, route, strategy, decision)
+                    generic = self._try_generic(
+                        spec, route, strategy, decision,
+                        post_failover_floor=(
+                            float(fallback_floor) if failover_active else None
+                        ),
+                    )
                     if generic is not None:
                         winner, downloaded, winner_row = generic
                         self._finalize_selected(
                             decision, spec, route, strategy, winner, winner_row, downloaded,
                             fallback_type="GENERIC", literal=False,
                         )
-                        self._record(winner, spec, winner_row["asset_type"], decision.asset_type)
+                        self._record(
+                            winner, spec, winner_row["asset_type"],
+                            media_type_for_asset_type(winner_row["asset_type"], winner),
+                        )
                     else:
                         decision.status = SelectionStatus.NO_GOOD_CANDIDATE
                         decision.rejection_reason = "no_candidate_above_threshold_after_ladder"
@@ -567,11 +703,13 @@ class SourcedMediaSelector:
             "strong_candidate_short_circuit": strong_found,
             "duplicate_rejections": decision.duplicate_rejections,
             "ai_used": self.ai_used,
+            "failed_asset_cache": self.failure_cache.stats(),
         }
         decision.cost = {
             "candidates": len(accumulated),
             "requests": requests,
             "downloads_attempted": len(decision.download_attempts),
+            "failed_asset_cache": self.failure_cache.stats(),
         }
         return SourcingResult(
             decision=decision,
@@ -590,6 +728,7 @@ class SourcedMediaSelector:
         self.coherence.reset()
         if self.integrated_selector is not None:
             self.integrated_selector.reset()
+        self.failure_cache.clear()
         self.ai_used = 0
 
     # ── internal ──────────────────────────────────────────────
@@ -1050,6 +1189,8 @@ class SourcedMediaSelector:
     def _try_conceptual(
         self, spec: SceneSpec, route: SourceRoute, strategy: AssetStrategy,
         decision: SelectionDecision,
+        *,
+        post_failover_floor: float | None = None,
     ) -> tuple[Candidate, dict, dict] | None:
         if not self.config.allow_conceptual:
             return None
@@ -1077,6 +1218,13 @@ class SourcedMediaSelector:
             row = dict(row)
             row["final"] = adjusted
             row["asset_type"] = AssetType.CONCEPTUAL_STOCK.value
+        if post_failover_floor is not None and float(row.get("final") or 0.0) + 1e-9 < post_failover_floor:
+            decision.extra.setdefault("post_failover_rejections", []).append({
+                "fallback_type": "CONCEPTUAL",
+                "final": round(float(row.get("final") or 0.0), 6),
+                "floor": round(float(post_failover_floor), 6),
+            })
+            return None
         asset = self._download(candidate)
         if asset is None:
             return None
@@ -1092,6 +1240,8 @@ class SourcedMediaSelector:
     def _try_generic(
         self, spec: SceneSpec, route: SourceRoute, strategy: AssetStrategy,
         decision: SelectionDecision,
+        *,
+        post_failover_floor: float | None = None,
     ) -> tuple[Candidate, dict, dict] | None:
         if not self.config.allow_generic:
             return None
@@ -1125,6 +1275,13 @@ class SourcedMediaSelector:
                 0.0, float(row.get("final") or 0.0) - self.config.generic_score_penalty,
             )
             row["asset_type"] = AssetType.GENERIC_FALLBACK.value
+        if post_failover_floor is not None and float(row.get("final") or 0.0) + 1e-9 < post_failover_floor:
+            decision.extra.setdefault("post_failover_rejections", []).append({
+                "fallback_type": "GENERIC",
+                "final": round(float(row.get("final") or 0.0), 6),
+                "floor": round(float(post_failover_floor), 6),
+            })
+            return None
         asset = self._download(candidate)
         if asset is None:
             return None

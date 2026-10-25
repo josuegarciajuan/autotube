@@ -266,11 +266,14 @@ class ScriptGenerator:
             self.canal,
         )
 
-    def _llm_json_call(self, thinking: bool = True, client=None, model_name: str = None, **call_kwargs):
+    def _llm_json_call(
+        self, thinking: bool = True, client=None, model_name: str = None,
+        *, retries: int | None = None, **call_kwargs,
+    ):
         """Call LLM chat.completions.create and parse JSON with retry.
 
         Handles empty/invalid JSON responses from the API by retrying up
-        to ``self._llm_retries`` times with exponential backoff.  Returns
+        to ``max_attempts`` times with exponential backoff.  Returns
         the parsed dict, or raises the last exception on total failure.
 
         Args:
@@ -290,8 +293,12 @@ class ScriptGenerator:
         if effective_client is None:
             raise RuntimeError("No LLM client available for JSON call")
 
+        max_attempts = (
+            self._llm_retries if retries is None
+            else max(1, int(retries))
+        )
         last_exc = None
-        for attempt in range(self._llm_retries):
+        for attempt in range(max_attempts):
             try:
                 response = effective_client.chat.completions.create(**call_kwargs)
                 content = response.choices[0].message.content
@@ -307,7 +314,7 @@ class ScriptGenerator:
                 if content is None or not content.strip():
                     raise ValueError(
                         "LLM returned empty content (attempt %d/%d)" % (
-                            attempt + 1, self._llm_retries,
+                            attempt + 1, max_attempts,
                         )
                     )
                 # raw_decode tolerates trailing text after valid JSON
@@ -317,16 +324,32 @@ class ScriptGenerator:
                 return obj
             except json.JSONDecodeError as exc:
                 last_exc = exc
-                if attempt < self._llm_retries - 1:
+                # Recoverable payload defects (markdown fence, prose before the
+                # object, trailing comma, output-token truncation) are repaired
+                # deterministically before spending another API call.
+                try:
+                    from pipeline.json_repair import parse_json_lenient
+
+                    repaired = parse_json_lenient(content)
+                    if repaired is not None:
+                        logger.warning(
+                            "LLM JSON repaired (%s, attempt %d/%d): %s",
+                            model_name or "unknown", attempt + 1,
+                            max_attempts, exc,
+                        )
+                        return repaired
+                except Exception as repair_exc:  # never mask the original error
+                    logger.debug("JSON repair failed: %s", repair_exc)
+                if attempt < max_attempts - 1:
                     delay = self._llm_retry_delay * (2 ** attempt)
                     logger.warning(
                         "LLM JSON parse failed (%s, attempt %d/%d): %s — retrying in %.1fs",
-                        model_name or "unknown", attempt + 1, self._llm_retries, exc, delay,
+                        model_name or "unknown", attempt + 1, max_attempts, exc, delay,
                     )
                     time.sleep(delay)
             except ValueError as exc:
                 last_exc = exc
-                if attempt < self._llm_retries - 1:
+                if attempt < max_attempts - 1:
                     delay = self._llm_retry_delay * (2 ** attempt)
                     logger.warning(
                         "%s (%s) — retrying in %.1fs",
@@ -344,11 +367,11 @@ class ScriptGenerator:
                         model_name or "unknown", str(exc)[:160],
                     )
                     raise
-                if attempt < self._llm_retries - 1:
+                if attempt < max_attempts - 1:
                     delay = self._llm_retry_delay * (2 ** attempt)
                     logger.warning(
                         "LLM call failed (%s, attempt %d/%d): %s — retrying in %.1fs",
-                        model_name or "unknown", attempt + 1, self._llm_retries, exc, delay,
+                        model_name or "unknown", attempt + 1, max_attempts, exc, delay,
                     )
                     time.sleep(delay)
         raise last_exc

@@ -1708,6 +1708,27 @@ class MediaFetcher:
             )
         return pct
 
+    @staticmethod
+    def _sync_asset_motion_duration(asset: dict | None, duration: float) -> None:
+        """Make a still's motion plan match the FINAL rendered scene duration.
+
+        Image-timing splits happen *after* P04 selection (and after the plan is
+        created from the pre-split SceneSpec).  The plan's zoom/pan profile is
+        still deterministic; only its duration field becomes stale.  Updating
+        it here keeps the plan metadata truthful without changing the motion.
+        """
+        if not isinstance(asset, dict):
+            return
+        plan = asset.get("motion_plan")
+        if not isinstance(plan, dict) or not plan:
+            return
+        try:
+            final_duration = max(0.0, float(duration))
+        except (TypeError, ValueError):
+            return
+        plan["duration"] = round(final_duration, 3)
+        plan["duration_source"] = "final_scene_split"
+
     def _reconcile_actual_image_fallbacks(
         self,
         scenes: list[dict],
@@ -1755,6 +1776,7 @@ class MediaFetcher:
                         "no split respects the hard minimum)",
                         duration,
                     )
+                self._sync_asset_motion_duration(asset, duration)
                 expanded_scenes.append(scene)
                 expanded_assets.append(asset)
                 video_identity_tokens.update(self._asset_identity_tokens(asset))
@@ -1792,6 +1814,9 @@ class MediaFetcher:
                     else:
                         seen_identity_tokens.update(identity_tokens)
                         video_identity_tokens.update(identity_tokens)
+                # The renderer trims to the subscene duration; the plan must
+                # say the same duration it will actually be rendered with.
+                self._sync_asset_motion_duration(subasset, subscene["duration"])
                 expanded_scenes.append(subscene)
                 expanded_assets.append(subasset)
 
@@ -5330,8 +5355,24 @@ class MediaFetcher:
 
         return None
 
+    @staticmethod
+    def _image_magic_format(content: bytes) -> str:
+        """Return JPEG/PNG/WEBP for a raster payload, else an empty string."""
+        data = bytes(content or b"")
+        if data[:3] == b"\xff\xd8\xff":
+            return "JPEG"
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            return "PNG"
+        if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            return "WEBP"
+        return ""
+
     def _download_image(self, url: str, filename: str) -> Path | None:
-        """Download image to IMAGES_DIR. Cached. Validates JPEG integrity.
+        """Download image to IMAGES_DIR. Cached. Validates raster integrity.
+
+        The provider's URL extension is not trusted; the decoded payload is.
+        Supported formats: JPEG, PNG and WebP (non-JPEG is normalised to JPEG).
+        Rejected: HTML/error pages, too-small payloads and undecodable bytes.
 
         For Pixabay domains, adds a Referer header (largeImageURL CDN
         may reject requests without it). Downloads are validated:
@@ -5391,12 +5432,44 @@ class MediaFetcher:
                     self._bad_image_urls_ts = _time.time()
                     return None
 
-                # JPEG magic bytes check
-                if content[:3] != b'\xff\xd8\xff':
+                # ── Content-type contract ────────────────────────
+                # Pixabay sometimes serves PNG bytes for a ``.jpg`` URL.
+                # The contract is "a decodable raster image", not "the URL
+                # extension must equal the magic bytes".  Accept JPEG/PNG/
+                # WebP only after PIL actually decodes the payload, and
+                # normalise non-JPEG content to JPEG so downstream code keeps
+                # a consistent file type.  Arbitrary bytes (HTML, text, a
+                # truncated image) are still rejected.
+                from io import BytesIO
+                from PIL import Image
+
+                detected = self._image_magic_format(content)
+                if detected not in ("JPEG", "PNG", "WEBP"):
                     logger.warning(
-                        "Downloaded content is not JPEG (magic=%r) — retry or discard "
+                        "Downloaded content is not a supported raster image "
+                        "(magic=%r, detected=%s) — retry or discard "
                         "(attempt %d/%d): %s",
-                        content[:8], attempt + 1, max_retries, url[:100],
+                        content[:8], detected or "unknown",
+                        attempt + 1, max_retries, url[:100],
+                    )
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)
+                        continue
+                    self._bad_image_urls.add(url)
+                    self._bad_image_urls_ts = _time.time()
+                    return None
+
+                try:
+                    with Image.open(BytesIO(content)) as pil_img:
+                        pil_img.load()
+                        w, h = pil_img.size
+                        source_format = str(pil_img.format or detected or "").upper()
+                        if source_format not in ("JPEG", "PNG", "WEBP"):
+                            raise ValueError(f"unexpected decoded format {source_format!r}")
+                except Exception as exc:
+                    logger.warning(
+                        "Downloaded image could not be decoded (%s) — discard: %s",
+                        exc, url[:100],
                     )
                     if attempt < max_retries - 1:
                         time.sleep(2 ** attempt)
@@ -5407,27 +5480,32 @@ class MediaFetcher:
 
                 # ── Success path ─────────────────────────────────
                 settings.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-                filepath.write_bytes(content)
+                if source_format == "JPEG":
+                    filepath.write_bytes(content)
+                else:
+                    # Normalise PNG/WebP behind a .jpg URL.  Quality 95 keeps
+                    # the stock image visually identical for Ken Burns.
+                    with Image.open(BytesIO(content)) as pil_img:
+                        rgb = pil_img.convert("RGB")
+                        rgb.save(filepath, "JPEG", quality=95)
+                    logger.info(
+                        "Normalised %s content to JPEG for %s (URL extension was .jpg)",
+                        source_format, filename,
+                    )
 
                 # Dimension check for Ken Burns viability (Fase 1: always log
                 # the REAL dimensions so audits can correlate asset size).
-                try:
-                    from PIL import Image
-                    from io import BytesIO
-                    with Image.open(BytesIO(content)) as pil_img:
-                        w, h = pil_img.size
-                    min_dim = min(w, h)
-                    logger.info(
-                        "Image dimensions: %s is %dx%d", filename, w, h,
+                min_dim = min(w, h)
+                logger.info(
+                    "Image dimensions: %s is %dx%d (source=%s)",
+                    filename, w, h, source_format,
+                )
+                if min_dim < 800:
+                    logger.warning(
+                        "Image %s is %dx%d — below 800px minimum for Ken Burns zoom",
+                        filename, w, h,
                     )
-                    if min_dim < 800:
-                        logger.warning(
-                            "Image %s is %dx%d — below 800px minimum for Ken Burns zoom",
-                            filename, w, h,
-                        )
-                        # Don't reject — still usable if closest match — but warn
-                except Exception:
-                    logger.warning("Could not verify image dimensions for %s", filename)
+                    # Don't reject — still usable if closest match — but warn
 
                 logger.info("Downloaded image: %s (%d bytes)", filepath, content_len)
                 return filepath
@@ -5491,15 +5569,20 @@ class MediaFetcher:
 
     @staticmethod
     def _is_valid_image(filepath: Path) -> bool:
-        """Quick validation: is the cached file a real JPEG with adequate size?"""
+        """Is the cached file a decodable raster image with adequate size?
+
+        Legacy caches may contain PNG/WebP bytes behind a ``.jpg`` name; they
+        are valid as long as a real image decoder can read them.
+        """
         try:
-            if not filepath.exists():
+            path = Path(filepath)
+            if not path.exists() or path.stat().st_size < 50000:
                 return False
-            size = filepath.stat().st_size
-            if size < 50000:
-                return False
-            header = filepath.read_bytes()[:4]
-            return header[:3] == b'\xff\xd8\xff'
+            from PIL import Image
+
+            with Image.open(path) as pil_img:
+                pil_img.load()
+                return str(pil_img.format or "").upper() in ("JPEG", "PNG", "WEBP")
         except Exception:
             return False
 
