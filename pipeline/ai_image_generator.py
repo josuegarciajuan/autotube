@@ -33,8 +33,10 @@ import os
 import random
 import subprocess
 import sys
+import tempfile
 import time
 import zlib
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
@@ -118,15 +120,44 @@ def _read_pollo_status() -> dict:
         return {}
 
 
+def _parse_expires(value) -> Optional[date]:
+    """Parse the optional ``expires`` field of a Pollo account (YYYY-MM-DD)."""
+    text = str(value or "").strip()[:10]
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _account_rank(account: dict, status: dict) -> tuple:
+    """Ranking tuple: lower is better. Never excludes an account.
+
+    All flags are only *hints*: an expired cookie can have been renewed without
+    clearing the status file, so we still try it (as primary or fallback).
+    """
+    label = account["label"]
+    info = status.get(label, {}) if isinstance(status.get(label), dict) else {}
+    credits = bool(info.get("credits_exhausted"))
+    session = bool(info.get("session_expired"))
+    exp = _parse_expires(account.get("expires"))
+    date_expired = exp is not None and exp < date.today()
+    return (credits, session, date_expired)
+
+
 def _select_pollo_account_pair() -> tuple:
-    """Select a random primary account (with credits available) + a different
-    active account as fallback.
+    """Select a random primary account plus a *different* fallback account.
 
     Returns:
         (primary_cookie, primary_label, fallback_cookie, fallback_label)
         or ("single_cookie", "legacy", None, None) if pollo_accounts[] is empty.
 
-    If only one active account exists, fallback values are None.
+    The fallback is always a different account whenever a second account with a
+    cookie exists, even if every account is flagged (credits exhausted or
+    session expired). Previously, when all accounts were flagged, only the
+    first one was returned (``fallback=none``), so the second account was never
+    attempted and the system silently degraded to one account.
     """
     accounts = _read_pollo_accounts()
     if not accounts:
@@ -136,63 +167,105 @@ def _select_pollo_account_pair() -> tuple:
 
     status = _read_pollo_status()
 
-    # Filter active accounts (credits not exhausted)
-    active = []
+    usable = []
     for acc in accounts:
         label = str(acc.get("label", "")).strip()
         cookie = str(acc.get("cookie", "")).strip()
         if not label or not cookie:
             continue
-        acc_status = status.get(label, {})
-        if not acc_status.get("credits_exhausted", False):
-            active.append({"label": label, "cookie": cookie})
+        usable.append({"label": label, "cookie": cookie, "expires": acc.get("expires")})
 
-    if not active:
-        # All accounts exhausted — return first account anyway (worker will report error)
-        first = accounts[0]
-        label = str(first.get("label", "primary")).strip() or "primary"
-        cookie = str(first.get("cookie", "")).strip()
-        return (cookie, label, None, None)
+    if not usable:
+        return (None, None, None, None)
 
-    # Shuffle to randomize selection
-    random.shuffle(active)
+    def _pick(pool):
+        random.shuffle(pool)
+        return pool[0] if pool else None
 
-    primary = active[0]
-    primary_cookie = primary["cookie"]
-    primary_label = primary["label"]
+    healthy = [a for a in usable if _account_rank(a, status) == (False, False, False)]
+    primary = _pick(healthy) or _pick(list(usable))
 
-    # Pick fallback: first different active account
-    fallback_cookie = None
-    fallback_label = None
-    for acc in active[1:]:
-        if acc["label"] != primary_label:
-            fallback_cookie = acc["cookie"]
-            fallback_label = acc["label"]
-            break
-
-    # If no different active account, try any account (even exhausted) as fallback
-    if not fallback_cookie:
-        for acc in accounts:
-            candidate_label = str(acc.get("label", "")).strip()
-            candidate_cookie = str(acc.get("cookie", "")).strip()
-            if candidate_label and candidate_label != primary_label and candidate_cookie:
-                fallback_cookie = candidate_cookie
-                fallback_label = candidate_label
-                break
+    candidates = [a for a in usable if a["label"] != primary["label"]]
+    healthy_candidates = [
+        a for a in candidates if _account_rank(a, status) == (False, False, False)
+    ]
+    fallback = _pick(healthy_candidates) or _pick(candidates)
 
     logger.info(
-        "Pollo accounts: primary=%s fallback=%s active=%d",
-        primary_label, fallback_label or "none", len(active),
+        "Pollo accounts: primary=%s fallback=%s usable=%d healthy=%d flagged=%d",
+        primary["label"],
+        fallback["label"] if fallback else "none",
+        len(usable),
+        len(healthy),
+        len(usable) - len(healthy),
     )
-    return (primary_cookie, primary_label, fallback_cookie, fallback_label)
+    return (
+        primary["cookie"],
+        primary["label"],
+        fallback["cookie"] if fallback else None,
+        fallback["label"] if fallback else None,
+    )
+
+
+def _persist_alert_flags(flags: dict) -> None:
+    """Merge alert bookkeeping into the shared status file under its lock.
+
+    The CRM (PHP) and the worker write this file too, so we never overwrite it
+    blindly: we re-read it inside the same ``.lock`` file and only touch the
+    alert keys we are changing.
+    """
+    if not flags:
+        return
+    import fcntl
+
+    path = os.path.abspath(POLLO_STATUS_FILE)
+    lock_path = path + ".lock"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(lock_path, "a+") as lock_fh:
+            fcntl.flock(lock_fh, fcntl.LOCK_EX)
+            try:
+                try:
+                    with open(path, "r") as fh:
+                        raw = fh.read()
+                    data = json.loads(raw) if raw.strip() else {}
+                except FileNotFoundError:
+                    data = {}
+                except Exception:
+                    logger.warning("Pollo status file malformed; alert flags not persisted")
+                    return
+                if not isinstance(data, dict):
+                    return
+                for label, changes in flags.items():
+                    entry = data.get(label)
+                    if not isinstance(entry, dict):
+                        entry = {}
+                    for key, value in changes.items():
+                        if value is None:
+                            entry.pop(key, None)
+                        else:
+                            entry[key] = value
+                    data[label] = entry
+                tmp = path + ".tmp.%d" % os.getpid()
+                with open(tmp, "w") as fh:
+                    json.dump(data, fh, indent=2, ensure_ascii=False)
+                os.replace(tmp, path)
+            finally:
+                fcntl.flock(lock_fh, fcntl.LOCK_UN)
+    except Exception as exc:
+        logger.warning("Failed to write alert status to %s: %s", POLLO_STATUS_FILE, exc)
 
 
 def _check_and_alert_pollo_credits(db) -> None:
-    """Read the shared status file and create pipeline_alerts for any exhausted
-    Pollo accounts that haven't been alerted yet.
+    """Create pipeline alerts for Pollo accounts that need operator action.
 
-    Uses an in-memory 'alerted' flag (stored in the status file under each
-    account's ``alerted`` key) to prevent duplicate alerts.
+    Distinguishes two independent conditions:
+      * ``credits_exhausted`` → recharge credits;
+      * ``session_expired``   → renew the session cookie.
+
+    Duplicate alerts are prevented with per-condition flags (``credits_alerted``
+    / ``session_alerted``) stored in the shared status file. When an account
+    recovers, its flags are cleared so a future incident alerts again.
 
     Args:
         db: Database module/connection (must have a ``_connect()`` method via
@@ -210,58 +283,67 @@ def _check_and_alert_pollo_credits(db) -> None:
         logger.warning("Cannot import create_alert — alerts disabled")
         return
 
-    changed = False
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+    flags: dict = {}
+
+    conditions = (
+        (
+            "credits_exhausted",
+            "credits_alerted",
+            "pollo_credits_exhausted",
+            "sin créditos",
+            "Se agotaron los créditos de la cuenta {label} en Pollo.ai. "
+            "Recarga créditos; se usará otra cuenta como fallback si está disponible.",
+        ),
+        (
+            "session_expired",
+            "session_alerted",
+            "pollo_session_expired",
+            "cookie caducada",
+            "La cookie de sesión de la cuenta {label} en Pollo.ai ha caducado (401). "
+            "Renueva la cookie en Josue → ConfigM → Pollo.ai · Cuentas.",
+        ),
+    )
 
     for acc in accounts:
         label = str(acc.get("label", "")).strip()
         if not label:
             continue
+        info = status.get(label, {})
+        if not isinstance(info, dict):
+            info = {}
 
-        acc_status = status.get(label, {})
-        credits_exhausted = acc_status.get("credits_exhausted", False)
-        already_alerted = acc_status.get("alerted", False)
-
-        if credits_exhausted and not already_alerted:
-            # Use deterministic hash (zlib.crc32) so entity_id is stable across
-            # Python runs — prevents duplicate alerts when hash() randomized.
-            account_entity_id = zlib.crc32(label.encode("utf-8")) & 0x7FFFFFFF
-            create_alert(
-                db,
-                entity_type="system",
-                entity_id=account_entity_id,
-                alert_type="pollo_credits_exhausted",
-                severity="warning",
-                title=f"Pollo.ai: cuenta {label} sin créditos",
-                message=(
-                    f"Se agotaron los créditos de la cuenta {label} en Pollo.ai. "
-                    "Se usará otra cuenta como fallback si está disponible."
-                ),
-                metadata={"account": label},
+        for flag_key, alerted_key, alert_type, title_suffix, message in conditions:
+            active = bool(info.get(flag_key))
+            already = bool(info.get(alerted_key)) or (
+                flag_key == "credits_exhausted" and bool(info.get("alerted"))
             )
-            # Mark as alerted in status
-            if label not in status:
-                status[label] = {}
-            status[label]["alerted"] = True
-            status[label]["alerted_at"] = time.strftime(
-                "%Y-%m-%d %H:%M:%S UTC", time.gmtime()
-            )
-            changed = True
-            logger.info("Alert created for exhausted Pollo account: %s", label)
 
-    # Clear alerted flags for accounts that recovered credits
-    for label, info in list(status.items()):
-        if not info.get("credits_exhausted") and info.get("alerted"):
-            del info["alerted"]
-            del info["alerted_at"]
-            changed = True
+            if active and not already:
+                # zlib.crc32 keeps entity_id stable across runs (hash() is salted).
+                entity_id = zlib.crc32(f"{label}:{flag_key}".encode("utf-8")) & 0x7FFFFFFF
+                create_alert(
+                    db,
+                    entity_type="system",
+                    entity_id=entity_id,
+                    alert_type=alert_type,
+                    severity="warning",
+                    title=f"Pollo.ai: cuenta {label} {title_suffix}",
+                    message=message.format(label=label),
+                    metadata={"account": label, "condition": flag_key},
+                )
+                flags.setdefault(label, {})[alerted_key] = True
+                flags[label][alerted_key + "_at"] = stamp
+                logger.info("Alert created for Pollo account %s (%s)", label, flag_key)
 
-    if changed:
-        try:
-            os.makedirs(os.path.dirname(os.path.abspath(POLLO_STATUS_FILE)), exist_ok=True)
-            with open(POLLO_STATUS_FILE, "w") as fh:
-                json.dump(status, fh, indent=2, ensure_ascii=False)
-        except Exception as exc:
-            logger.warning("Failed to write alert status to %s: %s", POLLO_STATUS_FILE, exc)
+            elif not active and (info.get(alerted_key) or info.get("alerted")):
+                flags.setdefault(label, {})[alerted_key] = None
+                flags[label][alerted_key + "_at"] = None
+                if flag_key == "credits_exhausted":
+                    flags[label]["alerted"] = None
+                    flags[label]["alerted_at"] = None
+
+    _persist_alert_flags(flags)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -347,28 +429,39 @@ class AIImageGenerator:
             )
 
         json_out = output_path.with_suffix(".pollo.json")
-        cmd = [
-            sys.executable, str(WORKER_PATH), "generate",
-            "--cookie", self._primary_cookie,
-            "--account-label", self._primary_label or "primary",
-            "--prompt", prompt,
-            "--model", self._model,
-            "--aspect-ratio", aspect_ratio or DEFAULT_ASPECT_RATIO,
-            "--num-outputs", "1",
-            "--output-image", str(output_path),
-            "--output-json", str(json_out),
-            "--timeout", str(WORKER_TIMEOUT),
-        ]
 
-        # Add fallback args in dual-cookie mode
-        if self._use_dual_cookie and self._fallback_cookie:
-            cmd.extend([
-                "--fallback-cookie", self._fallback_cookie,
-                "--fallback-label", self._fallback_label or "fallback",
-                "--status-file", POLLO_STATUS_FILE,
-            ])
+        # Cookies are passed through a 0600 temp file, never as argv: command
+        # lines are world-readable via /proc and would leak session tokens.
+        cookie_file = self._write_cookie_file()
+        try:
+            cmd = [
+                sys.executable, str(WORKER_PATH), "generate",
+                "--cookie-file", cookie_file,
+                "--account-label", self._primary_label or "primary",
+                "--prompt", prompt,
+                "--model", self._model,
+                "--aspect-ratio", aspect_ratio or DEFAULT_ASPECT_RATIO,
+                "--num-outputs", "1",
+                "--output-image", str(output_path),
+                "--output-json", str(json_out),
+                "--timeout", str(WORKER_TIMEOUT),
+            ]
 
-        result = self._run_worker(cmd, json_out)
+            # Dual-cookie mode: always pass the shared status file so account
+            # failures are recorded (even when there is only one usable account).
+            if self._use_dual_cookie:
+                cmd.extend(["--status-file", POLLO_STATUS_FILE])
+                if self._fallback_cookie:
+                    cmd.extend([
+                        "--fallback-label", self._fallback_label or "fallback",
+                    ])
+
+            result = self._run_worker(cmd, json_out)
+        finally:
+            try:
+                os.unlink(cookie_file)
+            except OSError:
+                pass
 
         # Log which account was used
         cookie_used = result.get("cookie_used", "")
@@ -416,6 +509,33 @@ class AIImageGenerator:
         return results
 
     # ── Internal ──────────────────────────────────────────────
+
+    def _write_cookie_file(self) -> str:
+        """Persist the selected cookies in a 0600 temp file for the worker."""
+        payload = {
+            "cookie": self._primary_cookie,
+            "account_label": self._primary_label or "primary",
+        }
+        if self._fallback_cookie:
+            payload["fallback_cookie"] = self._fallback_cookie
+            payload["fallback_label"] = self._fallback_label or "fallback"
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        fd, path = tempfile.mkstemp(prefix="pollo_cookies_", suffix=".json")
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            raise
+        return path
 
     def _run_worker(self, cmd: list[str], json_out: Path) -> dict:
         """Run the worker subprocess and return its parsed JSON result."""
@@ -508,12 +628,16 @@ class SceneImageGenerator:
             )
         prompt = prompt[:MAX_PROMPT_CHARS]
 
-        # Check cache (hash the prompt)
-        cache_key = hashlib.md5(prompt.encode()).hexdigest()[:12]
-        cache_path = self.cache_dir / f"{cache_key}.png"
-        if cache_path.exists():
-            logger.info("Using cached scene image: %s", cache_path)
-            return cache_path
+        # Cache key includes the prompt and the model: the same prompt rendered
+        # by a different model is a different image.
+        cache_key = hashlib.md5(f"{self._model}|{prompt}".encode()).hexdigest()[:12]
+        # The generator writes .jpg; checking only .png here made the cache
+        # never hit and re-spent credits on every repeated scene.
+        for suffix in (".jpg", ".jpeg", ".png", ".webp"):
+            cache_path = self.cache_dir / f"{cache_key}{suffix}"
+            if cache_path.exists():
+                logger.info("Using cached scene image: %s", cache_path)
+                return cache_path
 
         # Generate via worker subprocess
         try:

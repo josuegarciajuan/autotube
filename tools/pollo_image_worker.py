@@ -12,9 +12,12 @@ Compatibilidad:
 """
 
 import argparse
+import fcntl
 import json
 import os
+import stat
 import sys
+import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -102,6 +105,59 @@ MODEL_CONFIG = {
 }
 
 
+# ── Account-level errors (cookie expired vs. out of credits) ──
+# These are *not* interchangeable: a 401 means the session must be renewed,
+# while a 403 "user video limit" means the account has no credits left.  The
+# status file used to conflate both as `credits_exhausted`, which poisoned the
+# account selector and made Autotube silently stop trying the second account.
+
+STATUS_CREDITS = "credits_exhausted"
+STATUS_SESSION = "session_expired"
+ACCOUNT_STATUS_KINDS = (STATUS_CREDITS, STATUS_SESSION)
+
+
+class PolloAccountError(RuntimeError):
+    """Base for errors that affect a single account (safe to try fallback)."""
+
+    kind = ""
+
+
+class PolloSessionError(PolloAccountError):
+    kind = STATUS_SESSION
+
+
+class PolloCreditsError(PolloAccountError):
+    kind = STATUS_CREDITS
+
+
+def classify_account_error(exc):
+    """Return STATUS_SESSION / STATUS_CREDITS for account-level errors, else None."""
+    if isinstance(exc, PolloSessionError):
+        return STATUS_SESSION
+    if isinstance(exc, PolloCreditsError):
+        return STATUS_CREDITS
+    text = str(exc or "").lower()
+    if (
+        "user unauthorized" in text
+        or "credential_missing" in text
+        or "sesion caducada" in text
+        or "sesión caducada" in text
+        or "session expired" in text
+        or "unauthorized (401)" in text
+        or "http 401" in text
+    ):
+        return STATUS_SESSION
+    if (
+        "sin créditos" in text
+        or "sin creditos" in text
+        or "user video limit" in text
+        or "video limit" in text
+        or "limit error" in text
+    ):
+        return STATUS_CREDITS
+    return None
+
+
 def compact_json(obj):
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
 
@@ -174,12 +230,14 @@ def create_generation(client, prompt, model_cfg, aspect_ratio, num_outputs):
     resp = client.post(url, json=body, timeout=30)
 
     if resp.status_code == 401:
-        raise RuntimeError("Sesion caducada (401). Renueva la cookie en Josue > ConfigM.")
+        raise PolloSessionError(
+            "Sesion caducada (401). Renueva la cookie de esta cuenta de Pollo.ai."
+        )
     if resp.status_code == 403:
         # Distinguir entre Cloudflare WAF y "sin créditos" de Pollo
         resp_text = (resp.text or "").lower()
         if "user video limit" in resp_text or "limit error" in resp_text:
-            raise RuntimeError(
+            raise PolloCreditsError(
                 "Cuenta de Pollo.ai sin créditos disponibles (403 User video limit error). "
                 "Recarga créditos o cambia de cuenta."
             )
@@ -354,6 +412,8 @@ def poll_generation(client, gen_id, timeout_sec, expected_outputs=1):
             if reason.lower() in ("desconocido", "unknown", "null", "none") and failed_unknown_polls < UNKNOWN_FAILURE_GRACE_POLLS:
                 failed_unknown_polls += 1
                 continue
+            if "limit" in reason.lower() or "credit" in reason.lower() or "crédito" in reason.lower():
+                raise PolloCreditsError("La generacion fallo por falta de creditos: %s" % reason)
             raise RuntimeError("La generacion fallo: %s" % reason)
 
         failed_unknown_polls = 0
@@ -460,7 +520,17 @@ def apply_realism_postprocess(image_path):
         arr = arr + noise
         arr = np.clip(arr, 0, 255).astype(np.uint8)
         img = Image.fromarray(arr)
-        img.save(image_path, "JPEG", quality=92, optimize=True)
+        # Keep the real container format: saving a PNG path as JPEG leaves a
+        # JPEG payload inside a .png file (mismatched extension/mime).
+        ext = os.path.splitext(str(image_path))[1].lower()
+        if ext == ".png":
+            img.save(image_path, "PNG", optimize=True)
+        elif ext == ".webp":
+            img.save(image_path, "WEBP", quality=92)
+        elif ext in (".gif",):
+            return
+        else:
+            img.save(image_path, "JPEG", quality=92, optimize=True)
     except Exception:
         pass
 
@@ -584,38 +654,115 @@ def save_multiple_outputs(client, result, generation_id, output_dir, output_pref
 
 # ── Dual-cookie rotation support ──────────────────────────
 
-def _write_exhausted_status(status_file, label):
-    """Actualiza el archivo de estado marcando una cuenta como agotada."""
-    if not status_file:
-        return
+def _read_status_file(path):
+    """Read the shared status JSON. Returns (data, ok).
+
+    ``ok`` is False when the file exists but is malformed: in that case we must
+    never overwrite it (the CRM uses the same file and may be mid-write).
+    """
+    if not os.path.exists(path):
+        return {}, True
     try:
-        os.makedirs(os.path.dirname(os.path.abspath(status_file)), exist_ok=True)
-        data = {}
-        if os.path.exists(status_file):
-            with open(status_file, "r") as fh:
-                data = json.loads(fh.read() or "{}")
-        if label not in data:
-            data[label] = {}
-        data[label]["credits_exhausted"] = True
-        data[label]["exhausted_at"] = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
-        with open(status_file, "w") as fh:
+        with open(path, "r") as fh:
+            raw = fh.read()
+        if not raw.strip():
+            return {}, True
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return {}, False
+        return data, True
+    except Exception:
+        return {}, False
+
+
+def _write_json_atomic(path, data):
+    """Atomically replace *path* keeping its previous mode/owner when possible."""
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    prev = None
+    try:
+        prev = os.stat(path)
+    except OSError:
+        prev = None
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=os.path.basename(path) + ".tmp.", dir=directory
+    )
+    try:
+        with os.fdopen(fd, "w") as fh:
             json.dump(data, fh, indent=2, ensure_ascii=False)
-        print("POLLO_STATUS: cuenta '%s' marcada como sin créditos en %s" % (label, status_file), file=sys.stderr)
+        if prev is not None:
+            try:
+                os.chmod(tmp_path, stat.S_IMODE(prev.st_mode))
+            except OSError:
+                pass
+            try:
+                os.chown(tmp_path, prev.st_uid, prev.st_gid)
+            except OSError:
+                pass
+        else:
+            os.chmod(tmp_path, 0o664)
+        os.replace(tmp_path, path)
+        tmp_path = None
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+def _write_account_status(status_file, label, kind, detail=""):
+    """Record an account-level failure using the CRM's shared lock protocol.
+
+    ``kind`` is STATUS_SESSION (cookie expired → needs renewal) or
+    STATUS_CREDITS (no credits).  Both are kept in separate keys so an expired
+    cookie never gets reported as "out of credits".
+    """
+    if not status_file or not label or kind not in ACCOUNT_STATUS_KINDS:
+        return
+    path = os.path.abspath(status_file)
+    lock_path = path + ".lock"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(lock_path, "a+") as lock_fh:
+            fcntl.flock(lock_fh, fcntl.LOCK_EX)
+            try:
+                data, ok = _read_status_file(path)
+                if not ok:
+                    print(
+                        "POLLO_STATUS: estado malformado, no se sobrescribe: %s" % path,
+                        file=sys.stderr,
+                    )
+                    return
+                entry = data.get(label)
+                if not isinstance(entry, dict):
+                    entry = {}
+                other = STATUS_CREDITS if kind == STATUS_SESSION else STATUS_SESSION
+                entry.pop(other, None)
+                entry.pop(other + "_at", None)
+                entry[kind] = True
+                stamp = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+                entry[kind + "_at"] = stamp
+                if detail:
+                    entry[kind + "_detail"] = str(detail)[:240]
+                # Backward compatibility with the CRM, which reads
+                # `credits_exhausted` / `exhausted_at`.
+                if kind == STATUS_CREDITS:
+                    entry["exhausted_at"] = stamp
+                # A new failure cycle must be able to raise a new alert.
+                entry.pop(kind + "_alerted", None)
+                entry.pop(kind + "_alerted_at", None)
+                data[label] = entry
+                _write_json_atomic(path, data)
+                print(
+                    "POLLO_STATUS: cuenta '%s' -> %s en %s" % (label, kind, path),
+                    file=sys.stderr,
+                )
+            finally:
+                fcntl.flock(lock_fh, fcntl.LOCK_UN)
     except Exception as exc:
         print("POLLO_STATUS: no se pudo escribir %s: %s" % (status_file, exc), file=sys.stderr)
 
-
-def _is_credits_or_expired(err_str):
-    """Devuelve True si el error es de cuenta (créditos/cookie expirada),
-    es decir, errores que justifican probar la cuenta de fallback."""
-    err_lower = err_str.lower()
-    return (
-        "sin créditos" in err_lower
-        or "video limit" in err_lower
-        or "401" in err_str
-        or "caducada" in err_lower
-        or "sesion caducada" in err_lower
-    )
 
 
 def _try_generate_with_cookie(cookie_value, args):
@@ -649,13 +796,7 @@ def _try_generate_with_cookie(cookie_value, args):
             break
         except Exception as exc:
             err = str(exc)
-            non_retryable = (
-                "401" in err
-                or "sin créditos" in err.lower()
-                or "video limit" in err.lower()
-                or "caducada" in err.lower()
-            )
-            if non_retryable:
+            if classify_account_error(exc) is not None:
                 raise
             retryable = (
                 "403" in err
@@ -723,6 +864,102 @@ def _download_and_fill_result(result, gen_id, poll_result, client, num_outputs, 
 
 # ── Main entry point ──────────────────────────────────────
 
+def _load_cookie_file(path):
+    """Load cookies from a JSON file (kept out of argv to avoid leaking them
+    through /proc/<pid>/cmdline). Accepts {"cookie": ...} or a bare string."""
+    with open(path, "r") as fh:
+        data = json.load(fh)
+    if isinstance(data, str):
+        return {"cookie": data}
+    if not isinstance(data, dict):
+        raise RuntimeError("Formato de cookie-file invalido")
+    return data
+
+
+def _apply_cookie_file(args):
+    path = getattr(args, "cookie_file", "") or ""
+    if not path:
+        return
+    payload = _load_cookie_file(path)
+    if not args.cookie:
+        args.cookie = str(payload.get("cookie", "") or "")
+    if not getattr(args, "fallback_cookie", ""):
+        args.fallback_cookie = str(payload.get("fallback_cookie", "") or "")
+    if getattr(args, "account_label", "primary") == "primary" and payload.get("account_label"):
+        args.account_label = str(payload["account_label"])
+    if getattr(args, "fallback_label", "fallback") == "fallback" and payload.get("fallback_label"):
+        args.fallback_label = str(payload["fallback_label"])
+
+
+PROBE_INPUT = urllib.parse.quote(
+    compact_json({"0": {"json": {"id": 0}}}), safe=""
+)
+PROBE_URL = BASE_URL + "/generation.queryRecordDetail?batch=1&input=" + PROBE_INPUT
+
+
+def _is_cloudflare_response(resp):
+    text = (resp.text or "").lower()
+    return (
+        "just a moment" in text
+        or "cloudflare" in text
+        or "attention required" in text
+        or "cf-chl" in text
+    )
+
+
+def probe_cookie(cookie_value):
+    """Check whether a cookie is still authenticated (costs 0 credits).
+
+    Uses a query on a non-existent record: 401 => session expired; anything
+    else (400/403-non-WAF/404/200) => session accepted by Pollo.
+    """
+    cookie_value = extract_cookie_value(cookie_value)
+    if not cookie_value:
+        return {"ok": False, "valid": False, "error": "cookie vacia"}
+    last_error = ""
+    for fp in IMPERSONATION_TARGETS:
+        try:
+            client = make_client(cookie_value, impersonate=fp)
+            resp = client.get(PROBE_URL, timeout=20)
+        except Exception as exc:
+            last_error = str(exc)[:160]
+            continue
+        code = resp.status_code
+        if code == 401:
+            return {
+                "ok": True, "valid": False, "http_status": 401,
+                "reason": STATUS_SESSION, "fingerprint": fp,
+                "error": "Sesion caducada (401).",
+            }
+        if code == 403:
+            if _is_cloudflare_response(resp):
+                last_error = "Cloudflare 403"
+                continue
+            return {
+                "ok": True, "valid": True, "http_status": 403,
+                "fingerprint": fp, "error": "",
+            }
+        if code in (200, 201, 400, 404):
+            return {
+                "ok": True, "valid": True, "http_status": code,
+                "fingerprint": fp, "error": "",
+            }
+        last_error = "HTTP %s" % code
+    return {"ok": False, "valid": False, "error": last_error or "sin fingerprint valido"}
+
+
+def cmd_probe(args):
+    result = {"ok": False, "valid": False, "account": args.account_label, "error": ""}
+    try:
+        _apply_cookie_file(args)
+        result.update(probe_cookie(args.cookie))
+        result["account"] = args.account_label
+    except Exception as exc:
+        result["error"] = str(exc)
+    print(json.dumps(result, ensure_ascii=False))
+    return 0 if result.get("ok") else 1
+
+
 def cmd_generate(args):
     result = {
         "ok": False,
@@ -739,6 +976,10 @@ def cmd_generate(args):
     try:
         if HTTP_BACKEND == "none":
             raise RuntimeError("No hay libreria HTTP disponible. Instala: pip install curl-cffi")
+
+        _apply_cookie_file(args)
+        if not (getattr(args, "cookie", "") or "").strip():
+            raise RuntimeError("Falta --cookie o --cookie-file con una cookie valida.")
 
         prompt_len = len(args.prompt or "")
         result["prompt_length"] = prompt_len
@@ -758,7 +999,7 @@ def cmd_generate(args):
             fallback_label = getattr(args, 'fallback_label', 'fallback') or 'fallback'
             cookies_to_try.append((fallback_label, fallback_cookie))
 
-        last_credits_errors = []
+        last_account_errors = []
         gen_id = None
         poll_result = None
         client = None
@@ -781,20 +1022,28 @@ def cmd_generate(args):
                 result["cookie_used"] = used_label
                 print("POLLO: generacion OK con cuenta '%s'" % used_label, file=sys.stderr)
                 break  # exito — salir del bucle de cookies
-            except RuntimeError as exc:
-                err = str(exc)
-                if _is_credits_or_expired(err):
-                    last_credits_errors.append((account_label, err))
-                    _write_exhausted_status(status_file, account_label)
-                    print("POLLO: cuenta '%s' sin créditos/caducada, probando siguiente..." % account_label, file=sys.stderr)
-                    continue
-                else:
+            except Exception as exc:
+                kind = classify_account_error(exc)
+                if kind is None:
                     raise  # Cloudflare, timeout, etc — no reintentar con otra cookie
+                last_account_errors.append((account_label, kind, str(exc)))
+                _write_account_status(status_file, account_label, kind, str(exc))
+                print(
+                    "POLLO: cuenta '%s' no disponible (%s), probando siguiente..."
+                    % (account_label, kind),
+                    file=sys.stderr,
+                )
+                continue
 
         if used_label is None:
-            if last_credits_errors:
-                parts = ["%s: %s" % (label, err[:120]) for label, err in last_credits_errors]
-                raise RuntimeError("Todas las cuentas Pollo.ai sin créditos disponibles. %s" % " | ".join(parts))
+            if last_account_errors:
+                parts = []
+                for label, kind, err in last_account_errors:
+                    reason = "sesión caducada" if kind == STATUS_SESSION else "sin créditos"
+                    parts.append("%s: [%s] %s" % (label, reason, err[:120]))
+                raise RuntimeError(
+                    "Ninguna cuenta Pollo.ai pudo generar. " + " | ".join(parts)
+                )
             raise RuntimeError("No se pudo generar con ninguna cuenta Pollo.ai.")
 
         # ── Descargar imagenes ───────────────────────────────
@@ -824,11 +1073,15 @@ def main():
     sub = parser.add_subparsers(dest="command")
 
     gen = sub.add_parser("generate")
-    gen.add_argument("--cookie", required=True, help="Cookie de sesion completa (primaria)")
+    gen.add_argument("--cookie", default="", help="Cookie de sesion completa (primaria)")
+    gen.add_argument(
+        "--cookie-file", default="",
+        help="JSON con las cookies (evita exponerlas en la linea de comandos)",
+    )
     gen.add_argument("--fallback-cookie", default="", help="Cookie secundaria para fallback si primaria sin creditos")
     gen.add_argument("--account-label", default="primary", help="Etiqueta de la cuenta primaria")
     gen.add_argument("--fallback-label", default="fallback", help="Etiqueta de la cuenta secundaria")
-    gen.add_argument("--status-file", default="", help="Ruta JSON para escribir estado de cuentas agotadas")
+    gen.add_argument("--status-file", default="", help="Ruta JSON para escribir estado de cuentas")
     gen.add_argument("--prompt", required=True, help="Prompt de texto")
     gen.add_argument("--model", default="flux-dev", help="Modelo Pollo.ai")
     gen.add_argument("--aspect-ratio", default="", help="Ratio (2:3, 4:3, 1:1...)")
@@ -840,9 +1093,16 @@ def main():
     gen.add_argument("--output-json", default="", help="Ruta donde guardar el JSON de resultado")
     gen.add_argument("--timeout", type=int, default=300, help="Timeout base en segundos")
 
+    probe = sub.add_parser("probe", help="Comprueba si una cookie sigue autenticada (0 creditos)")
+    probe.add_argument("--cookie", default="", help="Cookie de sesion")
+    probe.add_argument("--cookie-file", default="", help="JSON con la cookie")
+    probe.add_argument("--account-label", default="primary", help="Etiqueta de la cuenta")
+
     args = parser.parse_args()
     if args.command == "generate":
         sys.exit(cmd_generate(args))
+    if args.command == "probe":
+        sys.exit(cmd_probe(args))
     parser.print_help()
     sys.exit(1)
 
