@@ -48,6 +48,13 @@ def decision_record(
             "routing_budget": dict(decision.routing_budget),
             "coherence": dict(decision.coherence_signals),
             "provenance": dict(decision.provenance),
+            # R1 diagnostics (small, JSON-safe): failover floor/cache and the
+            # integrated rerank counterfactual.  No candidate payloads here.
+            "failover": dict(decision.extra.get("failover") or {}),
+            "integrated": dict(decision.extra.get("integrated") or {}),
+            "post_failover_rejections": list(
+                decision.extra.get("post_failover_rejections") or []
+            ),
         }
     return {
         "video_id": video_id,
