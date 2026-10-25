@@ -156,6 +156,20 @@ class MediaFetcher:
         self._pending_selection_decisions: list[dict] = []
         self._last_selection_decision = None
         self._shadow_pools: dict[int, object] = {}
+
+        # ── P04: source expansion / fallback intelligence (opt-in) ──
+        # Disabled by default. When enabled, P04 wraps retrieval for each
+        # scene with the SourceRouter + archive providers, but never changes
+        # legacy/semantic/visual behavior when the flag is off.
+        from pipeline.media_semantics.sourcing_pipeline import p04_enabled_from_env
+
+        self._p04_enabled = p04_enabled_from_env()
+        self._p04_selector = None
+        self._p04_archive_providers: dict = {}
+        self._p04_current_scene: dict = {}
+        self._p04_current_target_dur: float = 5.0
+        if self._p04_enabled:
+            logger.info("P04 source router ENABLED (opt-in; MEDIA_SELECTOR unchanged)")
         logger.info(
             "Media selector mode=%s shadow=%s threshold=%.2f",
             self._semantic_config.mode,
@@ -1178,6 +1192,11 @@ class MediaFetcher:
         self._pending_selection_decisions = []
         self._shadow_pools = {}
         self._last_selection_decision = None
+        if getattr(self, "_p04_selector", None) is not None:
+            try:
+                self._p04_selector.reset()
+            except Exception:
+                self._p04_selector = None
         try:
             from pipeline.media_semantics.scene_spec import attach_scene_specs
 
@@ -2525,6 +2544,18 @@ class MediaFetcher:
         scene["scene_idx"] = scene_idx
         query_pool = self._build_query_pool(scene, ctx, scene_idx=scene_idx)
         query_attempt = 0
+
+        # ── P04 (opt-in): router-driven sourcing before the legacy tiers ──
+        if getattr(self, "_p04_enabled", False):
+            p04_asset = self._fetch_p04_asset(
+                scene=scene,
+                scene_idx=scene_idx,
+                target_dur=target_dur,
+                ctx=ctx,
+                force_images=force_images,
+            )
+            if p04_asset is not None:
+                return p04_asset, ai_used, quality_info
 
         # ── Choose tiers based on scene type ─────────────────
         if force_images:
@@ -4229,6 +4260,244 @@ class MediaFetcher:
         if shadow:
             self._shadow_finalize(scene)
         return None
+
+    # ── P04: router-driven sourcing (opt-in) ──────────────────
+
+    def _p04_get_archive_providers(self) -> dict:
+        if self._p04_archive_providers:
+            return self._p04_archive_providers
+        try:
+            from pipeline.media_semantics.archive_providers import provider_registry
+
+            self._p04_archive_providers = provider_registry(enabled=True)
+        except Exception as exc:
+            logger.warning("P04 archive providers unavailable: %s", exc)
+            self._p04_archive_providers = {}
+        return self._p04_archive_providers
+
+    def _p04_stock_providers(self) -> dict:
+        """Map canonical provider names to the live provider objects."""
+        by_name = {
+            "pixabay_photo": self._pixabay_img,
+            "unsplash": self._unsplash,
+            "pexels_photo": self._pexels,
+        }
+        for provider in self.video_providers or []:
+            name = getattr(provider, "name", "")
+            if name:
+                by_name[name] = provider
+        return {k: v for k, v in by_name.items() if v is not None}
+
+    def _p04_available_providers(self) -> set[str]:
+        names = set(self._p04_stock_providers())
+        names.update(self._p04_get_archive_providers().keys())
+        return names
+
+    def _p04_provider_search(self, provider, query, asset_type, limit):
+        """Retrieval adapter: canonical provider name → normalised candidates."""
+        from pipeline.media_semantics.normalization import normalize_candidates
+        from pipeline.media_semantics.source_router import AssetType
+
+        media_type = (
+            "video" if asset_type in (
+                AssetType.STOCK_VIDEO.value, AssetType.ARCHIVAL_VIDEO.value,
+            ) else "image"
+        )
+        archives = self._p04_get_archive_providers()
+        if provider in archives:
+            raw = archives[provider].search(query, media_type=media_type, limit=limit)
+            return normalize_candidates(
+                raw, provider=provider, query=query, media_type=media_type,
+            )
+        provider_obj = self._p04_stock_providers().get(provider)
+        if provider_obj is None:
+            return []
+        want_video = media_type == "video"
+        raw = self._search_provider_page(
+            provider_obj, query, self._p04_current_target_dur, page=1,
+            want_video=want_video,
+        )
+        return normalize_candidates(
+            raw, provider=provider, query=query, media_type=media_type,
+        )
+
+    def _p04_download_candidate(self, candidate) -> dict | None:
+        """Download a P04 candidate and preserve the asset metadata."""
+        from pipeline.media_semantics.source_router import AssetType
+
+        raw = dict(candidate.raw_candidate or candidate.to_dict())
+        provider_name = candidate.provider
+        archives = self._p04_get_archive_providers()
+        asset = None
+        if provider_name in archives:
+            asset_type = candidate.asset_type
+            if asset_type == AssetType.ARCHIVAL_VIDEO.value:
+                out_dir = VIDEO_CLIPS_DIR
+            else:
+                out_dir = settings.IMAGES_DIR
+            path = archives[provider_name].download(raw, out_dir)
+            if path:
+                asset = {
+                    "path": str(path),
+                    "type": "video" if asset_type == AssetType.ARCHIVAL_VIDEO.value else "image",
+                    "duration": candidate.duration,
+                    "source": provider_name,
+                    "width": candidate.width or 0,
+                    "height": candidate.height or 0,
+                }
+        else:
+            provider_obj = self._p04_stock_providers().get(provider_name)
+            if provider_obj is None:
+                return None
+            asset = self._download_candidate(provider_obj, raw)
+
+        if not asset or not asset.get("path"):
+            return None
+        if not self._visual_candidate_ok(
+            asset, self._p04_current_scene, self._p04_current_target_dur,
+        ):
+            return None
+        try:
+            if self._is_asset_duplicate(raw):
+                return None
+        except Exception:
+            pass
+        self._record_asset_used(raw)
+        self._record_asset_for_history(asset)
+        asset.update({
+            "provider_asset_id": candidate.provider_asset_id,
+            "asset_type": candidate.asset_type,
+            "creator": candidate.creator,
+            "license": candidate.license,
+            "license_url": candidate.license_url,
+            "attribution_required": candidate.attribution_required,
+            "public_domain": candidate.public_domain,
+            "provenance": candidate.provenance,
+            "page_url": candidate.page_url,
+            "thumbnail_url": candidate.thumbnail_url,
+        })
+        return asset
+
+    def _p04_ai_generate(self, request, spec) -> dict | None:
+        """Generate one controlled AI fallback (only after real sources)."""
+        output_dir = Path(settings.OUTPUT_DIR) / "ai_images" / "p04_fallback"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"scene_{spec.scene_idx:03d}_{request.prompt_hash[:10]}.jpg"
+        providers = [
+            ("pollinations", self._pollinations),
+            ("local_sd", self._local_sd),
+            ("stable_horde", self._stable_horde),
+        ]
+        for label, provider in providers:
+            if provider is None or label not in request.backend_preference:
+                continue
+            try:
+                path = provider.generate(
+                    prompt=request.prompt,
+                    output_path=output_path,
+                    seed=request.seed,
+                    negative_prompt=request.negative_prompt,
+                )
+            except Exception as exc:
+                logger.warning("P04 AI fallback %s failed: %s", label, exc)
+                continue
+            if not path or not Path(path).exists():
+                continue
+            if self._is_asset_duplicate({"url": str(path)}):
+                continue
+            if not self._is_valid_ai_image(Path(path)):
+                continue
+            self._record_asset_used({"url": str(path)})
+            self._record_asset_for_history({"path": str(path), "source": f"ai_{label}"})
+            return {"path": str(path), "type": "image", "source": f"ai_{label}"}
+        return None
+
+    def _p04_get_selector(self):
+        if self._p04_selector is not None:
+            return self._p04_selector
+        from pipeline.media_semantics.sourcing_pipeline import (
+            SourcedMediaSelector,
+            SourcingConfig,
+        )
+
+        config = SourcingConfig.from_env()
+        try:
+            config.ai_max_per_video = int(
+                os.getenv("P04_AI_MAX_PER_VIDEO", str(config.ai_max_per_video))
+            )
+        except (TypeError, ValueError):
+            pass
+        self._p04_selector = SourcedMediaSelector(
+            config=config,
+            semantic_config=self._semantic_config,
+            provider_search=self._p04_provider_search,
+            download_fn=self._p04_download_candidate,
+            ai_generator=self._p04_ai_generate,
+            available_providers=self._p04_available_providers(),
+            available_ai_backends=[
+                label for label, provider in (
+                    ("pollinations", self._pollinations),
+                    ("local_sd", self._local_sd),
+                    ("stable_horde", self._stable_horde),
+                ) if provider is not None
+            ],
+        )
+        return self._p04_selector
+
+    def _fetch_p04_asset(self, scene, scene_idx, target_dur, ctx, force_images=False):
+        """Run one P04 sourcing decision; return an asset or ``None``."""
+        from pipeline.media_semantics.provenance import emit_decision_event
+
+        self._p04_current_scene = scene
+        self._p04_current_target_dur = float(target_dur or 5.0)
+        try:
+            selector = self._p04_get_selector()
+            spec = self._scene_spec_for(scene, scene_idx=scene_idx)
+            result = selector.select(
+                spec, scene_idx=scene_idx, allow_video=not force_images,
+            )
+            decision = result.decision
+            self._last_selection_decision = decision
+            scene["selector_version"] = decision.selector_version
+            scene["selection_status"] = decision.status.value
+            scene["scene_category"] = decision.scene_category
+            scene["asset_type"] = decision.asset_type
+            scene["fallback_type"] = decision.fallback_type
+            self._record_selection_decision(decision, scene)
+            emit_decision_event(
+                decision, p04=True, routing_budget=result.routing_budget,
+            )
+            if not decision.selected or not result.asset:
+                logger.info(
+                    "P04 scene %d: no asset after ladder (%s)",
+                    scene_idx, decision.rejection_reason,
+                )
+                return None
+            asset = dict(result.asset)
+            asset["selector"] = "p04_source_router"
+            asset["selector_version"] = decision.selector_version
+            asset["selection_score"] = decision.winner_score
+            asset["scene_idx"] = scene_idx
+            asset["scene_spec"] = spec.to_dict()
+            asset["route"] = result.route.to_dict()
+            asset["strategy"] = result.strategy.to_dict()
+            asset["asset_type"] = decision.asset_type
+            asset["scene_category"] = decision.scene_category
+            asset["fallback_type"] = decision.fallback_type
+            asset["provenance"] = dict(decision.provenance)
+            asset["routing_budget"] = dict(result.routing_budget)
+            if decision.winner is not None:
+                asset["candidate"] = decision.winner.to_dict()
+            logger.info(
+                "P04 scene %d: %s via %s (score=%.3f, fallback=%s)",
+                scene_idx, decision.asset_type,
+                decision.winner.provider if decision.winner else "-",
+                decision.winner_score, decision.fallback_type or "literal",
+            )
+            return asset
+        except Exception as exc:
+            logger.warning("P04 sourcing failed (fail-open to legacy): %s", exc)
+            return None
 
     # ── P01: semantic retrieval / shadow helpers ─────────────────
 

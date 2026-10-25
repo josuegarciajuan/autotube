@@ -1,3 +1,20 @@
+## 2026-10-25 — P04 source expansion, fallback intelligence and coherence (opt-in)
+
+- Added `p04-source-router-1`: 13 scene categories, category-specific asset
+  ladders, provider budgets and deterministic fallback.
+- Added official Wikimedia Commons and NASA Image Library providers with
+  provenance/licence capture.
+- Images are first-class candidates; deterministic Ken Burns motion plan is
+  consumed by the renderer only for P04-sourced stills.
+- Added controlled AI image fallback policy/prompt builder, explicit conceptual
+  and generic fallback labels.
+- Added dHash/pHash/URL/embedding duplicate detection, recent-scene coherence,
+  shot/style signals and a unified attribution manifest.
+- Defaults unchanged: `MEDIA_SELECTOR=legacy`, `P02_VISUAL_MODE=off`,
+  `P04_SOURCE_ROUTER=0`.
+- Evidence: `benchmarks/media_semantics/evidence/p04-20261025/`; tests:
+  `tests/test_p04_source_fallback.py`.
+
 # Autotube Changelog
 
 ## P01-R — reconciliación

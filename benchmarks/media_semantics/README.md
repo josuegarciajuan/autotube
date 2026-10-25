@@ -30,3 +30,21 @@ videos, frames, resized evaluation images). Only JSON/HTML evidence is committed
 
 Offline tests: `pytest -q tests/test_p03_benchmark.py`. The live canary is a
 separate module and is never collected automatically.
+
+## P04 focused benchmark
+
+```bash
+# Build cases from the P03 ALL_BAD + control set (offline)
+python3 -m benchmarks.media_semantics.p04_cli --run-id p04-20261025 --stage build
+
+# Bounded live archive canary + optional VLM rubric (never collected by pytest)
+python3 -m benchmarks.media_semantics.p04_cli \
+  --run-id p04-20261025 --stage all --allow-network --vlm \
+  --archive-max-requests 120
+
+# Report only from cached run
+python3 -m benchmarks.media_semantics.p04_cli --run-id p04-20261025 --stage report
+```
+
+Evidence is copied to `evidence/p04-20261025/` (JSON + review pack + compact
+thumbnails). Runtime downloads stay under the gitignored `runs/` tree.

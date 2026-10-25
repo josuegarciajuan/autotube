@@ -1,0 +1,123 @@
+{
+  "relevance_threshold": 0.6,
+  "all_bad_before": 29,
+  "all_bad_after": 25,
+  "all_bad_after_good": 4,
+  "all_bad_evaluated_after": 29,
+  "all_bad_before_mean_score": 0.2379,
+  "all_bad_after_mean_score": 0.2534,
+  "all_bad_reduction": 25,
+  "archive_good": 2,
+  "ai_fallback_good": 0,
+  "conceptual_fallback": 0,
+  "unresolved": 25,
+  "control_before_good": 5,
+  "control_after_good": 3,
+  "control_total": 5,
+  "network": {
+    "archive_requests": 39,
+    "archive_bytes": 11613429,
+    "archive_cache_entries": 39,
+    "archive_cache_hits": 0,
+    "total_timing_ms": 57186.26
+  },
+  "vlm_enabled": true,
+  "performance": {
+    "by_scene_type": {
+      "HISTORY": {
+        "scenes": 12,
+        "requests": 43,
+        "candidates": 309,
+        "providers_queried": 31,
+        "providers_considered": 108,
+        "timing_ms": 21831.67,
+        "archive_assets": 5,
+        "mean_timing_ms": 1819.31
+      },
+      "MEDICAL": {
+        "scenes": 3,
+        "requests": 12,
+        "candidates": 72,
+        "providers_queried": 12,
+        "providers_considered": 30,
+        "timing_ms": 5389.73,
+        "archive_assets": 0,
+        "mean_timing_ms": 1796.58
+      },
+      "NATURE": {
+        "scenes": 1,
+        "requests": 1,
+        "candidates": 12,
+        "providers_queried": 1,
+        "providers_considered": 8,
+        "timing_ms": 1579.55,
+        "archive_assets": 0,
+        "mean_timing_ms": 1579.55
+      },
+      "ABSTRACT": {
+        "scenes": 11,
+        "requests": 17,
+        "candidates": 204,
+        "providers_queried": 17,
+        "providers_considered": 88,
+        "timing_ms": 16402.92,
+        "archive_assets": 0,
+        "mean_timing_ms": 1491.17
+      },
+      "CITY": {
+        "scenes": 2,
+        "requests": 5,
+        "candidates": 54,
+        "providers_queried": 5,
+        "providers_considered": 18,
+        "timing_ms": 3158.6,
+        "archive_assets": 2,
+        "mean_timing_ms": 1579.3
+      },
+      "GENERIC": {
+        "scenes": 2,
+        "requests": 5,
+        "candidates": 36,
+        "providers_queried": 5,
+        "providers_considered": 18,
+        "timing_ms": 3325.64,
+        "archive_assets": 0,
+        "mean_timing_ms": 1662.82
+      },
+      "PEOPLE": {
+        "scenes": 2,
+        "requests": 6,
+        "candidates": 68,
+        "providers_queried": 6,
+        "providers_considered": 18,
+        "timing_ms": 3427.42,
+        "archive_assets": 0,
+        "mean_timing_ms": 1713.71
+      },
+      "SPACE": {
+        "scenes": 1,
+        "requests": 4,
+        "candidates": 30,
+        "providers_queried": 3,
+        "providers_considered": 10,
+        "timing_ms": 2043.46,
+        "archive_assets": 1,
+        "mean_timing_ms": 2043.46
+      }
+    },
+    "archive": {
+      "requests": 39,
+      "bytes": 11613429,
+      "cache_entries": 39,
+      "cache_hits": 0,
+      "mean_latency_ms": 1466.31
+    },
+    "routing": {
+      "scenes": 34,
+      "providers_considered": 298,
+      "providers_queried": 80,
+      "candidates": 785,
+      "requests": 93
+    }
+  }
+}

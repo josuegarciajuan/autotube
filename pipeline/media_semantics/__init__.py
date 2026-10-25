@@ -43,9 +43,34 @@ from .visual_vlm import (  # noqa: F401
     build_vlm_backend,
     parse_vlm_payload,
 )
+from .source_router import (  # noqa: F401
+    AIPolicy,
+    AssetType,
+    SceneCategory,
+    SourceRoute,
+    SourceRouter,
+)
+from .asset_strategy import AssetStrategy, build_asset_strategy  # noqa: F401
+from .sourcing_pipeline import (  # noqa: F401
+    SourcedMediaSelector,
+    SourcingConfig,
+    SourcingResult,
+)
+from .dedup import (  # noqa: F401
+    DuplicateMatch,
+    PerceptualDuplicateIndex,
+    image_hash,
+)
+from .coherence import SelectionCoherence  # noqa: F401
+from .attribution import (  # noqa: F401
+    build_attribution_manifest,
+    write_attribution_manifest,
+)
 
 SELECTOR_VERSION = "p01-semantic-1"
 VISUAL_SELECTOR_VERSION = "p02-visual-1"
+SOURCE_ROUTER_VERSION = "p04-source-router-1"
+SOURCING_VERSION = "p04-source-fallback-1"
 
 __all__ = [
     "Candidate",
@@ -56,6 +81,24 @@ __all__ = [
     "SemanticMediaSelector",
     "SELECTOR_VERSION",
     "VISUAL_SELECTOR_VERSION",
+    "SOURCE_ROUTER_VERSION",
+    "SOURCING_VERSION",
+    "SceneCategory",
+    "AssetType",
+    "AIPolicy",
+    "SourceRoute",
+    "SourceRouter",
+    "AssetStrategy",
+    "build_asset_strategy",
+    "SourcedMediaSelector",
+    "SourcingConfig",
+    "SourcingResult",
+    "DuplicateMatch",
+    "PerceptualDuplicateIndex",
+    "image_hash",
+    "SelectionCoherence",
+    "build_attribution_manifest",
+    "write_attribution_manifest",
     "VisualIntelligencePipeline",
     "VisualVerificationResult",
     "CLIPVisualEmbeddingBackend",

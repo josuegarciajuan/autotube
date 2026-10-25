@@ -321,6 +321,22 @@ class Candidate:
     preview_duration: float | None = None
     visual_source: str = ""
     preview_status: str = PREVIEW_UNAVAILABLE
+    # ── P04: first-class asset strategy + unified provenance ──────
+    # ``asset_type`` is the strategy category (STOCK_VIDEO, STOCK_IMAGE,
+    # ARCHIVAL_IMAGE, SCIENTIFIC_IMAGE, AI_IMAGE, ...), independent of the
+    # legacy ``media_type`` (video|image) used by the renderer.
+    asset_type: str = ""
+    creator: str = ""
+    license_url: str = ""
+    attribution_required: bool | None = None
+    public_domain: bool | None = None
+    date: str = ""
+    categories: list[str] | None = None
+    ai_generated: bool = False
+    generation_backend: str = ""
+    generation_prompt_hash: str = ""
+    perceptual_hash: str = ""
+    duplicate_of: str = ""
     raw_candidate: dict[str, Any] | None = field(default=None, repr=False, compare=False)
 
     # ── construction ──────────────────────────────────────────
@@ -387,6 +403,24 @@ class Candidate:
             preview_duration=preview["preview_duration"],
             visual_source=visual_source,
             preview_status=preview["preview_status"],
+            asset_type=str(raw.get("asset_type") or ""),
+            creator=str(raw.get("creator") or raw.get("artist") or raw.get("photographer") or ""),
+            license_url=str(raw.get("license_url") or ""),
+            attribution_required=(
+                None if raw.get("attribution_required") is None
+                else bool(raw.get("attribution_required"))
+            ),
+            public_domain=(
+                None if raw.get("public_domain") is None
+                else bool(raw.get("public_domain"))
+            ),
+            date=str(raw.get("date") or ""),
+            categories=_as_tags(raw.get("categories")),
+            ai_generated=bool(raw.get("ai_generated") or False),
+            generation_backend=str(raw.get("generation_backend") or ""),
+            generation_prompt_hash=str(raw.get("generation_prompt_hash") or ""),
+            perceptual_hash=str(raw.get("perceptual_hash") or ""),
+            duplicate_of=str(raw.get("duplicate_of") or ""),
             raw_candidate=raw,
         )
         candidate.metadata_completeness = candidate.compute_completeness()
@@ -485,6 +519,18 @@ class Candidate:
             "preview_duration": self.preview_duration,
             "visual_source": self.visual_source,
             "preview_status": self.preview_status,
+            "asset_type": self.asset_type,
+            "creator": self.creator,
+            "license_url": self.license_url,
+            "attribution_required": self.attribution_required,
+            "public_domain": self.public_domain,
+            "date": self.date,
+            "categories": None if self.categories is None else list(self.categories),
+            "ai_generated": bool(self.ai_generated),
+            "generation_backend": self.generation_backend,
+            "generation_prompt_hash": self.generation_prompt_hash,
+            "perceptual_hash": self.perceptual_hash,
+            "duplicate_of": self.duplicate_of,
         }
 
     @classmethod
@@ -534,6 +580,27 @@ class Candidate:
                     else PREVIEW_UNAVAILABLE
                 )
             ),
+            asset_type=str(data.get("asset_type") or ""),
+            creator=str(data.get("creator") or ""),
+            license_url=str(data.get("license_url") or ""),
+            attribution_required=(
+                None if data.get("attribution_required") is None
+                else bool(data.get("attribution_required"))
+            ),
+            public_domain=(
+                None if data.get("public_domain") is None
+                else bool(data.get("public_domain"))
+            ),
+            date=str(data.get("date") or ""),
+            categories=(
+                None if data.get("categories") is None
+                else list(data.get("categories") or [])
+            ),
+            ai_generated=bool(data.get("ai_generated")),
+            generation_backend=str(data.get("generation_backend") or ""),
+            generation_prompt_hash=str(data.get("generation_prompt_hash") or ""),
+            perceptual_hash=str(data.get("perceptual_hash") or ""),
+            duplicate_of=str(data.get("duplicate_of") or ""),
             raw_candidate=dict(data.get("raw_candidate") or {}) or None,
         )
 
@@ -606,6 +673,19 @@ class SelectionDecision:
     era_penalty: float = 0.0
     combined_score: float = 0.0
 
+    # ── P04: source expansion, fallback intelligence & coherence ──
+    scene_category: str = ""
+    asset_type: str = ""
+    fallback_type: str = ""
+    source_route: dict[str, Any] = field(default_factory=dict)
+    routing_budget: dict[str, Any] = field(default_factory=dict)
+    ai_policy: str = ""
+    provenance: dict[str, Any] = field(default_factory=dict)
+    coherence_signals: dict[str, Any] = field(default_factory=dict)
+    duplicate_rejections: int = 0
+    conceptual_used: bool = False
+    literal_match: bool = True
+
     @property
     def selected(self) -> bool:
         return self.status in (
@@ -654,6 +734,17 @@ class SelectionDecision:
             "negative_penalty": round(float(self.negative_penalty), 6),
             "era_penalty": round(float(self.era_penalty), 6),
             "combined_score": round(float(self.combined_score), 6),
+            "scene_category": self.scene_category,
+            "asset_type": self.asset_type,
+            "fallback_type": self.fallback_type,
+            "source_route": dict(self.source_route),
+            "routing_budget": dict(self.routing_budget),
+            "ai_policy": self.ai_policy,
+            "provenance": dict(self.provenance),
+            "coherence_signals": dict(self.coherence_signals),
+            "duplicate_rejections": int(self.duplicate_rejections),
+            "conceptual_used": bool(self.conceptual_used),
+            "literal_match": bool(self.literal_match),
         }
 
     def visual_summary(self) -> dict[str, Any]:
@@ -724,4 +815,15 @@ class SelectionDecision:
             negative_penalty=float(data.get("negative_penalty") or 0.0),
             era_penalty=float(data.get("era_penalty") or 0.0),
             combined_score=float(data.get("combined_score") or 0.0),
+            scene_category=str(data.get("scene_category") or ""),
+            asset_type=str(data.get("asset_type") or ""),
+            fallback_type=str(data.get("fallback_type") or ""),
+            source_route=dict(data.get("source_route") or {}),
+            routing_budget=dict(data.get("routing_budget") or {}),
+            ai_policy=str(data.get("ai_policy") or ""),
+            provenance=dict(data.get("provenance") or {}),
+            coherence_signals=dict(data.get("coherence_signals") or {}),
+            duplicate_rejections=int(data.get("duplicate_rejections") or 0),
+            conceptual_used=bool(data.get("conceptual_used")),
+            literal_match=bool(data.get("literal_match", True)),
         )

@@ -34,6 +34,21 @@ def decision_record(
     if decision.visual_mode:
         # Persisted through the existing v72 cost_json column (no migration).
         cost["visual"] = decision.visual_summary()
+    if decision.source_route or decision.asset_type or decision.fallback_type:
+        # P04 provenance is JSON-only in the existing cost_json column.
+        cost["p04"] = {
+            "scene_category": decision.scene_category,
+            "asset_type": decision.asset_type,
+            "fallback_type": decision.fallback_type,
+            "ai_policy": decision.ai_policy,
+            "literal_match": decision.literal_match,
+            "conceptual_used": decision.conceptual_used,
+            "duplicate_rejections": decision.duplicate_rejections,
+            "source_route": dict(decision.source_route),
+            "routing_budget": dict(decision.routing_budget),
+            "coherence": dict(decision.coherence_signals),
+            "provenance": dict(decision.provenance),
+        }
     return {
         "video_id": video_id,
         "channel_id": channel_id,
@@ -122,6 +137,12 @@ def emit_decision_event(decision: SelectionDecision, **identity: Any) -> None:
             combined_score=decision.combined_score,
             visual_timing_ms=decision.visual_timing_ms,
             visual_cost=decision.visual_cost,
+            scene_category=decision.scene_category,
+            asset_type=decision.asset_type,
+            fallback_type=decision.fallback_type,
+            literal_match=decision.literal_match,
+            conceptual_used=decision.conceptual_used,
+            duplicate_rejections=decision.duplicate_rejections,
             **identity,
         )
     except Exception:

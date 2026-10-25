@@ -28,6 +28,10 @@ PROVIDER_PRIORS: dict[str, float] = {
     "unsplash": 0.82,
     "youtube_cc": 0.70,
     "youtube_cc_liberal": 0.60,
+    "wikimedia_commons": 0.88,
+    "nasa_image_library": 0.92,
+    "ai_pollinations": 0.60,
+    "ai_local_sd": 0.60,
     "unknown": 0.50,
 }
 

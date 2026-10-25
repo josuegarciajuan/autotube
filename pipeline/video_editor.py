@@ -1903,7 +1903,12 @@ class VideoEditor:
                 if content_hash:
                     self._used_asset_paths.add(content_hash)
         if clip is None and asset_path and Path(asset_path).exists():
-            clip = self._image_clip_for_block(Path(asset_path), block_dur)
+            # P04: a deterministic motion plan travels with sourced stills.
+            # Legacy assets have no plan and keep the existing random Ken Burns.
+            clip = self._image_clip_for_block(
+                Path(asset_path), block_dur,
+                motion_plan=asset.get("motion_plan") if isinstance(asset, dict) else None,
+            )
             self._used_asset_paths.add(asset_path)
             self._image_last_clip_idx[asset_path] = self._current_clip_idx
             if content_hash:
@@ -2056,7 +2061,8 @@ class VideoEditor:
             return None
 
     def _image_clip_for_block(self, image_path: Path, block_dur: float,
-                              reuse_count: int = 0) -> VideoClip:
+                              reuse_count: int = 0,
+                              motion_plan: dict | None = None) -> VideoClip:
         """Create a Ken Burns image clip for the given duration.
 
         When *reuse_count* > 0 (same image used again after LRU gap),
@@ -2066,6 +2072,28 @@ class VideoEditor:
         """
         zoom_min = self.canal.get("KEN_BURNS_ZOOM_MIN", KEN_BURNS_ZOOM_MIN)
         zoom_max = self.canal.get("KEN_BURNS_ZOOM_MAX", KEN_BURNS_ZOOM_MAX)
+
+        # P04-I: configurable, deterministic motion plan from the sourcing
+        # pipeline.  It is only present on P04-sourced images, so default
+        # rendering is untouched.
+        if isinstance(motion_plan, dict) and motion_plan:
+            plan_zoom = abs(float(motion_plan.get("zoom_percent") or 0.0))
+            plan_zoom = min(plan_zoom, float(zoom_max))
+            if motion_plan.get("zoom_direction", 1) < 0:
+                plan_zoom = -plan_zoom
+            profile = {
+                "name": str(motion_plan.get("profile") or "diagonal_in"),
+                "zoom_direction": int(motion_plan.get("zoom_direction") or 1),
+                "pan_x": int(motion_plan.get("pan_x") or 0),
+                "pan_y": int(motion_plan.get("pan_y") or 0),
+            }
+            if profile["name"] == "static" or plan_zoom == 0:
+                return self._single_ken_burns_clip(
+                    image_path, block_dur, 0, profile=profile,
+                )
+            return self._single_ken_burns_clip(
+                image_path, block_dur, plan_zoom, profile=profile,
+            )
 
         profile = self._select_ken_burns_profile()
         if profile["name"] == "static":
