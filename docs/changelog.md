@@ -11,6 +11,24 @@
 
 ## [Unreleased]
 
+### Pollo.ai — cuentas: sesión caducada ≠ sin créditos
+- El worker distingue `session_expired` (401, renovar cookie) de
+  `credits_exhausted` (403 sin créditos) y escribe el estado con el mismo lock
+  `pollo_accounts_status.json.lock` que usa el CRM (antes podía pisarlo).
+- El selector de cuentas devuelve **siempre** un fallback distinto cuando hay 2
+  cuentas, aunque ambas estén marcadas; antes solo probaba la primera y la
+  segunda quedaba muerta.
+- Las cookies viajan al worker por fichero temporal `0600` (`--cookie-file`) en
+  lugar de la línea de comandos (`/proc/<pid>/cmdline`).
+- Alertas separadas (`pollo_session_expired` / `pollo_credits_exhausted`) con
+  flags por condición y limpieza al recuperarse.
+- `SceneImageGenerator` ya acierta la caché `.jpg` (antes solo miraba `.png` y
+  regeneraba cada escena, gastando créditos) y la clave incluye el modelo.
+- Post-proceso respeta el formato real (PNG/JPEG/WebP) en lugar de escribir
+  JPEG dentro de ficheros `.png`.
+- Nuevo `scripts/verify_pollo_accounts.py` (probe 0 créditos / `--real` /
+  `--system`) y `pollo_image_worker.py probe`.
+
 ### P01 — Núcleo de recuperación semántica de media
 - Nuevo paquete `pipeline/media_semantics/` con contratos `SceneSpec`,
   `Candidate` y `SelectionDecision`, generación de queries por escena final,
