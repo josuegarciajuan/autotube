@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>P05 canary review — p05-canary-20261025</title>
+<style>
+body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:0;background:#0b0d12;color:#e7eaf0}
+header{padding:24px 32px;border-bottom:1px solid #232838}
+h1{margin:0 0 8px;font-size:22px} h2{font-size:17px;margin:0 0 8px}
+h3{font-size:13px;letter-spacing:.08em;color:#9aa4bb;margin:0 0 8px}
+main{padding:24px 32px;max-width:1180px;margin:0 auto}
+.muted{color:#8b93a7} .scene{border:1px solid #232838;border-radius:12px;padding:18px;margin:0 0 20px;background:#11151d}
+.narration{color:#c9d2e3;line-height:1.5} .query code{color:#8fd3ff}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:12px 0}
+.arm{background:#0b0d12;border:1px solid #1c2130;border-radius:10px;padding:12px}
+.arm img{width:100%;height:auto;border-radius:8px;background:#000;aspect-ratio:16/9;object-fit:cover}
+</style></head>
+<body><header>
+<h1>AUTOTUBE — P05 controlled canary</h1>
+<div class="muted">run <b>p05-canary-20261025</b> · scenes 3 · agreement 0.0 ·
+legacy↔P05 auto relevance 0.00 → 0.48 ·
+human_label = null</div>
+</header><main>
+        <section class="scene">
+          <h2>Scene 0 <span class="muted">(script scene 0)</span></h2>
+          <p class="narration">A las 18 semanas de gestación, cuando el feto mide apenas unos 14 centímetros, ya empieza a escuchar. No el silencio que imaginaríamos, sino un concierto constante: el latido del corazón de su madre, que percibe como un tambor grave y rítmico, y el rumor del flujo sanguíneo, un siseo que lo acompaña día y noche. Ese es el primer paisaje sonoro de cualquier ser humano. Lo que durante milenios permaneció oculto hoy puede verse con ecografías en cuatro dimensiones, y lo que revelan es que el feto no es un pasajero pasivo: es un oyente atento que lleva meses estudiando la voz de su madre antes de nacer. En los próximos minutos vas a descubrir qué experimentos concretos demostraron que los fetos </p>
+          <p class="query">query: <code>fetus hearing mother&#x27;s heartbeat sound 4D ultrasound</code></p>
+          <div class="grid">
+            <div class="arm">
+              <h3>LEGACY</h3>
+              <img src="review_thumbs/s000-legacy.jpg" alt="legacy">
+              <p>ai_local_sd · image</p>
+              <p>auto relevance: 0.00</p>
+              <p class="muted">/tmp/autotube_p05_canary/p05-canary-20261025/legacy/ai_images/hook/scene_000_f3c1c0bcc5.jpg</p>
+            </div>
+            <div class="arm">
+              <h3>P05</h3>
+              <img src="review_thumbs/s000-p05.jpg" alt="p05">
+              <p>pixabay_photo · image</p>
+              <p>final: 0.31 · text: 0.26 · preview: 0.22</p>
+              <p>route: MEDICAL · type: STOCK_IMAGE · candidates: 90</p>
+              <p>auto relevance: 0.00</p>
+              <p class="muted">pixabay_photo:4874281</p>
+            </div>
+          </div>
+          <p>agreement: <b>False</b> · auto delta: 0.00 ·
+             fallback: — · archive: False ·
+             AI: False · latency: 7439.709 ms · license: UNKNOWN</p>
+        </section>
+
+        <section class="scene">
+          <h2>Scene 1 <span class="muted">(script scene 2)</span></h2>
+          <p class="narration">Conviene ser precisos: los estudios describen respuestas motoras y faciales medibles, no estados emocionales conscientes. Lo que se especula es hasta dónde llega esa capacidad de procesamiento; lo que está documentado es que el útero es mucho menos silencioso de lo que dicta la intuición. Los latidos de la madre, su voz, el flujo sanguíneo y los sonidos externos atraviesan el líquido amniótico y llegan al feto como una señal continua. Y aquí aparece la pregunta que abre el siguiente capítulo: si el oído ya está activo a las 25 semanas, ¿qué ocurre con el tacto, el gusto y el olfato? Porque los registros muestran que el feto también se toca la cara, reacciona a sustancias del líquido amniótic</p>
+          <p class="query">query: <code>fetus sensory world womb sounds</code></p>
+          <div class="grid">
+            <div class="arm">
+              <h3>LEGACY</h3>
+              <img src="review_thumbs/s001-legacy.jpg" alt="legacy">
+              <p>ai_local_sd · image</p>
+              <p>auto relevance: 0.00</p>
+              <p class="muted">/tmp/autotube_p05_canary/p05-canary-20261025/legacy/ai_images/desarrollo/scene_001_6b1aa4d2a0.jpg</p>
+            </div>
+            <div class="arm">
+              <h3>P05</h3>
+              <img src="review_thumbs/s001-p05.jpg" alt="p05">
+              <p>pixabay · video</p>
+              <p>final: 0.27 · text: 0.23 · preview: 0.24</p>
+              <p>route: GENERIC · type: STOCK_VIDEO · candidates: 90</p>
+              <p>auto relevance: 0.60</p>
+              <p class="muted">/tmp/autotube_p05_canary/p05-canary-20261025/p05/video_clips/pixabay_64feeec5900e.mp4</p>
+            </div>
+          </div>
+          <p>agreement: <b>False</b> · auto delta: 0.60 ·
+             fallback: — · archive: False ·
+             AI: False · latency: 6683.828 ms · license: UNKNOWN</p>
+        </section>
+
+        <section class="scene">
+          <h2>Scene 2 <span class="muted">(script scene 10)</span></h2>
+          <p class="narration">En 2010, el Royal College of Obstetricians and Gynaecologists del Reino Unido publicó un informe que sacudió el debate: el feto no puede experimentar dolor antes de las 24 semanas de gestación, y la conciencia, tal como la entendemos, no surge dentro del útero sino después del nacimiento. El documento no era una opinión aislada. Reunía la evidencia disponible y trazaba una línea clara entre lo que el feto hace —moverse, responder, dormir— y lo que el feto experimenta. Esa distinción, sutil en apariencia, es la que separa un organismo reactivo de una mente que siente. Y la ciencia lleva más de una década intentando precisar dónde cae exactamente esa frontera.</p>
+          <p class="query">query: <code>fetal ultrasound 24 weeks scientific report medical study</code></p>
+          <div class="grid">
+            <div class="arm">
+              <h3>LEGACY</h3>
+              <img src="review_thumbs/s002-legacy.jpg" alt="legacy">
+              <p>ai_local_sd · image</p>
+              <p>auto relevance: 0.00</p>
+              <p class="muted">/tmp/autotube_p05_canary/p05-canary-20261025/legacy/ai_images/desarrollo/scene_002_7e97da4e86.jpg</p>
+            </div>
+            <div class="arm">
+              <h3>P05</h3>
+              <img src="review_thumbs/s002-p05.jpg" alt="p05">
+              <p>wikimedia_commons · image</p>
+              <p>final: 0.30 · text: 0.33 · preview: —</p>
+              <p>route: SCIENCE · type: ARCHIVAL_IMAGE · candidates: 90</p>
+              <p>auto relevance: 0.85</p>
+              <p class="muted">wikimedia_commons:63017060</p>
+            </div>
+          </div>
+          <p>agreement: <b>False</b> · auto delta: 0.85 ·
+             fallback: — · archive: True ·
+             AI: False · latency: 2984.283 ms · license: CC BY-SA 3.0</p>
+        </section></main></body></html>

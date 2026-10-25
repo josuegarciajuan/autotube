@@ -1,0 +1,105 @@
+{
+  "version": 1,
+  "generated_at": "2026-10-25T14:52:33.742557+00:00",
+  "video_id": null,
+  "channel": "canal2",
+  "script_title": "script 1714",
+  "scenes": [
+    {
+      "scene_idx": 0,
+      "block_idx": 0,
+      "narration_fragment": "A las 18 semanas de gestación, cuando el feto mide apenas unos 14 centímetros, ya empieza a escuchar. No el silencio que imaginaríamos, sino un concierto constante: el latido del corazón de su madre, que percibe como un tambor grave y rítmico, y el rumor del flujo sanguíneo, un siseo que lo acompaña día y noche. Ese es el primer paisaje sonoro de cualquier ser humano. Lo que durante milenios perma",
+      "scene_category": "",
+      "asset_type": "",
+      "fallback_type": "",
+      "status": "SELECTED",
+      "score": 0.307798,
+      "asset_url": "https://pixabay.com/get/g2dd7a78977e1d2136d81e22585e155f00b1f0928f43de74934c4497032924da5a46a7fc61b8ebf767067fe87ffc4f4e21db932e715040da560260ceec56c53c8_1280.jpg",
+      "provenance": {
+        "provider": "pixabay_photo",
+        "source_url": "https://pixabay.com/get/g2dd7a78977e1d2136d81e22585e155f00b1f0928f43de74934c4497032924da5a46a7fc61b8ebf767067fe87ffc4f4e21db932e715040da560260ceec56c53c8_1280.jpg",
+        "media_url": "https://pixabay.com/get/g2dd7a78977e1d2136d81e22585e155f00b1f0928f43de74934c4497032924da5a46a7fc61b8ebf767067fe87ffc4f4e21db932e715040da560260ceec56c53c8_1280.jpg",
+        "creator": "",
+        "license": "UNKNOWN",
+        "license_url": "",
+        "attribution_required": null,
+        "public_domain": null,
+        "ai_generated": false,
+        "generation_backend": "",
+        "generation_prompt_hash": "",
+        "date": "",
+        "asset_type": "STOCK_IMAGE"
+      },
+      "attribution": "Unknown creator — UNKNOWN — via pixabay_photo (licence status unknown)"
+    },
+    {
+      "scene_idx": 1,
+      "block_idx": 1,
+      "narration_fragment": "Conviene ser precisos: los estudios describen respuestas motoras y faciales medibles, no estados emocionales conscientes. Lo que se especula es hasta dónde llega esa capacidad de procesamiento; lo que está documentado es que el útero es mucho menos silencioso de lo que dicta la intuición. Los latidos de la madre, su voz, el flujo sanguíneo y los sonidos externos atraviesan el líquido amniótico y l",
+      "scene_category": "",
+      "asset_type": "",
+      "fallback_type": "",
+      "status": "SELECTED",
+      "score": 0.274018,
+      "asset_url": "https://cdn.pixabay.com/video/2023/07/21/172668-849651713_large.mp4",
+      "provenance": {
+        "provider": "pixabay",
+        "source_url": "https://pixabay.com/videos/id-172668/",
+        "media_url": "https://cdn.pixabay.com/video/2023/07/21/172668-849651713_large.mp4",
+        "creator": "",
+        "license": "UNKNOWN",
+        "license_url": "",
+        "attribution_required": null,
+        "public_domain": null,
+        "ai_generated": false,
+        "generation_backend": "",
+        "generation_prompt_hash": "",
+        "date": "",
+        "asset_type": "STOCK_VIDEO"
+      },
+      "attribution": "Unknown creator — UNKNOWN — via pixabay (licence status unknown)"
+    },
+    {
+      "scene_idx": 2,
+      "block_idx": 2,
+      "narration_fragment": "En 2010, el Royal College of Obstetricians and Gynaecologists del Reino Unido publicó un informe que sacudió el debate: el feto no puede experimentar dolor antes de las 24 semanas de gestación, y la conciencia, tal como la entendemos, no surge dentro del útero sino después del nacimiento. El documento no era una opinión aislada. Reunía la evidencia disponible y trazaba una línea clara entre lo que",
+      "scene_category": "",
+      "asset_type": "",
+      "fallback_type": "",
+      "status": "SELECTED",
+      "score": 0.299459,
+      "asset_url": "https://upload.wikimedia.org/wikipedia/commons/2/29/Fetal_monolateral_cataract_ultrasound.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail_unscaled",
+      "provenance": {
+        "provider": "wikimedia_commons",
+        "source_url": "https://commons.wikimedia.org/wiki/File:Fetal monolateral cataract ultrasound.jpg",
+        "media_url": "https://upload.wikimedia.org/wikipedia/commons/2/29/Fetal_monolateral_cataract_ultrasound.jpg?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=thumbnail_unscaled",
+        "creator": "This Photo was taken by Wolfgang Moroder . Feel free to use my photos, but please mention me as the author and send me a message . This image is not in the public domain . Please respect the copyright protection. It may only be used according to the rules mentioned here. This specifically excludes use in social media , if applicable terms of the licenses listed here are not appropriate. Please do not upload an updated image here without consultation with the Author. The author would like to make corrections only at his own source. This ensures that the changes are preserved. Please if you think that any changes should be required, please inform the author. Otherwise you can upload a new image with a new name. Please use one of the templates derivative or extract .",
+        "license": "CC BY-SA 3.0",
+        "license_url": "https://creativecommons.org/licenses/by-sa/3.0",
+        "attribution_required": true,
+        "public_domain": false,
+        "ai_generated": false,
+        "generation_backend": "",
+        "generation_prompt_hash": "",
+        "date": "2015-09-09",
+        "asset_type": "ARCHIVAL_IMAGE"
+      },
+      "attribution": "This Photo was taken by Wolfgang Moroder . Feel free to use my photos, but please mention me as the author and send me a message . This image is not in the public domain . Please respect the copyright protection. It may only be used according to the rules mentioned here. This specifically excludes use in social media , if applicable terms of the licenses listed here are not appropriate. Please do not upload an updated image here without consultation with the Author. The author would like to make corrections only at his own source. This ensures that the changes are preserved. Please if you think that any changes should be required, please inform the author. Otherwise you can upload a new image with a new name. Please use one of the templates derivative or extract . — CC BY-SA 3.0 — via wikimedia_commons"
+    }
+  ],
+  "summary": {
+    "scenes": 3,
+    "providers": {
+      "pixabay_photo": 1,
+      "pixabay": 1,
+      "wikimedia_commons": 1
+    },
+    "licenses": {
+      "UNKNOWN": 2,
+      "CC BY-SA 3.0": 1
+    },
+    "unknown_license": 2,
+    "ai_generated": 0,
+    "public_domain": 0
+  }
+}

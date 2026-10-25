@@ -23,6 +23,7 @@ from .unified_scoring import VisualEvidence
 from .visual_backends import build_visual_backend
 from .visual_description import build_visual_description
 from .visual_previews import PreviewFetcher
+from .visual_cache import VisualEmbeddingCache, sha256_file, visual_cache_key
 from .visual_scoring import cosine_similarity, technical_quality_score
 
 PathResolver = Callable[[Candidate, SceneSpec], str]
@@ -48,6 +49,10 @@ class P02PreviewEvidenceEvaluator:
         )
         self.backend = backend if backend is not None else build_visual_backend(self.config)
         self.path_resolver = path_resolver
+        self.cache = VisualEmbeddingCache(
+            path=self.config.cache_path or None,
+            enabled=bool(self.config.cache_enabled),
+        )
         self._text_cache: dict[str, list[float] | None] = {}
         self._image_cache: dict[str, list[float] | None] = {}
         self.calls = 0
@@ -77,27 +82,63 @@ class P02PreviewEvidenceEvaluator:
             return ""
         return result.path if result.available else ""
 
+    def _backend_identity(self) -> tuple[str, str]:
+        name = str(getattr(self.backend, "name", "") or "unknown")
+        model_version = str(
+            getattr(self.backend, "model_version", "")
+            or getattr(self.config, "model_version", "")
+            or getattr(self.config, "model", "")
+            or "unknown"
+        )
+        return name, model_version
+
     def _text_vector(self, spec: SceneSpec) -> list[float] | None:
         text = build_visual_description(spec)
         key = text[:400]
         if key in self._text_cache:
             return self._text_cache[key]
-        try:
-            vectors = self.backend.encode_texts([text])
-        except Exception:
-            vectors = None
-        vector = vectors[0] if vectors else None
+        backend, model_version = self._backend_identity()
+        cache_key = visual_cache_key(
+            provider="text", asset_id=key, representation=key,
+            backend=backend, model_version=model_version,
+        )
+        vector = self.cache.get(cache_key)
+        if vector is None:
+            try:
+                vectors = self.backend.encode_texts([text])
+            except Exception:
+                vectors = None
+            vector = vectors[0] if vectors else None
+            if vector is not None:
+                self.cache.set(cache_key, vector)
         self._text_cache[key] = vector
         return vector
 
-    def _image_vector(self, path: str) -> list[float] | None:
+    def _image_vector(self, path: str, candidate: Candidate | None = None) -> list[float] | None:
         if path in self._image_cache:
             return self._image_cache[path]
+        backend, model_version = self._backend_identity()
         try:
-            vectors = self.backend.encode_images([path])
+            representation = sha256_file(path)
         except Exception:
-            vectors = None
-        vector = vectors[0] if vectors else None
+            representation = str(path)
+        asset_id = str(getattr(candidate, "canonical_key", "") or "")
+        provider = str(getattr(candidate, "provider", "") or "preview")
+        if not asset_id:
+            asset_id = f"{provider}:{getattr(candidate, 'provider_asset_id', '') or path}"
+        cache_key = visual_cache_key(
+            provider=provider, asset_id=asset_id, representation=representation,
+            backend=backend, model_version=model_version,
+        )
+        vector = self.cache.get(cache_key)
+        if vector is None:
+            try:
+                vectors = self.backend.encode_images([path])
+            except Exception:
+                vectors = None
+            vector = vectors[0] if vectors else None
+            if vector is not None:
+                self.cache.set(cache_key, vector)
         self._image_cache[path] = vector
         return vector
 
@@ -109,7 +150,7 @@ class P02PreviewEvidenceEvaluator:
             return VisualEvidence(status="PREVIEW_UNAVAILABLE")
         self.preview_hits += 1
         text_vector = self._text_vector(spec)
-        image_vector = self._image_vector(path)
+        image_vector = self._image_vector(path, candidate)
         if text_vector is None or image_vector is None:
             self.errors += 1
             return VisualEvidence(status="VISUAL_BACKEND_UNAVAILABLE")

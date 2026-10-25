@@ -4069,11 +4069,17 @@ async def start_generation_job_subprocess(
     _kill_orphaned_workers(logger)
 
     try:
+        # Job identity for optional scoped opt-ins (P04/P05 canary guard).
+        # Child inherits the service environment plus its own job id, so
+        # ``P05_CANARY_JOB_IDS`` can narrow activation to this job only.
+        _worker_env = dict(os.environ)
+        _worker_env["AUTOTUBE_JOB_ID"] = str(job_id)
         proc = subprocess.Popen(
             cmd,
             start_new_session=True,     # Survive parent (API) death
             stdout=open(log_path, "w"),
             stderr=subprocess.STDOUT,
+            env=_worker_env,
         )
     except Exception as exc:
         logger.error("Failed to spawn worker subprocess: %s", exc)

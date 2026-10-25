@@ -1,0 +1,79 @@
+{
+  "arm": "legacy",
+  "run_id": "p05-canary-20261025",
+  "script_id": 1714,
+  "channel": "canal2",
+  "scene_indices": [
+    0,
+    2,
+    10
+  ],
+  "started_at": "2026-10-25T14:29:20.652013+00:00",
+  "elapsed_s": 803.01,
+  "env": {
+    "AUTOTUBE_JOB_ID": "canary-p05-canary-20261025-legacy",
+    "DATABASE_PATH": "/root/autotube/autotube.db",
+    "MEDIA_SELECTOR": "legacy",
+    "MEDIA_SELECTOR_SHADOW": "0",
+    "OUTPUT_DIR": "/tmp/autotube_p05_canary/p05-canary-20261025/legacy",
+    "P02_VISUAL_CACHE": "/root/.opencode-worktrees/autotube/20261025145408-p05-canary/benchmarks/media_semantics/evidence/p05-canary-20261025/visual_cache",
+    "P02_VISUAL_CACHE_ENABLED": "1",
+    "P02_VISUAL_MODE": "off",
+    "P03_VISUAL_CACHE": "/root/.opencode-worktrees/autotube/20261025145408-p05-canary/benchmarks/media_semantics/evidence/p05-canary-20261025/visual_cache",
+    "P04_ATTRIBUTION_MANIFEST": "0",
+    "P04_SOURCE_ROUTER": "0",
+    "P05_CANARY_JOB_IDS": "canary-p05-canary-20261025-legacy",
+    "P05_INTEGRATED": "0"
+  },
+  "output_dir": "/tmp/autotube_p05_canary/p05-canary-20261025/legacy",
+  "settings_output_dir": "/tmp/autotube_p05_canary/p05-canary-20261025/legacy",
+  "scenes": [
+    {
+      "index": 0,
+      "source_scene_index": 0,
+      "tipo": "hook",
+      "declared_media_type": "video",
+      "narration": "A las 18 semanas de gestación, cuando el feto mide apenas unos 14 centímetros, ya empieza a escuchar. No el silencio que imaginaríamos, sino un concierto constante: el latido del corazón de su madre, que percibe como un tambor grave y rítmico, y el rumor del flujo sanguíneo, un siseo que lo acompaña día y noche. Ese es el primer paisaje sonoro de cualquier ser humano. Lo que durante milenios permaneció oculto hoy puede verse con ecografías en cuatro dimensiones, y lo que revelan es que el feto no es un pasajero pasivo: es un oyente atento que lleva meses estudiando la voz de su madre antes de nacer. En los próximos minutos vas a descubrir qué experimentos concretos demostraron que los fetos responden a la música, cómo reaccionan con la cara ante un estímulo sonoro y por qué los científicos comparan el vientre materno con un aula en penumbra. Quédate hasta el final, porque el último experimento que vas a conocer ocurrió en un hospital de España y cambió la forma en que entendemos la vida antes de nacer.",
+      "query_en": "fetus hearing mother's heartbeat sound 4D ultrasound",
+      "description": "Un vientre materno iluminado por ecografías en 4D, mostrando al feto en movimiento.",
+      "asset": {
+        "path": "/tmp/autotube_p05_canary/p05-canary-20261025/legacy/ai_images/hook/scene_000_f3c1c0bcc5.jpg",
+        "type": "image",
+        "duration": null,
+        "source": "ai_local_sd"
+      }
+    },
+    {
+      "index": 1,
+      "source_scene_index": 2,
+      "tipo": "desarrollo",
+      "declared_media_type": "imagen",
+      "narration": "Conviene ser precisos: los estudios describen respuestas motoras y faciales medibles, no estados emocionales conscientes. Lo que se especula es hasta dónde llega esa capacidad de procesamiento; lo que está documentado es que el útero es mucho menos silencioso de lo que dicta la intuición. Los latidos de la madre, su voz, el flujo sanguíneo y los sonidos externos atraviesan el líquido amniótico y llegan al feto como una señal continua. Y aquí aparece la pregunta que abre el siguiente capítulo: si el oído ya está activo a las 25 semanas, ¿qué ocurre con el tacto, el gusto y el olfato? Porque los registros muestran que el feto también se toca la cara, reacciona a sustancias del líquido amniótico y desarrolla preferencias de sabor antes de nacer. El vientre materno no es un cuarto oscuro y mudo: es un mundo sensorial en plena construcción, y lo que sigue es aún más sorprendente.",
+      "query_en": "fetus sensory world womb sounds",
+      "description": "Un gráfico que ilustra los sentidos del feto en el vientre materno.",
+      "asset": {
+        "path": "/tmp/autotube_p05_canary/p05-canary-20261025/legacy/ai_images/desarrollo/scene_001_6b1aa4d2a0.jpg",
+        "type": "image",
+        "duration": null,
+        "source": "ai_local_sd"
+      }
+    },
+    {
+      "index": 2,
+      "source_scene_index": 10,
+      "tipo": "desarrollo",
+      "declared_media_type": "imagen",
+      "narration": "En 2010, el Royal College of Obstetricians and Gynaecologists del Reino Unido publicó un informe que sacudió el debate: el feto no puede experimentar dolor antes de las 24 semanas de gestación, y la conciencia, tal como la entendemos, no surge dentro del útero sino después del nacimiento. El documento no era una opinión aislada. Reunía la evidencia disponible y trazaba una línea clara entre lo que el feto hace —moverse, responder, dormir— y lo que el feto experimenta. Esa distinción, sutil en apariencia, es la que separa un organismo reactivo de una mente que siente. Y la ciencia lleva más de una década intentando precisar dónde cae exactamente esa frontera.",
+      "query_en": "fetal ultrasound 24 weeks scientific report medical study",
+      "description": "Imagen de una ecografía 4D de un feto en el vientre materno, con un halo de luz tenue, mientras se superpone un gráfico de líneas que representa un informe científico.",
+      "asset": {
+        "path": "/tmp/autotube_p05_canary/p05-canary-20261025/legacy/ai_images/desarrollo/scene_002_7e97da4e86.jpg",
+        "type": "image",
+        "duration": null,
+        "source": "ai_local_sd"
+      }
+    }
+  ],
+  "decisions": [],
+  "errors": []
+}
