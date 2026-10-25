@@ -1,0 +1,31 @@
+{
+  "SOURCING_VERSION": "p04-source-fallback-1",
+  "INTEGRATED_VERSION": "p05-integrated-1",
+  "defaults": {
+    "MEDIA_SELECTOR": "legacy",
+    "P02_VISUAL_MODE": "off",
+    "P04_SOURCE_ROUTER": 0,
+    "P05_INTEGRATED": 0,
+    "P04_ATTRIBUTION_MANIFEST": 0
+  },
+  "p05": {
+    "visual_profile": "PREVIEW_VISUAL",
+    "visual_top_n": 8,
+    "max_visual_candidates": 14,
+    "real_threshold": 0.26,
+    "ai_threshold": 0.26,
+    "ai_validation_required": true,
+    "adaptive_budget": true,
+    "entity_archive_queries": true
+  },
+  "weights": {
+    "text": 0.4,
+    "preview": 0.35,
+    "frame": 0.2,
+    "vlm": 0.15,
+    "technical_quality": 0.05,
+    "routing_prior_cap": 0.04,
+    "coherence_cap": 0.05,
+    "coherence_band": 0.08
+  }
+}

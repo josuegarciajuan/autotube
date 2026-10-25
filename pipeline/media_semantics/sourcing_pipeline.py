@@ -52,8 +52,18 @@ from .contracts import (
     SelectionStatus,
 )
 from .dedup import PerceptualDuplicateIndex, image_hash
+from .entity_queries import archive_queries
 from .image_motion import plan_image_motion
+from .integrated import (
+    IntegratedConfig,
+    IntegratedSelector,
+    is_generated_asset,
+    is_real_asset,
+    stage1_universe,
+    stage2_universe,
+)
 from .ranking import SemanticTextRanker
+from .unified_scoring import PROFILE_PREVIEW, PROFILE_TEXT_ONLY, UnifiedWeights
 from .source_router import (
     AIPolicy,
     AI_PROVIDERS,
@@ -109,6 +119,16 @@ class SourcingConfig:
     quality_bonus: float = 0.015
     conceptual_score_penalty: float = 0.12
     generic_score_penalty: float = 0.18
+    # ── P05 integrated selection (opt-in; production defaults unchanged) ──
+    integrated: bool = False
+    visual_profile: str = PROFILE_PREVIEW
+    visual_top_n: int = 8
+    max_visual_candidates: int = 14
+    real_threshold: float = 0.26
+    ai_threshold: float = 0.26
+    ai_validation_required: bool = True
+    adaptive_budget: bool = True
+    entity_archive_queries: bool = True
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "SourcingConfig":
@@ -142,6 +162,15 @@ class SourcingConfig:
             ai_backend=str(env.get("P04_AI_BACKEND", "pollinations")),
             allow_conceptual=_b("P04_ALLOW_CONCEPTUAL", True),
             allow_generic=_b("P04_ALLOW_GENERIC", True),
+            integrated=_b("P05_INTEGRATED", False),
+            visual_profile=str(env.get("P05_VISUAL_PROFILE", PROFILE_PREVIEW)).upper(),
+            visual_top_n=max(1, _i("P05_VISUAL_TOP_N", 8)),
+            max_visual_candidates=max(1, _i("P05_MAX_VISUAL_CANDIDATES", 14)),
+            real_threshold=max(0.0, min(1.0, _f("P05_REAL_THRESHOLD", 0.26))),
+            ai_threshold=max(0.0, min(1.0, _f("P05_AI_THRESHOLD", 0.26))),
+            ai_validation_required=_b("P05_AI_VALIDATION_REQUIRED", True),
+            adaptive_budget=_b("P05_ADAPTIVE_BUDGET", True),
+            entity_archive_queries=_b("P05_ENTITY_ARCHIVE_QUERIES", True),
         )
 
 
@@ -174,14 +203,14 @@ def _stage_queries(spec: SceneSpec, asset_type: str) -> list[str]:
         spec.subject or spec.visual_concept or spec.narration_fragment[:80],
     ]
     if asset_type in (AssetType.ARCHIVAL_IMAGE.value, AssetType.ARCHIVAL_VIDEO.value):
-        # Archive metadata often uses place/era names, not modern b-roll terms.
-        base = [
+        # P05-K: archive metadata is entity/era oriented, not b-roll oriented.
+        base = archive_queries(spec, max_queries=4) or [
             " ".join(x for x in (spec.subject, spec.era) if x),
             " ".join(x for x in (spec.subject, spec.environment) if x),
             spec.subject,
         ]
     if asset_type == AssetType.SCIENTIFIC_IMAGE.value:
-        base = [
+        base = archive_queries(spec, max_queries=4) or [
             f"{spec.subject} {spec.environment}".strip(),
             " ".join(x for x in (spec.subject, spec.visual_concept) if x),
             spec.subject,
@@ -258,6 +287,8 @@ class SourcedMediaSelector:
         available_providers: Iterable[str] | None = None,
         available_ai_backends: Iterable[str] | None = None,
         ranker: SemanticTextRanker | None = None,
+        visual_evaluator=None,
+        integrated_selector: IntegratedSelector | None = None,
     ) -> None:
         self.config = config or SourcingConfig()
         self.semantic_config = semantic_config or SemanticConfig()
@@ -275,6 +306,28 @@ class SourcedMediaSelector:
             set(available_ai_backends) if available_ai_backends is not None else None
         )
         self.ranker = ranker or SemanticTextRanker()
+        self.visual_evaluator = visual_evaluator
+        self.integrated_selector = integrated_selector
+        if self.config.integrated and self.integrated_selector is None:
+            self.integrated_selector = IntegratedSelector(
+                config=IntegratedConfig(
+                    visual_profile=self.config.visual_profile,
+                    visual_top_n=self.config.visual_top_n,
+                    max_visual_candidates=self.config.max_visual_candidates,
+                    real_threshold=self.config.real_threshold,
+                    ai_threshold=self.config.ai_threshold,
+                    stage2_threshold=self.config.min_relevance_score,
+                    ai_validation_required=self.config.ai_validation_required,
+                    adaptive_budget=self.config.adaptive_budget,
+                    weights=UnifiedWeights(),
+                ),
+                ranker=self.ranker,
+                visual_evaluator=visual_evaluator,
+            )
+        elif self.integrated_selector is not None:
+            self.integrated_selector.ranker = self.ranker
+            if visual_evaluator is not None:
+                self.integrated_selector.visual_evaluator = visual_evaluator
         self.duplicates = PerceptualDuplicateIndex(
             phash_threshold=self.config.phash_threshold,
             dhash_threshold=self.config.dhash_threshold,
@@ -380,9 +433,11 @@ class SourcedMediaSelector:
                         )
                         accumulated.append((candidate, {"level": level_index, "asset_type": asset_type}))
             pages += 1
-            if stage_added:
+            if stage_added and not self.config.integrated:
                 # Re-rank the accumulated pool; stop early only on a strong
                 # candidate, otherwise compare with the next stage.
+                # P05 integrated mode never early-stops: the global rerank must
+                # see every allowed source before choosing.
                 _, best, _, _ = self._rank_pool(spec, route, accumulated)
                 if best and best["final"] >= self.config.strong_relevance_score:
                     strong_found = True
@@ -394,11 +449,19 @@ class SourcedMediaSelector:
         decision.rejected = ranked[3][: self.semantic_config.budget.provenance_rejected_limit]
         decision.queries = queries
 
+        integrated_diag: dict[str, Any] = {}
+        approved_rows = ranked[2]
+        if self.config.integrated:
+            approved_rows, integrated_diag = self._integrated_rerank(
+                spec, route, accumulated, decision,
+            )
+            decision.extra["integrated"] = integrated_diag
+
         winner: Candidate | None = None
         winner_row: dict[str, Any] | None = None
         downloaded: dict | None = None
         attempts = 0
-        for candidate, row in ranked[2]:
+        for candidate, row in approved_rows:
             if attempts >= self.config.max_downloads_per_scene:
                 break
             attempts += 1
@@ -431,7 +494,7 @@ class SourcedMediaSelector:
         # If no downloader is configured the metadata winner is still selected;
         # this keeps offline benchmarks and shadow scoring pure-metadata.
         if winner is None and self.download_fn is None:
-            approved = [item for item in ranked[2]]
+            approved = [item for item in approved_rows]
             if approved:
                 candidate, row = approved[0]
                 dup = self._duplicate_check(candidate, None)
@@ -511,6 +574,8 @@ class SourcedMediaSelector:
             dhash_threshold=self.config.dhash_threshold,
         )
         self.coherence.reset()
+        if self.integrated_selector is not None:
+            self.integrated_selector.reset()
         self.ai_used = 0
 
     # ── internal ──────────────────────────────────────────────
@@ -518,6 +583,132 @@ class SourcedMediaSelector:
         from .source_router import _PROVIDERS_BY_ASSET
 
         return list(_PROVIDERS_BY_ASSET.get(asset_type, ()))
+
+    def _integrated_rerank(
+        self,
+        spec: SceneSpec,
+        route: SourceRoute,
+        pool: list[tuple[Candidate, dict[str, Any]]],
+        decision: SelectionDecision,
+    ) -> tuple[list[tuple[Candidate, dict[str, Any]]], dict[str, Any]]:
+        """P05-C/D/G: one universe → one global ordering.
+
+        Allowed real sources are pooled first.  Generated/conceptual candidates
+        are never part of this stage; they only enter after a real failure.
+        """
+        selector = self.integrated_selector
+        if selector is None:
+            return self._rank_pool(spec, route, pool)[2], {"status": "selector_unavailable"}
+        # Keep thresholds/profile in sync with the live sourcing config; tests
+        # and controlled canaries may tune them after construction.
+        selector.config.visual_profile = self.config.visual_profile
+        selector.config.real_threshold = self.config.real_threshold
+        selector.config.stage2_threshold = self.config.min_relevance_score
+        selector.config.visual_top_n = self.config.visual_top_n
+        selector.config.max_visual_candidates = self.config.max_visual_candidates
+        universe = stage1_universe(pool) if pool else []
+        if not universe:
+            return [], {"status": "no_real_candidates", "universe": 0}
+        rows, approved_rows, diag = selector.rank_universe(
+            spec, universe, route, profile=self.config.visual_profile,
+        )
+        by_key: dict[str, dict[str, Any]] = {}
+        ordered: list[dict[str, Any]] = []
+        for row in rows:
+            payload = row.to_dict()
+            payload["final"] = round(float(row.final), 6)
+            payload["text_score"] = round(float(row.score.text_relevance), 6)
+            payload["visual_preview_relevance"] = row.score.preview_visual_relevance
+            payload["frame_relevance"] = row.score.frame_relevance
+            payload["vlm_relevance"] = row.score.vlm_relevance
+            payload["technical_quality"] = row.score.technical_quality
+            payload["coherence"] = dict(row.meta.get("coherence") or {})
+            payload["level"] = int(row.meta.get("level") or 0)
+            by_key[row.candidate.canonical_key] = payload
+            ordered.append(payload)
+        decision.candidate_scores = ordered[
+            : self.semantic_config.budget.provenance_candidate_limit
+        ]
+        decision.rejected = [
+            RejectedCandidate(
+                candidate=row.candidate,
+                score=row.final,
+                reason=row.score.hard_reject_reason or "below_integrated_threshold",
+            )
+            for row in rows
+            if row not in approved_rows
+        ][: self.semantic_config.budget.provenance_rejected_limit]
+        approved = [
+            (row.candidate, by_key[row.candidate.canonical_key])
+            for row in approved_rows
+        ]
+        if approved:
+            first = approved[0][1]
+            decision.text_score = float(first.get("text_score") or 0.0)
+            decision.visual_preview_relevance = float(
+                first.get("visual_preview_relevance") or 0.0
+            )
+            decision.frame_relevance = float(first.get("frame_relevance") or 0.0)
+            decision.vlm_relevance = float(first.get("vlm_relevance") or 0.0)
+            decision.combined_score = float(first.get("final") or 0.0)
+            decision.degradation_level = self.config.visual_profile
+        diag = dict(diag)
+        diag["status"] = "ranked" if approved else "no_real_above_threshold"
+        return approved, diag
+
+    def _integrated_stage2(
+        self,
+        spec: SceneSpec,
+        route: SourceRoute,
+        pool: list[tuple[Candidate, dict[str, Any]]],
+        fallback_type: str,
+        decision: SelectionDecision,
+    ) -> tuple[Candidate, dict[str, Any]] | None:
+        selector = self.integrated_selector
+        if selector is None or not pool:
+            return None
+        if fallback_type == "GENERIC":
+            # Generic fallback reuses stock providers but is explicitly
+            # labelled; it must not be filtered out as a "real" candidate.
+            universe = [
+                (candidate, {**dict(meta), "asset_type": AssetType.GENERIC_FALLBACK.value})
+                for candidate, meta in pool
+            ]
+        else:
+            universe = stage2_universe(pool)
+        if not universe:
+            return None
+        rows, approved, diag = selector.rank_universe(
+            spec, universe, route, fallback_type=fallback_type,
+        )
+        decision.extra.setdefault("integrated_stage2", {})[fallback_type] = diag
+        if not approved and fallback_type == "GENERIC" and rows:
+            # Explicit generic fallback: like P04, accept the provider's best
+            # but keep the GENERIC label and discounted score.
+            approved = [rows[0]]
+        if not approved:
+            return None
+        # Any generated winner must clear visual validation before download.
+        winner = approved[0]
+        if fallback_type == "AI_IMAGE" and self.config.ai_validation_required:
+            ok, evidence, reason = selector.validate_generated(
+                spec, winner.candidate, threshold=self.config.ai_threshold,
+            )
+            if not ok:
+                decision.extra.setdefault("ai_rejections", []).append({
+                    "candidate": winner.candidate.canonical_key,
+                    "reason": reason,
+                    "evidence": evidence.to_dict(),
+                })
+                return None
+        payload = winner.to_dict()
+        payload["final"] = round(float(winner.final), 6)
+        payload["text_score"] = round(float(winner.score.text_relevance), 6)
+        payload["asset_type"] = winner.asset_type
+        payload["media_type"] = winner.media_type
+        payload["coherence"] = dict(winner.meta.get("coherence") or {})
+        payload["level"] = 0
+        return winner.candidate, payload
 
     def _rank_pool(
         self,
@@ -650,6 +841,14 @@ class SourcedMediaSelector:
         )
         decision.winner = winner
         decision.winner_score = float(row.get("final") or 0.0)
+        decision.combined_score = float(row.get("final") or 0.0)
+        decision.text_score = float(row.get("text_score") or 0.0)
+        if row.get("visual_preview_relevance") is not None:
+            decision.visual_preview_relevance = float(row["visual_preview_relevance"])
+        if row.get("frame_relevance") is not None:
+            decision.frame_relevance = float(row["frame_relevance"])
+        if row.get("vlm_relevance") is not None:
+            decision.vlm_relevance = float(row["vlm_relevance"])
         decision.asset_type = asset_type
         decision.fallback_type = fallback_type
         decision.fallback_used = bool(fallback_type)
@@ -788,17 +987,49 @@ class SourcedMediaSelector:
             metadata_completeness=0.6,
             searchable_text=" ".join([spec.subject, spec.action, spec.environment, request.prompt]).lower(),
         )
-        self.ai_used += 1
-        self.duplicates.add(
-            key=candidate.canonical_key, urls=[str(asset["path"])],
-            hash_value=image_hash(asset["path"]),
-        )
         row = {
             "asset_type": AssetType.AI_IMAGE.value,
             "final": max(0.0, self.config.min_relevance_score),
             "media_type": "image",
             "coherence": {},
         }
+        if self.config.integrated:
+            selector = self.integrated_selector
+            if selector is None:
+                decision.extra["ai_skipped"] = "integrated_selector_unavailable"
+                return None
+            ok, evidence, reason = selector.validate_generated(
+                spec, candidate, threshold=self.config.ai_threshold,
+            )
+            decision.extra["ai_validation"] = {
+                "accepted": ok, "reason": reason, "evidence": evidence.to_dict(),
+            }
+            if not ok:
+                decision.extra["ai_skipped"] = reason or "ai_visual_validation_failed"
+                return None
+            # The generated image is scored with the same formula as real
+            # assets (plus the explicit fallback penalty), never by prompt.
+            rows, approved, diag = selector.rank_universe(
+                spec, [(candidate, {"asset_type": AssetType.AI_IMAGE.value})],
+                route, fallback_type="AI_IMAGE",
+            )
+            decision.extra.setdefault("integrated_stage2", {})["AI_IMAGE"] = diag
+            if rows:
+                if float(rows[0].final) < min(
+                    self.config.ai_threshold, self.config.min_relevance_score,
+                ):
+                    decision.extra["ai_skipped"] = "ai_below_threshold"
+                    return None
+                row = rows[0].to_dict()
+                row["final"] = round(float(rows[0].final), 6)
+                row["text_score"] = round(float(rows[0].score.text_relevance), 6)
+                row["asset_type"] = AssetType.AI_IMAGE.value
+                row["media_type"] = "image"
+        self.ai_used += 1
+        self.duplicates.add(
+            key=candidate.canonical_key, urls=[str(asset["path"])],
+            hash_value=image_hash(asset["path"]),
+        )
         decision.extra["ai_request"] = request.to_dict()
         return candidate, asset, row
 
@@ -814,16 +1045,24 @@ class SourcedMediaSelector:
         )
         if not pool:
             return None
-        rows, best, approved, rejected = self._rank_pool(spec, route, pool)
-        if not approved:
-            return None
-        candidate, row = approved[0]
-        adjusted = max(0.0, float(row["final"]) - self.config.conceptual_score_penalty)
-        if adjusted < self.config.conceptual_min_score:
-            return None
-        row = dict(row)
-        row["final"] = adjusted
-        row["asset_type"] = AssetType.CONCEPTUAL_STOCK.value
+        if self.config.integrated:
+            picked = self._integrated_stage2(
+                spec, route, pool, "CONCEPTUAL", decision,
+            )
+            if picked is None:
+                return None
+            candidate, row = picked
+        else:
+            rows, best, approved, rejected = self._rank_pool(spec, route, pool)
+            if not approved:
+                return None
+            candidate, row = approved[0]
+            adjusted = max(0.0, float(row["final"]) - self.config.conceptual_score_penalty)
+            if adjusted < self.config.conceptual_min_score:
+                return None
+            row = dict(row)
+            row["final"] = adjusted
+            row["asset_type"] = AssetType.CONCEPTUAL_STOCK.value
         asset = self._download(candidate)
         if asset is None:
             return None
@@ -848,22 +1087,30 @@ class SourcedMediaSelector:
         )
         if not pool:
             return None
-        rows, best, approved, rejected = self._rank_pool(spec, route, pool)
-        if not approved:
-            # Generic fallback intentionally accepts the provider's best even
-            # with weak metadata, but labels the confidence accordingly.
-            approved = sorted(
-                [(c, m) for c, m in pool],
-                key=lambda item: (item[0].provider_rank, item[0].canonical_key),
+        if self.config.integrated:
+            picked = self._integrated_stage2(
+                spec, route, pool, "GENERIC", decision,
             )
-        if not approved:
-            return None
-        candidate, row = approved[0]
-        row = dict(row)
-        row["final"] = max(
-            0.0, float(row.get("final") or 0.0) - self.config.generic_score_penalty,
-        )
-        row["asset_type"] = AssetType.GENERIC_FALLBACK.value
+            if picked is None:
+                return None
+            candidate, row = picked
+        else:
+            rows, best, approved, rejected = self._rank_pool(spec, route, pool)
+            if not approved:
+                # Generic fallback intentionally accepts the provider's best
+                # even with weak metadata, but labels the confidence accordingly.
+                approved = sorted(
+                    [(c, m) for c, m in pool],
+                    key=lambda item: (item[0].provider_rank, item[0].canonical_key),
+                )
+            if not approved:
+                return None
+            candidate, row = approved[0]
+            row = dict(row)
+            row["final"] = max(
+                0.0, float(row.get("final") or 0.0) - self.config.generic_score_penalty,
+            )
+            row["asset_type"] = AssetType.GENERIC_FALLBACK.value
         asset = self._download(candidate)
         if asset is None:
             return None

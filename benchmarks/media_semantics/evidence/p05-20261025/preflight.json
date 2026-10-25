@@ -1,0 +1,33 @@
+{
+  "generated_at": "2026-10-25T13:30:56.963959+00:00",
+  "branch": "main",
+  "head": "4cf14312b2b1794c46869bf89fdcb130d8f8a6e4",
+  "python": "3.10.12",
+  "platform": "Linux-5.15.0-191-generic-x86_64-with-glibc2.35",
+  "cpu_count": 10,
+  "modules": {
+    "torch": true,
+    "transformers": true,
+    "PIL": true,
+    "numpy": true,
+    "requests": true,
+    "sentence_transformers": false,
+    "open_clip": false
+  },
+  "clip_model_cached": true,
+  "provider_env_present": {
+    "PEXELS_API_KEY": true,
+    "PIXABAY_API_KEY": true,
+    "UNSPLASH_ACCESS_KEY": true,
+    "OPENAI_API_KEY": true,
+    "STABLE_HORDE_API_KEY": true
+  },
+  "production_flags": {
+    "MEDIA_SELECTOR": "legacy (default)",
+    "P02_VISUAL_MODE": "off",
+    "P04_SOURCE_ROUTER": "0",
+    "P05_INTEGRATED": "0",
+    "P04_ATTRIBUTION_MANIFEST": "0"
+  },
+  "secrets_printed": false
+}

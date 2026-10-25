@@ -1,0 +1,305 @@
+{
+  "version": 1,
+  "generated_at": "2026-10-25T13:20:47.015164+00:00",
+  "rows": [
+    {
+      "scene_id": "s0777-b12",
+      "category": "history",
+      "route": {
+        "scene_type": "HISTORY",
+        "preferred_asset_types": [
+          "ARCHIVAL_IMAGE",
+          "ARCHIVAL_VIDEO",
+          "STOCK_IMAGE",
+          "STOCK_VIDEO",
+          "AI_IMAGE",
+          "CONCEPTUAL_STOCK",
+          "GENERIC_FALLBACK"
+        ],
+        "preferred_providers": [
+          "wikimedia_commons",
+          "pixabay_photo",
+          "unsplash",
+          "pexels_photo",
+          "pexels",
+          "pixabay",
+          "mixkit",
+          "coverr",
+          "youtube_cc",
+          "pollinations",
+          "local_sd",
+          "stable_horde"
+        ],
+        "fallback_order": [
+          "ARCHIVAL_IMAGE",
+          "ARCHIVAL_VIDEO",
+          "STOCK_IMAGE",
+          "STOCK_VIDEO",
+          "AI_IMAGE",
+          "CONCEPTUAL_STOCK",
+          "GENERIC_FALLBACK"
+        ],
+        "historical_priority": true,
+        "generation_allowed": true,
+        "ai_policy": "AI_IMAGE_ALLOWED",
+        "confidence": 0.76,
+        "reasons": [
+          "deterministic_category:HISTORY",
+          "terms:ancient,era,historia,ruins",
+          "era_or_history_signal"
+        ],
+        "matched_terms": [
+          "ancient",
+          "era",
+          "historia",
+          "ruins"
+        ],
+        "mode": "deterministic",
+        "allowed_asset_types": [
+          "ARCHIVAL_IMAGE",
+          "ARCHIVAL_VIDEO",
+          "STOCK_IMAGE",
+          "STOCK_VIDEO",
+          "AI_IMAGE",
+          "CONCEPTUAL_STOCK",
+          "GENERIC_FALLBACK"
+        ],
+        "forbidden_asset_types": [],
+        "providers_considered": [
+          "wikimedia_commons",
+          "pixabay_photo",
+          "unsplash",
+          "pexels_photo",
+          "pexels",
+          "pixabay",
+          "mixkit",
+          "coverr",
+          "youtube_cc",
+          "pollinations",
+          "local_sd",
+          "stable_horde"
+        ],
+        "providers_skipped": {
+          "nasa_image_library": "not_space_or_science"
+        }
+      },
+      "backend": "pollinations",
+      "status": "OK",
+      "error": "",
+      "latency_ms": 231.68,
+      "prompt": "Palmyra ruins in the desert, showing collapsed columns and destroyed arches, arid desert sky, aerial view of ancient destruction, wide establishing shot, documentary b-roll, must show: f, a, cinematic documentary photography, realistic, atmospheric lighting, consistent color grade, high detail, 16:9",
+      "prompt_hash": "d2eb57e18c1ac9b20286224e171eeb0488001557",
+      "output": "/root/autotube/benchmarks/media_semantics/evidence/p05-20261025/ai_canary/s0777-b12.jpg",
+      "visual_evaluation": {
+        "preview_relevance": 0.286401,
+        "frame_relevance": null,
+        "vlm_relevance": null,
+        "technical_quality": 0.5,
+        "negative_penalty": 0.0,
+        "era_penalty": 0.0,
+        "must_include_penalty": 0.0,
+        "hard_reject_reason": "",
+        "status": "PREVIEW_AVAILABLE",
+        "detail": {
+          "path": "/root/autotube/benchmarks/media_semantics/evidence/p05-20261025/ai_canary/s0777-b12.jpg",
+          "visual_source": "",
+          "backend": "clip",
+          "model": "openai/clip-vit-base-patch32"
+        }
+      },
+      "would_beat_existing_fallback": true
+    },
+    {
+      "scene_id": "s1406-b11",
+      "category": "medical",
+      "route": {
+        "scene_type": "MEDICAL",
+        "preferred_asset_types": [
+          "SCIENTIFIC_IMAGE",
+          "STOCK_IMAGE",
+          "STOCK_VIDEO",
+          "AI_IMAGE",
+          "CONCEPTUAL_STOCK",
+          "GENERIC_FALLBACK"
+        ],
+        "preferred_providers": [
+          "nasa_image_library",
+          "wikimedia_commons",
+          "pixabay_photo",
+          "unsplash",
+          "pexels_photo",
+          "pexels",
+          "pixabay",
+          "mixkit",
+          "coverr",
+          "youtube_cc",
+          "pollinations",
+          "local_sd",
+          "stable_horde"
+        ],
+        "fallback_order": [
+          "SCIENTIFIC_IMAGE",
+          "STOCK_IMAGE",
+          "STOCK_VIDEO",
+          "AI_IMAGE",
+          "CONCEPTUAL_STOCK",
+          "GENERIC_FALLBACK"
+        ],
+        "historical_priority": false,
+        "generation_allowed": true,
+        "ai_policy": "AI_IMAGE_ALLOWED",
+        "confidence": 0.79,
+        "reasons": [
+          "deterministic_category:MEDICAL",
+          "terms:clinical,diagnosis,doctor,enfermedad,hospital,paciente"
+        ],
+        "matched_terms": [
+          "clinical",
+          "diagnosis",
+          "doctor",
+          "enfermedad",
+          "hospital",
+          "paciente"
+        ],
+        "mode": "deterministic",
+        "allowed_asset_types": [
+          "SCIENTIFIC_IMAGE",
+          "STOCK_IMAGE",
+          "STOCK_VIDEO",
+          "AI_IMAGE",
+          "CONCEPTUAL_STOCK",
+          "GENERIC_FALLBACK"
+        ],
+        "forbidden_asset_types": [],
+        "providers_considered": [
+          "nasa_image_library",
+          "wikimedia_commons",
+          "pixabay_photo",
+          "unsplash",
+          "pexels_photo",
+          "pexels",
+          "pixabay",
+          "mixkit",
+          "coverr",
+          "youtube_cc",
+          "pollinations",
+          "local_sd",
+          "stable_horde"
+        ],
+        "providers_skipped": {}
+      },
+      "backend": "pollinations",
+      "status": "AI_BAD_OUTPUT",
+      "error": "empty_output",
+      "latency_ms": 60136.08,
+      "prompt": "doctor, reviewing clinical records and diagnostic tests, modern hospital desk with natural window light, clinical precision in diagnosis, wide establishing shot, documentary b-roll, must show: doctor, clinical records, cinematic documentary photography, realistic, atmospheric lighting, consistent color grade, high detail, 16:9",
+      "prompt_hash": "eec7a7cb50b4baac71703b872bf2b3989e0eeec5",
+      "output": "",
+      "visual_evaluation": null,
+      "would_beat_existing_fallback": false
+    },
+    {
+      "scene_id": "s0114-b17",
+      "category": "nature",
+      "route": {
+        "scene_type": "NATURE",
+        "preferred_asset_types": [
+          "STOCK_VIDEO",
+          "STOCK_IMAGE",
+          "AI_IMAGE",
+          "CONCEPTUAL_STOCK",
+          "GENERIC_FALLBACK"
+        ],
+        "preferred_providers": [
+          "pexels",
+          "pixabay",
+          "mixkit",
+          "coverr",
+          "youtube_cc",
+          "pixabay_photo",
+          "unsplash",
+          "pexels_photo",
+          "pollinations",
+          "local_sd",
+          "stable_horde"
+        ],
+        "fallback_order": [
+          "STOCK_VIDEO",
+          "STOCK_IMAGE",
+          "AI_IMAGE",
+          "CONCEPTUAL_STOCK",
+          "GENERIC_FALLBACK"
+        ],
+        "historical_priority": false,
+        "generation_allowed": true,
+        "ai_policy": "AI_IMAGE_ALLOWED",
+        "confidence": 0.71,
+        "reasons": [
+          "deterministic_category:NATURE",
+          "terms:ocean,océano,sea,tormenta"
+        ],
+        "matched_terms": [
+          "ocean",
+          "océano",
+          "sea",
+          "tormenta"
+        ],
+        "mode": "deterministic",
+        "allowed_asset_types": [
+          "STOCK_VIDEO",
+          "STOCK_IMAGE",
+          "AI_IMAGE",
+          "CONCEPTUAL_STOCK",
+          "GENERIC_FALLBACK"
+        ],
+        "forbidden_asset_types": [],
+        "providers_considered": [
+          "pexels",
+          "pixabay",
+          "mixkit",
+          "coverr",
+          "youtube_cc",
+          "pixabay_photo",
+          "unsplash",
+          "pexels_photo",
+          "pollinations",
+          "local_sd",
+          "stable_horde"
+        ],
+        "providers_skipped": {
+          "nasa_image_library": "not_space_or_science",
+          "wikimedia_commons": "not_archival_route"
+        }
+      },
+      "backend": "pollinations",
+      "status": "OK",
+      "error": "",
+      "latency_ms": 5006.96,
+      "prompt": "survivors of the USS Monitor, grieving on the frozen sea, frozen ocean surface at sunrise, frozen sea as a cemetery of memory, wide establishing shot, documentary b-roll, must show: frozen ocean surface, survivors, cinematic documentary photography, realistic, atmospheric lighting, consistent color grade, high detail, 16:9",
+      "prompt_hash": "ba567cad282287acd4d11bdc4b19c37cbed72fa5",
+      "output": "/root/autotube/benchmarks/media_semantics/evidence/p05-20261025/ai_canary/s0114-b17.jpg",
+      "visual_evaluation": {
+        "preview_relevance": 0.303432,
+        "frame_relevance": null,
+        "vlm_relevance": null,
+        "technical_quality": 0.5,
+        "negative_penalty": 0.0,
+        "era_penalty": 0.0,
+        "must_include_penalty": 0.0,
+        "hard_reject_reason": "",
+        "status": "PREVIEW_AVAILABLE",
+        "detail": {
+          "path": "/root/autotube/benchmarks/media_semantics/evidence/p05-20261025/ai_canary/s0114-b17.jpg",
+          "visual_source": "",
+          "backend": "clip",
+          "model": "openai/clip-vit-base-patch32"
+        }
+      },
+      "would_beat_existing_fallback": true
+    }
+  ],
+  "generated": 2,
+  "attempted": 3,
+  "published": 0,
+  "note": "Bounded canary; images are evidence only and are never published."
+}

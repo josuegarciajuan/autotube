@@ -67,10 +67,33 @@ from .attribution import (  # noqa: F401
     write_attribution_manifest,
 )
 
+from .integrated import (  # noqa: F401
+    IntegratedConfig,
+    IntegratedSelector,
+    describe_universe,
+    is_generated_asset,
+    is_real_asset,
+    stage1_universe,
+    stage2_universe,
+)
+from .unified_scoring import (  # noqa: F401
+    PROFILE_FULL,
+    PROFILE_PREVIEW,
+    PROFILE_TEXT_ONLY,
+    ScoreComponents,
+    UnifiedWeights,
+    VisualEvidence,
+    choose_visual_budget,
+    score_candidate,
+)
+from .entity_queries import archive_queries, build_archive_query_plan  # noqa: F401
+from .shadow import ShadowRecorder, run_shadow_scene  # noqa: F401
+
 SELECTOR_VERSION = "p01-semantic-1"
 VISUAL_SELECTOR_VERSION = "p02-visual-1"
 SOURCE_ROUTER_VERSION = "p04-source-router-1"
 SOURCING_VERSION = "p04-source-fallback-1"
+INTEGRATED_VERSION = "p05-integrated-1"
 
 __all__ = [
     "Candidate",
@@ -109,4 +132,24 @@ __all__ = [
     "NullVLMBackend",
     "build_vlm_backend",
     "parse_vlm_payload",
+    "INTEGRATED_VERSION",
+    "IntegratedSelector",
+    "IntegratedConfig",
+    "UnifiedWeights",
+    "VisualEvidence",
+    "ScoreComponents",
+    "score_candidate",
+    "choose_visual_budget",
+    "PROFILE_TEXT_ONLY",
+    "PROFILE_PREVIEW",
+    "PROFILE_FULL",
+    "is_real_asset",
+    "is_generated_asset",
+    "stage1_universe",
+    "stage2_universe",
+    "describe_universe",
+    "archive_queries",
+    "build_archive_query_plan",
+    "run_shadow_scene",
+    "ShadowRecorder",
 ]

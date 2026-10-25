@@ -154,6 +154,7 @@ class MediaFetcher:
             self._semantic_config = SemanticConfig(mode="legacy", shadow=False)
         self._semantic_selector = None
         self._pending_selection_decisions: list[dict] = []
+        self._attribution_decisions: list = []
         self._last_selection_decision = None
         self._shadow_pools: dict[int, object] = {}
 
@@ -1190,6 +1191,7 @@ class MediaFetcher:
         # AI prompt, provenance) sees the exact narration slice of the scene,
         # not the parent block's inherited query.
         self._pending_selection_decisions = []
+        self._attribution_decisions = []
         self._shadow_pools = {}
         self._last_selection_decision = None
         if getattr(self, "_p04_selector", None) is not None:
@@ -4427,6 +4429,9 @@ class MediaFetcher:
             )
         except (TypeError, ValueError):
             pass
+        visual_evaluator = None
+        if config.integrated:
+            visual_evaluator = self._p05_get_visual_evaluator()
         self._p04_selector = SourcedMediaSelector(
             config=config,
             semantic_config=self._semantic_config,
@@ -4441,8 +4446,40 @@ class MediaFetcher:
                     ("stable_horde", self._stable_horde),
                 ) if provider is not None
             ],
+            visual_evaluator=visual_evaluator,
         )
         return self._p04_selector
+
+    def _p05_get_visual_evaluator(self):
+        """P05: P02 preview evidence adapter (opt-in, fail-open)."""
+        if getattr(self, "_p05_visual_evaluator", None) is not None:
+            return self._p05_visual_evaluator
+        try:
+            from pipeline.media_semantics.config import VisualConfig
+            from pipeline.media_semantics.visual_evidence import (
+                P02PreviewEvidenceEvaluator,
+            )
+
+            base = getattr(self._semantic_config, "visual", None)
+            backend = str(os.getenv("P05_VISUAL_BACKEND", "") or "").strip().lower()
+            if not backend:
+                backend = str(getattr(base, "backend", "none") or "none")
+            if backend in ("", "none"):
+                backend = "clip"
+            mode = str(os.getenv("P05_VISUAL_PROFILE", "PREVIEW_VISUAL")).upper()
+            config = VisualConfig(
+                mode="embedding_only" if mode != "FULL_VISUAL" else "full_visual",
+                backend=backend,
+                model=str(getattr(base, "model", "") or "openai/clip-vit-base-patch32"),
+                allow_model_download=bool(getattr(base, "allow_model_download", False)),
+            )
+            if base is not None:
+                config.budget = base.budget
+            self._p05_visual_evaluator = P02PreviewEvidenceEvaluator(config=config)
+        except Exception as exc:
+            logger.warning("P05 visual evaluator unavailable (fail-open): %s", exc)
+            self._p05_visual_evaluator = None
+        return self._p05_visual_evaluator
 
     def _fetch_p04_asset(self, scene, scene_idx, target_dur, ctx, force_images=False):
         """Run one P04 sourcing decision; return an asset or ``None``."""
@@ -4757,6 +4794,17 @@ class MediaFetcher:
                 block_idx=decision.scene_spec.block_idx,
             )
             self._pending_selection_decisions.append(record)
+            # P05-M: keep the decision object so the attribution manifest can
+            # be written when the video id is known (gated by env; fail-open).
+            try:
+                if str(os.getenv("P04_ATTRIBUTION_MANIFEST", "0")).strip().lower() in (
+                    "1", "true", "yes", "on",
+                ):
+                    self._attribution_decisions.append(decision)
+                    if len(self._attribution_decisions) > 4000:
+                        del self._attribution_decisions[:1000]
+            except Exception:
+                pass
             # Bound memory for very long videos.
             if len(self._pending_selection_decisions) > 4000:
                 del self._pending_selection_decisions[:1000]
@@ -4831,6 +4879,15 @@ class MediaFetcher:
         """Persist queued P01 decisions once ``video_id`` is known."""
         records = list(self._pending_selection_decisions)
         self._pending_selection_decisions.clear()
+        decisions = list(self._attribution_decisions)
+        self._attribution_decisions.clear()
+        if decisions and str(os.getenv("P04_ATTRIBUTION_MANIFEST", "0")).strip().lower() in (
+            "1", "true", "yes", "on",
+        ):
+            try:
+                self.write_attribution_manifest(video_id, decisions)
+            except Exception as exc:
+                logger.warning("P04 attribution manifest failed (non-critical): %s", exc)
         if not records:
             return 0
         try:
@@ -4839,6 +4896,27 @@ class MediaFetcher:
         except Exception as exc:
             logger.warning("flush_selection_decisions failed (non-critical): %s", exc)
         return 0
+
+    def write_attribution_manifest(self, video_id: int, decisions=None) -> dict:
+        """P05-M: write the per-video attribution manifest beside outputs."""
+        from pipeline.media_semantics.attribution import (
+            build_attribution_manifest,
+            write_attribution_manifest,
+        )
+        from config import settings
+
+        decisions = list(decisions if decisions is not None else self._attribution_decisions)
+        manifest = build_attribution_manifest(
+            decisions,
+            video_id=int(video_id),
+            channel=str(getattr(settings, "CHANNEL_NAME", "") or ""),
+        )
+        out_dir = Path(settings.OUTPUT_DIR) / "attribution" / f"video_{int(video_id)}"
+        paths = write_attribution_manifest(
+            manifest, out_dir, stem=f"video_{int(video_id)}_attribution",
+        )
+        self._last_attribution_manifest = manifest
+        return paths
 
     def _interleaved_providers(self, want_video: bool, scene: dict, force_images: bool = False) -> tuple[list, list]:
         """Return (primary_providers, sparing_providers) ordered by preference.

@@ -1,0 +1,550 @@
+{
+  "version": 1,
+  "generated_at": "2026-10-25T13:36:21.067817+00:00",
+  "scenes": 36,
+  "arms": {
+    "legacy": {
+      "scenes": 36,
+      "auto_evaluated": 36,
+      "auto_coverage": 1.0,
+      "candidate_auto_evaluated": 108,
+      "top1_relevance_mean": 0.2694,
+      "top1_relevance_median": 0.3,
+      "relevant_rate": 0.1667,
+      "subject_match_mean": 0.2083,
+      "action_match_mean": 0.125,
+      "environment_match_mean": 0.4167,
+      "era_violations": 3,
+      "era_scenes": 4,
+      "must_avoid_violations": 0,
+      "no_good_candidate_rate": 0.0,
+      "generic_fallback_rate": 0.4167,
+      "provider_distribution": {
+        "pexels": 13,
+        "pixabay": 8,
+        "pixabay_photo": 15
+      },
+      "latency_mean_ms": 4459.1,
+      "latency_total_ms": 160527.61,
+      "candidate_top3_relevance_mean": 0.2889
+    },
+    "semantic_text": {
+      "scenes": 36,
+      "auto_evaluated": 31,
+      "auto_coverage": 0.8611,
+      "candidate_auto_evaluated": 108,
+      "top1_relevance_mean": 0.35,
+      "top1_relevance_median": 0.3,
+      "relevant_rate": 0.1935,
+      "subject_match_mean": 0.2419,
+      "action_match_mean": 0.1774,
+      "environment_match_mean": 0.5161,
+      "era_violations": 1,
+      "era_scenes": 3,
+      "must_avoid_violations": 0,
+      "no_good_candidate_rate": 0.1389,
+      "generic_fallback_rate": 0.3871,
+      "provider_distribution": {
+        "pexels": 9,
+        "pixabay": 10,
+        "pixabay_photo": 12
+      },
+      "latency_mean_ms": 4416.98,
+      "latency_total_ms": 159011.19,
+      "candidate_top3_relevance_mean": 0.3269
+    },
+    "semantic_visual": {
+      "scenes": 36,
+      "auto_evaluated": 34,
+      "auto_coverage": 0.9444,
+      "candidate_auto_evaluated": 108,
+      "top1_relevance_mean": 0.3544,
+      "top1_relevance_median": 0.3,
+      "relevant_rate": 0.2059,
+      "subject_match_mean": 0.25,
+      "action_match_mean": 0.1618,
+      "environment_match_mean": 0.5147,
+      "era_violations": 2,
+      "era_scenes": 5,
+      "must_avoid_violations": 0,
+      "no_good_candidate_rate": 0.1389,
+      "generic_fallback_rate": 0.4167,
+      "provider_distribution": {
+        "pexels": 11,
+        "pixabay": 10,
+        "pixabay_photo": 15
+      },
+      "latency_mean_ms": 4395.47,
+      "latency_total_ms": 158236.78,
+      "candidate_top3_relevance_mean": 0.3686
+    },
+    "p04": {
+      "all_bad_after": 25,
+      "all_bad_before": 29,
+      "control_after_good": 3,
+      "control_before_good": 5,
+      "all_bad_after_mean_score": 0.2534
+    },
+    "p05_text_only": {
+      "scenes": 36,
+      "top1_relevance_mean": 0.3292,
+      "top1_relevance_median": 0.3,
+      "relevant_rate": 0.2222,
+      "no_good_candidate_rate": 0.2778,
+      "all_bad_scenes": 29,
+      "all_bad_good": 2,
+      "all_bad_mean": 0.2345,
+      "control_scenes": 5,
+      "control_good": 4,
+      "control_retention": 0.8
+    },
+    "p05_preview_visual": {
+      "scenes": 36,
+      "top1_relevance_mean": 0.3472,
+      "top1_relevance_median": 0.3,
+      "relevant_rate": 0.25,
+      "no_good_candidate_rate": 0.2222,
+      "all_bad_scenes": 29,
+      "all_bad_good": 4,
+      "all_bad_mean": 0.2759,
+      "control_scenes": 5,
+      "control_good": 4,
+      "control_retention": 0.8
+    }
+  },
+  "regression_rate": {
+    "legacy_good_scenes": 6,
+    "regressed": 1,
+    "rate": 0.1667
+  },
+  "latency": {
+    "p05_text_only_total_ms": 154.09,
+    "p05_preview_total_ms": 112735.15
+  },
+  "universe": {
+    "s0379-b03": {
+      "total": 6,
+      "by_asset_type": {
+        "STOCK_VIDEO": 6
+      },
+      "by_provider": {
+        "pexels": 5,
+        "pixabay": 1
+      },
+      "real": 6,
+      "generated": 0
+    },
+    "s0777-b12": {
+      "total": 5,
+      "by_asset_type": {
+        "STOCK_VIDEO": 4,
+        "ARCHIVAL_IMAGE": 1
+      },
+      "by_provider": {
+        "pexels": 4,
+        "wikimedia_commons": 1
+      },
+      "real": 5,
+      "generated": 0
+    },
+    "s1406-b11": {
+      "total": 6,
+      "by_asset_type": {
+        "STOCK_VIDEO": 6
+      },
+      "by_provider": {
+        "pexels": 2,
+        "pixabay": 4
+      },
+      "real": 6,
+      "generated": 0
+    },
+    "s0114-b17": {
+      "total": 4,
+      "by_asset_type": {
+        "STOCK_IMAGE": 4
+      },
+      "by_provider": {
+        "pixabay_photo": 4
+      },
+      "real": 4,
+      "generated": 0
+    },
+    "s0223-b48": {
+      "total": 5,
+      "by_asset_type": {
+        "STOCK_IMAGE": 5
+      },
+      "by_provider": {
+        "pixabay_photo": 5
+      },
+      "real": 5,
+      "generated": 0
+    },
+    "s0526-b18": {
+      "total": 3,
+      "by_asset_type": {
+        "STOCK_VIDEO": 3
+      },
+      "by_provider": {
+        "pexels": 1,
+        "pixabay": 2
+      },
+      "real": 3,
+      "generated": 0
+    },
+    "s0203-b16": {
+      "total": 5,
+      "by_asset_type": {
+        "STOCK_IMAGE": 4,
+        "SCIENTIFIC_IMAGE": 1
+      },
+      "by_provider": {
+        "pixabay_photo": 4,
+        "wikimedia_commons": 1
+      },
+      "real": 5,
+      "generated": 0
+    },
+    "s0826-b40": {
+      "total": 3,
+      "by_asset_type": {
+        "STOCK_VIDEO": 3
+      },
+      "by_provider": {
+        "pexels": 3
+      },
+      "real": 3,
+      "generated": 0
+    },
+    "s1629-b21": {
+      "total": 4,
+      "by_asset_type": {
+        "STOCK_IMAGE": 4
+      },
+      "by_provider": {
+        "pixabay_photo": 4
+      },
+      "real": 4,
+      "generated": 0
+    },
+    "s0714-b09": {
+      "total": 4,
+      "by_asset_type": {
+        "STOCK_IMAGE": 4
+      },
+      "by_provider": {
+        "pixabay_photo": 4
+      },
+      "real": 4,
+      "generated": 0
+    },
+    "s0795-b11": {
+      "total": 5,
+      "by_asset_type": {
+        "STOCK_VIDEO": 4,
+        "ARCHIVAL_IMAGE": 1
+      },
+      "by_provider": {
+        "pexels": 4,
+        "wikimedia_commons": 1
+      },
+      "real": 5,
+      "generated": 0
+    },
+    "s0377-b02": {
+      "total": 7,
+      "by_asset_type": {
+        "STOCK_VIDEO": 6,
+        "ARCHIVAL_IMAGE": 1
+      },
+      "by_provider": {
+        "pexels": 4,
+        "pixabay": 2,
+        "wikimedia_commons": 1
+      },
+      "real": 7,
+      "generated": 0
+    },
+    "s1356-b04": {
+      "total": 4,
+      "by_asset_type": {
+        "STOCK_VIDEO": 4
+      },
+      "by_provider": {
+        "pexels": 2,
+        "pixabay": 2
+      },
+      "real": 4,
+      "generated": 0
+    },
+    "s0869-b09": {
+      "total": 6,
+      "by_asset_type": {
+        "STOCK_VIDEO": 6
+      },
+      "by_provider": {
+        "pexels": 6
+      },
+      "real": 6,
+      "generated": 0
+    },
+    "s1212-b08": {
+      "total": 7,
+      "by_asset_type": {
+        "STOCK_IMAGE": 7
+      },
+      "by_provider": {
+        "pixabay_photo": 7
+      },
+      "real": 7,
+      "generated": 0
+    },
+    "s0434-b07": {
+      "total": 4,
+      "by_asset_type": {
+        "STOCK_VIDEO": 4
+      },
+      "by_provider": {
+        "pexels": 3,
+        "pixabay": 1
+      },
+      "real": 4,
+      "generated": 0
+    },
+    "s0173-b13": {
+      "total": 5,
+      "by_asset_type": {
+        "STOCK_VIDEO": 5
+      },
+      "by_provider": {
+        "pixabay": 5
+      },
+      "real": 5,
+      "generated": 0
+    },
+    "s0080-b02": {
+      "total": 5,
+      "by_asset_type": {
+        "STOCK_IMAGE": 5
+      },
+      "by_provider": {
+        "pixabay_photo": 5
+      },
+      "real": 5,
+      "generated": 0
+    },
+    "s0184-b13": {
+      "total": 6,
+      "by_asset_type": {
+        "STOCK_VIDEO": 6
+      },
+      "by_provider": {
+        "pexels": 4,
+        "pixabay": 2
+      },
+      "real": 6,
+      "generated": 0
+    },
+    "s1365-b02": {
+      "total": 6,
+      "by_asset_type": {
+        "GENERIC_FALLBACK": 1,
+        "STOCK_IMAGE": 5
+      },
+      "by_provider": {
+        "pixabay_photo": 6
+      },
+      "real": 5,
+      "generated": 1
+    },
+    "s1468-b12": {
+      "total": 5,
+      "by_asset_type": {
+        "STOCK_IMAGE": 5
+      },
+      "by_provider": {
+        "pixabay_photo": 5
+      },
+      "real": 5,
+      "generated": 0
+    },
+    "s0133-b06": {
+      "total": 4,
+      "by_asset_type": {
+        "STOCK_IMAGE": 4
+      },
+      "by_provider": {
+        "pixabay_photo": 4
+      },
+      "real": 4,
+      "generated": 0
+    },
+    "s1698-b06": {
+      "total": 3,
+      "by_asset_type": {
+        "STOCK_IMAGE": 3
+      },
+      "by_provider": {
+        "pixabay_photo": 3
+      },
+      "real": 3,
+      "generated": 0
+    },
+    "s1161-b08": {
+      "total": 6,
+      "by_asset_type": {
+        "STOCK_IMAGE": 5,
+        "ARCHIVAL_IMAGE": 1
+      },
+      "by_provider": {
+        "pixabay_photo": 5,
+        "wikimedia_commons": 1
+      },
+      "real": 6,
+      "generated": 0
+    },
+    "s1299-b15": {
+      "total": 4,
+      "by_asset_type": {
+        "STOCK_VIDEO": 4
+      },
+      "by_provider": {
+        "pexels": 4
+      },
+      "real": 4,
+      "generated": 0
+    },
+    "s0767-b04": {
+      "total": 4,
+      "by_asset_type": {
+        "STOCK_VIDEO": 4
+      },
+      "by_provider": {
+        "pexels": 2,
+        "pixabay": 2
+      },
+      "real": 4,
+      "generated": 0
+    },
+    "s0299-b06": {
+      "total": 5,
+      "by_asset_type": {
+        "STOCK_VIDEO": 5
+      },
+      "by_provider": {
+        "pixabay": 5
+      },
+      "real": 5,
+      "generated": 0
+    },
+    "s1073-b14": {
+      "total": 4,
+      "by_asset_type": {
+        "STOCK_VIDEO": 4
+      },
+      "by_provider": {
+        "pexels": 4
+      },
+      "real": 4,
+      "generated": 0
+    },
+    "s0400-b01": {
+      "total": 8,
+      "by_asset_type": {
+        "STOCK_VIDEO": 7,
+        "ARCHIVAL_IMAGE": 1
+      },
+      "by_provider": {
+        "pexels": 6,
+        "pixabay": 1,
+        "wikimedia_commons": 1
+      },
+      "real": 8,
+      "generated": 0
+    },
+    "s1008-b12": {
+      "total": 5,
+      "by_asset_type": {
+        "STOCK_IMAGE": 5
+      },
+      "by_provider": {
+        "pixabay_photo": 5
+      },
+      "real": 5,
+      "generated": 0
+    },
+    "s0386-b04": {
+      "total": 4,
+      "by_asset_type": {
+        "STOCK_VIDEO": 4
+      },
+      "by_provider": {
+        "pexels": 3,
+        "pixabay": 1
+      },
+      "real": 4,
+      "generated": 0
+    },
+    "s1471-b23": {
+      "total": 5,
+      "by_asset_type": {
+        "STOCK_IMAGE": 4,
+        "ARCHIVAL_IMAGE": 1
+      },
+      "by_provider": {
+        "pixabay_photo": 4,
+        "wikimedia_commons": 1
+      },
+      "real": 5,
+      "generated": 0
+    },
+    "s0517-b23": {
+      "total": 5,
+      "by_asset_type": {
+        "STOCK_IMAGE": 4,
+        "ARCHIVAL_IMAGE": 1
+      },
+      "by_provider": {
+        "pixabay_photo": 4,
+        "wikimedia_commons": 1
+      },
+      "real": 5,
+      "generated": 0
+    },
+    "s0457-b16": {
+      "total": 4,
+      "by_asset_type": {
+        "STOCK_VIDEO": 4
+      },
+      "by_provider": {
+        "pexels": 4
+      },
+      "real": 4,
+      "generated": 0
+    },
+    "s1373-b14": {
+      "total": 5,
+      "by_asset_type": {
+        "STOCK_VIDEO": 5
+      },
+      "by_provider": {
+        "pixabay": 5
+      },
+      "real": 5,
+      "generated": 0
+    },
+    "s1670-b13": {
+      "total": 3,
+      "by_asset_type": {
+        "STOCK_VIDEO": 3
+      },
+      "by_provider": {
+        "pexels": 1,
+        "pixabay": 2
+      },
+      "real": 3,
+      "generated": 0
+    }
+  }
+}
