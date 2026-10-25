@@ -627,3 +627,83 @@ def test_visual_evaluator_scores_local_ai_file(tmp_path):
     # With no model, evidence is missing (not zero) but the local file was used.
     assert evidence.status in ("VISUAL_BACKEND_UNAVAILABLE", "PREVIEW_AVAILABLE")
     assert evaluator.stats()["preview_hits"] == 1
+
+
+# 31 — optional job scoping narrows P04/P05 without changing the default
+def test_canary_job_scope_narrows_p04_and_p05():
+    from pipeline.media_semantics.scoping import canary_scope_allows
+
+    # Unset allowlist -> no narrowing (backwards compatible).
+    assert canary_scope_allows({}) is True
+    assert p04_enabled_from_env({"P04_SOURCE_ROUTER": "1"}) is True
+
+    # A configured allowlist requires a matching job id.
+    scoped = {
+        "P04_SOURCE_ROUTER": "1",
+        "P05_INTEGRATED": "1",
+        "P05_CANARY_JOB_IDS": "101,202",
+    }
+    assert canary_scope_allows(scoped) is False
+    assert p04_enabled_from_env(scoped) is False
+    assert SourcingConfig.from_env(scoped).integrated is False
+
+    matching = dict(scoped, AUTOTUBE_JOB_ID="202")
+    assert canary_scope_allows(matching) is True
+    assert p04_enabled_from_env(matching) is True
+    assert SourcingConfig.from_env(matching).integrated is True
+
+    # Non-matching job stays on the legacy path.
+    other = dict(scoped, AUTOTUBE_JOB_ID="999")
+    assert p04_enabled_from_env(other) is False
+    assert SourcingConfig.from_env(other).integrated is False
+
+
+# 32 — preview evidence uses the persistent visual cache across processes
+def test_preview_evidence_persistent_cache(tmp_path):
+    from PIL import Image
+    from pipeline.media_semantics.config import VisualConfig
+
+    image = tmp_path / "preview.jpg"
+    Image.new("RGB", (64, 64), (10, 20, 30)).save(image, "JPEG")
+    cache_path = tmp_path / "cache.json"
+
+    class _FakeBackend:
+        name = "fake"
+        model_version = "fake-v1"
+
+        def __init__(self):
+            self.image_calls = 0
+
+        def encode_texts(self, texts):
+            return [[1.0, 0.0, 0.0]]
+
+        def encode_images(self, paths):
+            self.image_calls += 1
+            return [[1.0, 0.0, 0.0]]
+
+    def _evaluator(backend):
+        return P02PreviewEvidenceEvaluator(
+            config=VisualConfig(
+                mode="embedding_only", backend="none",
+                cache_enabled=True, cache_path=str(cache_path),
+            ),
+            backend=backend,
+            path_resolver=lambda candidate, spec: str(image),
+        )
+
+    candidate = _candidate(pid="cache-1")
+    spec = _spec()
+
+    first_backend = _FakeBackend()
+    first = _evaluator(first_backend)
+    evidence = first(candidate, spec)
+    assert evidence.has_visual is True
+    assert first_backend.image_calls == 1
+    assert cache_path.is_file()
+
+    second_backend = _FakeBackend()
+    second = _evaluator(second_backend)
+    evidence = second(candidate, spec)
+    assert evidence.has_visual is True
+    assert second_backend.image_calls == 0  # served from the persistent cache
+    assert second.cache.hits >= 2

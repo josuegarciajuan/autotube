@@ -1,3 +1,17 @@
+## 2026-10-25 — P00–P05 engineering closure + controlled canary (opt-in)
+
+- P00–P05 externally approved and closed: `AUTOTUBE_SEMANTIC_VISUAL_SELECTION_ENGINEERING_COMPLETE`.
+  Readiness: **READY_FOR_CONTROLLED_CANARY**, not `READY_FOR_DEFAULT`. P06 not started.
+- Added optional job scoping (`P05_CANARY_JOB_IDS`) so P04/P05 can be enabled for
+  one job in a shared service; the API injects `AUTOTUBE_JOB_ID` into workers.
+  Empty allowlist keeps the historic behavior.
+- Added `benchmarks/media_semantics/p05_live_canary.py`: real-script,
+  few-scene, no-upload legacy-vs-P05 canary with review pack and auto-evaluation.
+- Added `config/canary/p05-preview.profile` and the runbook `docs/p05-controlled-canary.md`.
+- No default changed: `MEDIA_SELECTOR=legacy`, `P04_SOURCE_ROUTER=0`,
+  `P05_INTEGRATED=0`; `FULL_VISUAL` remains globally disabled.
+- Closure record: `docs/adr/ADR-20261025-p00-p05-engineering-closure.md`.
+
 ## 2026-10-25 — P04 source expansion, fallback intelligence and coherence (opt-in)
 
 - Added `p04-source-router-1`: 13 scene categories, category-specific asset

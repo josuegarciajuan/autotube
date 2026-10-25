@@ -84,13 +84,22 @@ PreviewHasher = Callable[[Candidate], str]
 
 
 def p04_enabled_from_env(env: dict[str, str] | None = None) -> bool:
-    """Single source of truth for the opt-in flag (default OFF)."""
+    """Single source of truth for the opt-in flag (default OFF).
+
+    ``P05_CANARY_JOB_IDS`` optionally narrows activation to the listed jobs
+    (see :mod:`pipeline.media_semantics.scoping`).  Unset means "no narrowing".
+    """
     import os
 
     env = os.environ if env is None else env
-    return str(env.get("P04_SOURCE_ROUTER", "0")).strip().lower() in (
+    enabled = str(env.get("P04_SOURCE_ROUTER", "0")).strip().lower() in (
         "1", "true", "yes", "on",
     )
+    if not enabled:
+        return False
+    from .scoping import canary_scope_allows
+
+    return canary_scope_allows(env)
 
 
 @dataclass
@@ -154,6 +163,11 @@ class SourcingConfig:
                 return default
             return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
+        def _scope_allows(current_env: dict[str, str]) -> bool:
+            from .scoping import canary_scope_allows
+
+            return canary_scope_allows(current_env)
+
         return cls(
             min_relevance_score=max(0.0, min(1.0, _f("P04_MIN_RELEVANCE_SCORE", 0.18))),
             strong_relevance_score=max(0.0, min(1.0, _f("P04_STRONG_RELEVANCE_SCORE", 0.30))),
@@ -162,7 +176,7 @@ class SourcingConfig:
             ai_backend=str(env.get("P04_AI_BACKEND", "pollinations")),
             allow_conceptual=_b("P04_ALLOW_CONCEPTUAL", True),
             allow_generic=_b("P04_ALLOW_GENERIC", True),
-            integrated=_b("P05_INTEGRATED", False),
+            integrated=_b("P05_INTEGRATED", False) and _scope_allows(env),
             visual_profile=str(env.get("P05_VISUAL_PROFILE", PROFILE_PREVIEW)).upper(),
             visual_top_n=max(1, _i("P05_VISUAL_TOP_N", 8)),
             max_visual_candidates=max(1, _i("P05_MAX_VISUAL_CANDIDATES", 14)),

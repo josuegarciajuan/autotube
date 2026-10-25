@@ -1,6 +1,7 @@
 # P05 — integrated selection, global rerank and two-stage fallback
 
-Status: **implemented, opt-in, candidate for controlled canary.**
+Status: **implemented, opt-in; engineering closed (P00–P05), controlled canary approved.**
+See `docs/p05-controlled-canary.md` and `ADR-20261025-p00-p05-engineering-closure`.
 Production defaults remain unchanged:
 
 ```

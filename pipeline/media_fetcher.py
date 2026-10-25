@@ -4467,11 +4467,24 @@ class MediaFetcher:
             if backend in ("", "none"):
                 backend = "clip"
             mode = str(os.getenv("P05_VISUAL_PROFILE", "PREVIEW_VISUAL")).upper()
+            cache_path = str(
+                os.getenv("P02_VISUAL_CACHE", "")
+                or getattr(base, "cache_path", "")
+                or ""
+            )
+            cache_enabled = str(
+                os.getenv(
+                    "P02_VISUAL_CACHE_ENABLED",
+                    str(bool(getattr(base, "cache_enabled", True))),
+                )
+            ).strip().lower() in ("1", "true", "yes", "on")
             config = VisualConfig(
                 mode="embedding_only" if mode != "FULL_VISUAL" else "full_visual",
                 backend=backend,
                 model=str(getattr(base, "model", "") or "openai/clip-vit-base-patch32"),
                 allow_model_download=bool(getattr(base, "allow_model_download", False)),
+                cache_enabled=cache_enabled,
+                cache_path=cache_path,
             )
             if base is not None:
                 config.budget = base.budget
