@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
 from .asset_strategy import AssetStrategy
-from .coherence import SelectionCoherence
+from .coherence import CoherenceSignals, SelectionCoherence
 from .contracts import Candidate, SceneSpec
 from .ranking import SemanticTextRanker
 from .source_router import AssetType, SourceRoute
@@ -179,9 +179,29 @@ class IntegratedSelector:
         self.coherence.reset()
         self._evidence_cache.clear()
 
+    @staticmethod
+    def _evidence_cache_key(candidate: Candidate, spec: SceneSpec) -> str:
+        """Evidence depends on the scene text, not only on the asset.
+
+        The same asset can be inspected for two different scenes; caching by
+        canonical key alone reused the first scene's relevance.  Keep the cache
+        scene-scoped and stable across fallback stages of the same scene.
+        """
+        import hashlib
+
+        material = "|".join([
+            candidate.canonical_key,
+            str(spec.scene_idx),
+            str(spec.subject or ""),
+            str(spec.action or ""),
+            str(spec.visual_concept or ""),
+            str(spec.narration_fragment or "")[:240],
+        ])
+        return f"{candidate.canonical_key}:{hashlib.sha1(material.encode('utf-8')).hexdigest()[:16]}"
+
     # ── evidence ───────────────────────────────────────────────
     def _evidence(self, candidate: Candidate, spec: SceneSpec) -> VisualEvidence:
-        key = candidate.canonical_key
+        key = self._evidence_cache_key(candidate, spec)
         if key in self._evidence_cache:
             return self._evidence_cache[key]
         if self.visual_evaluator is None or self.config.visual_profile == PROFILE_TEXT_ONLY:
@@ -195,6 +215,25 @@ class IntegratedSelector:
                 )
         self._evidence_cache[key] = evidence
         return evidence
+
+    # ── coherence ──────────────────────────────────────────────
+    def _coherence_signals(
+        self,
+        spec: SceneSpec,
+        candidate: Candidate,
+        asset_type: str,
+        media_type: str,
+    ) -> CoherenceSignals:
+        """Evaluate the existing P04 coherence machinery for one candidate.
+
+        This is deliberately the *same* ``SelectionCoherence`` object that the
+        pipeline records the final (post-download) winner into.  There is no
+        second coherence system: the integrated rerank was simply not passing
+        its signals into the unified score.
+        """
+        return self.coherence.evaluate(
+            candidate, spec=spec, asset_type=asset_type, media_type=media_type,
+        )
 
     # ── ranking ────────────────────────────────────────────────
     def rank_universe(
@@ -263,7 +302,12 @@ class IntegratedSelector:
             "fallback_type": fallback_type,
         }
 
-        rows: list[RerankRow] = []
+        # ── Pass 1: score without coherence ───────────────────────
+        # Coherence must only influence candidates around the relevance
+        # frontier.  We therefore need the pre-coherence relevance of every
+        # row before deciding which candidates are inside the band.
+        preliminary: list[dict[str, Any]] = []
+        coherence_window = len(self.coherence)
         for candidate, meta in items:
             asset_type = str(meta.get("asset_type") or candidate.asset_type or "")
             media_type = str(
@@ -286,45 +330,130 @@ class IntegratedSelector:
             source_prior, historical_prior, asset_type_prior = routing_priors(
                 route, asset_type,
             )
-            signals = meta.get("coherence") or {}
-            coherence_penalty = float(
-                signals.get("provider_penalty")
-                or signals.get("total_penalty")
-                or 0.0
-            )
-            style_penalty = float(signals.get("style_penalty") or 0.0)
-            shot_penalty = float(signals.get("shot_penalty") or 0.0)
-            score = score_candidate(
+            signals = self._coherence_signals(spec, candidate, asset_type, media_type)
+            base_score = score_candidate(
                 text_relevance=text_scores.get(candidate.canonical_key, 0.0),
                 evidence=evidence,
                 source_prior=source_prior,
                 historical_prior=historical_prior,
                 asset_type_prior=asset_type_prior,
-                coherence_penalty=coherence_penalty,
-                style_penalty=style_penalty,
-                shot_penalty=shot_penalty,
+                coherence_penalty=0.0,
                 fallback_type=fallback_type,
                 weights=self.config.weights,
                 profile=effective_profile,
             )
+            preliminary.append({
+                "candidate": candidate,
+                "meta": meta,
+                "asset_type": asset_type,
+                "media_type": media_type,
+                "evidence": evidence,
+                "prior": (source_prior, historical_prior, asset_type_prior),
+                "signals": signals,
+                "base": base_score,
+            })
+
+        best_relevance = max(
+            (item["base"].base_score for item in preliminary), default=0.0,
+        )
+        band = max(0.0, float(self.config.weights.coherence_band))
+        coherence_cutoff = best_relevance - band
+
+        rows: list[RerankRow] = []
+        coherence_in_band = 0
+        coherence_applied = 0
+        for item in preliminary:
+            candidate = item["candidate"]
+            meta = item["meta"]
+            signals: CoherenceSignals = item["signals"]
+            in_band = float(item["base"].base_score) + 1e-9 >= coherence_cutoff
+            signal_dict = signals.to_dict()
+            # The full context penalty (provider/still/shot/style/era/subject)
+            # enters the unified score, capped by ``UnifiedWeights``.  The
+            # intra-universe provider/still pass in global_rerank skips rows
+            # that already received a context penalty, so nothing is counted
+            # twice (see ``bounded_coherence``).
+            applied_penalty = max(0.0, float(signals.total_penalty))
+            if in_band:
+                coherence_in_band += 1
+                score = score_candidate(
+                    text_relevance=text_scores.get(candidate.canonical_key, 0.0),
+                    evidence=item["evidence"],
+                    source_prior=item["prior"][0],
+                    historical_prior=item["prior"][1],
+                    asset_type_prior=item["prior"][2],
+                    coherence_penalty=applied_penalty,
+                    fallback_type=fallback_type,
+                    weights=self.config.weights,
+                    profile=effective_profile,
+                )
+                if applied_penalty > 0.0:
+                    coherence_applied += 1
+            else:
+                score = item["base"]
             row_meta = dict(meta)
             text_breakdown = breakdown_by_key.get(candidate.canonical_key)
             row_meta["text_components"] = (
                 text_breakdown.to_dict() if text_breakdown is not None else {}
             )
-            row_meta["evidence"] = evidence.to_dict()
+            row_meta["evidence"] = item["evidence"].to_dict()
+            row_meta["coherence"] = signal_dict
+            row_meta["coherence_in_band"] = bool(in_band)
+            row_meta["coherence_applied_penalty"] = round(
+                applied_penalty if in_band else 0.0, 6,
+            )
             rows.append(
                 RerankRow(
                     candidate=candidate,
                     score=score,
-                    asset_type=asset_type,
-                    media_type=media_type,
+                    asset_type=item["asset_type"],
+                    media_type=item["media_type"],
                     provider=str(candidate.provider or ""),
                     meta=row_meta,
                 )
             )
 
+        # Ordering comparison for evidence: did coherence change the head?
+        # Use the pass-1 scores (no coherence) so this is a real counterfactual.
+        without = sorted(
+            [item["base"] for item in preliminary],
+            key=lambda score: (
+                -score.base_score, -score.final_score,
+            ),
+        )
+        preliminary_by_candidate = {
+            item["candidate"].canonical_key: item["candidate"]
+            for item in preliminary
+        }
+        without_top_key = ""
+        if without:
+            for key, candidate in preliminary_by_candidate.items():
+                matches = [item for item in preliminary if item["candidate"] is candidate]
+                if matches and matches[0]["base"] is without[0]:
+                    without_top_key = key
+                    break
+            if not without_top_key:
+                # Stable fallback: same sort key over the preliminary items.
+                without_item = sorted(
+                    preliminary,
+                    key=lambda item: (
+                        -item["base"].base_score, -item["base"].final_score,
+                        item["candidate"].canonical_key,
+                    ),
+                )[0]
+                without_top_key = without_item["candidate"].canonical_key
         ranked = global_rerank(rows, weights=self.config.weights, apply_coherence=True)
+        diagnostic["coherence_window"] = coherence_window
+        diagnostic["coherence_in_band"] = coherence_in_band
+        diagnostic["coherence_applied"] = coherence_applied
+        diagnostic["coherence_ordering_changed"] = bool(
+            ranked and without_top_key
+            and without_top_key != ranked[0].candidate.canonical_key
+        )
+        diagnostic["coherence_top_without"] = without_top_key
+        diagnostic["coherence_top_with"] = (
+            ranked[0].candidate.canonical_key if ranked else ""
+        )
         threshold = (
             self.config.stage2_threshold if fallback_type
             else self.config.real_threshold

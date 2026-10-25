@@ -26,10 +26,31 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
+
+_ESCENA_RE = re.compile(
+    r"^ESCENA_FINAL\s+(\d+)\s*\[[^\]]*\]:\s*(.*)$", re.DOTALL,
+)
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        return default
 
 # ── Fallback minimal bible when LLM completely fails ──────────────
 FALLBACK_VISUAL_UNIVERSE = (
@@ -229,6 +250,7 @@ class VisualBibleGenerator:
     ) -> None:
         self._script_gen = script_generator
         self._channel_cfg = channel_cfg
+        self.last_stats: dict[str, Any] = {}
 
     def generate(
         self,
@@ -268,6 +290,21 @@ class VisualBibleGenerator:
             f"GUION:\n---\n{script_text}\n---"
         )
 
+        started = time.time()
+        stats: dict[str, Any] = {
+            "requested_entries": int(num_scenes),
+            "primary_model_entries": 0,
+            "recovered_or_repaired_entries": 0,
+            "fallback_model_entries": 0,
+            "padded_entries": 0,
+            "failed_batches": 0,
+            "batches": 0,
+            "model_usage": {},
+            "repaired_payloads": 0,
+            "approx_prompt_tokens": 0,
+            "approx_completion_tokens": 0,
+            "latency_s": 0.0,
+        }
         try:
             logger.info("Generating visual bible for %d scenes...", num_scenes)
             result = None
@@ -292,6 +329,12 @@ class VisualBibleGenerator:
                             {"role": "user", "content": user_prompt},
                         ],
                         temperature=0.7,
+                        max_tokens=_env_int("VISUAL_BIBLE_MAX_TOKENS", 4096),
+                        timeout=_env_float("VISUAL_BIBLE_TIMEOUT_S", 180.0),
+                        retries=1,
+                    )
+                    stats["model_usage"][entry.display_name] = (
+                        stats["model_usage"].get(entry.display_name, 0) + 1
                     )
                     break
                 except Exception as exc:
@@ -305,6 +348,17 @@ class VisualBibleGenerator:
                 raise last_error if last_error else RuntimeError(
                     "No model available in pool for visual bible"
                 )
+            primary_map = result.get("scene_visual_map") if isinstance(result, dict) else None
+            if isinstance(primary_map, list):
+                stats["primary_model_entries"] = sum(
+                    1 for entry in primary_map
+                    if isinstance(entry, dict)
+                    and str(entry.get("visual_concept") or "").strip()
+                )
+            stats["approx_prompt_tokens"] += max(0, len(user_prompt) // 4)
+            stats["approx_completion_tokens"] += max(
+                0, len(json.dumps(result, ensure_ascii=False)) // 4,
+            )
             bible = VisualBible.from_dict(result, num_scenes, scene_texts=scene_texts)
         except Exception as exc:
             logger.warning(
@@ -328,9 +382,25 @@ class VisualBibleGenerator:
                 "Visual bible: %d/%d scenes lack concepts — regenerating...",
                 len(missing), num_scenes,
             )
-            filled = self._generate_missing_concepts(
+            filled, gap_stats = self._generate_missing_concepts(
                 script_text, missing, num_scenes, model_name,
             )
+            stats["recovered_or_repaired_entries"] = len(filled)
+            stats["fallback_model_entries"] = int(
+                gap_stats.get("entries", 0) or 0
+            )
+            stats["failed_batches"] += int(gap_stats.get("failed_batches", 0) or 0)
+            stats["batches"] += int(gap_stats.get("batches", 0) or 0)
+            stats["approx_prompt_tokens"] += int(
+                gap_stats.get("approx_prompt_tokens", 0) or 0
+            )
+            stats["approx_completion_tokens"] += int(
+                gap_stats.get("approx_completion_tokens", 0) or 0
+            )
+            for model, count in (gap_stats.get("model_usage") or {}).items():
+                stats["model_usage"][model] = (
+                    stats["model_usage"].get(model, 0) + int(count or 0)
+                )
             if filled:
                 bible = bible.with_filled_concepts(filled)
                 still_missing = [
@@ -344,13 +414,115 @@ class VisualBibleGenerator:
                     len(missing), len(still_missing),
                 )
 
+        still_empty = sum(
+            1 for entry in bible.scene_visual_map
+            if not str(entry.get("visual_concept") or "").strip()
+        )
+        stats["padded_entries"] = max(
+            0,
+            int(num_scenes)
+            - int(stats["primary_model_entries"])
+            - int(stats["recovered_or_repaired_entries"]),
+        )
+        stats["still_empty_entries"] = still_empty
+        stats["latency_s"] = round(time.time() - started, 3)
+        self.last_stats = stats
         logger.info(
-            "Visual bible generated: universe=%s..., entity=%s, %d scenes",
+            "Visual bible generated: universe=%s..., entity=%s, %d scenes; "
+            "coverage primary=%d recovered=%d padded=%d failed_batches=%d "
+            "latency=%.1fs",
             bible.visual_universe[:60],
             bible.central_entity.get("type", "none"),
             len(bible.scene_visual_map),
+            stats["primary_model_entries"],
+            stats["recovered_or_repaired_entries"],
+            stats["padded_entries"],
+            stats["failed_batches"],
+            stats["latency_s"],
         )
+        logger.info("Visual bible stats: %s", json.dumps(stats, ensure_ascii=False))
         return bible
+
+    @staticmethod
+    def _batch_script_context(script_text: str, batch: list[int]) -> str:
+        """Use only the requested scene lines when the caller provides markers.
+
+        The canary script text is formatted as ``ESCENA_FINAL <i> [a-bs]: ...``.
+        Sending all 127 scenes with every retry batch is both slow and prone to
+        provider timeouts.  When the markers are present, send the requested
+        scenes plus a one-line instruction; otherwise keep the original text.
+        """
+        wanted = set(int(i) for i in batch)
+        selected: list[str] = []
+        matched = 0
+        for line in str(script_text or "").splitlines():
+            match = _ESCENA_RE.match(line.strip())
+            if not match:
+                continue
+            matched += 1
+            try:
+                idx = int(match.group(1))
+            except (TypeError, ValueError):
+                continue
+            if idx in wanted:
+                selected.append(line.strip())
+        if matched == 0 or not selected:
+            return script_text
+        header = (
+            "Fragmentos del guion para las escenas solicitadas "
+            f"({len(selected)} de {len(wanted)} encontradas):"
+        )
+        return header + "\n" + "\n".join(selected)
+
+    def _gapfill_call(
+        self,
+        *,
+        batch: list[int],
+        script_text: str,
+        num_scenes: int,
+        system_prompt: str,
+        model_name: str | None,
+    ) -> tuple[dict | None, str]:
+        """One bounded gap-fill request, with model-pool failover."""
+        context = self._batch_script_context(script_text, batch)
+        missing_list = ", ".join(str(i) for i in batch)
+        user_prompt = (
+            f"Faltan los conceptos visuales de las escenas con indices: "
+            f"[{missing_list}] (de un total de {num_scenes} escenas).\n"
+            "Genera UNA entrada por escena faltante, cada una con su indice exacto.\n\n"
+            f"GUION:\n---\n{context}\n---"
+        )
+        max_tokens = min(
+            4096,
+            max(512, 192 + 128 * len(batch)),
+        )
+        max_tokens = min(max_tokens, _env_int("VISUAL_BIBLE_GAPFILL_MAX_TOKENS", 4096))
+        for entry, client in self._script_gen.model_pool.iter_models():
+            if model_name and model_name not in (entry.model_id, entry.display_name):
+                continue
+            try:
+                result = self._script_gen._llm_json_call(
+                    thinking=True,
+                    client=client,
+                    model=entry.model_id,
+                    model_name=entry.display_name,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.7,
+                    max_tokens=max_tokens,
+                    timeout=_env_float("VISUAL_BIBLE_GAPFILL_TIMEOUT_S", 90.0),
+                    retries=1,
+                )
+                if isinstance(result, dict):
+                    return result, entry.display_name
+            except Exception as exc:
+                logger.warning(
+                    "Visual bible gap fill: model %s failed (batch %s): %s",
+                    entry.display_name, batch, exc,
+                )
+        return None, ""
 
     def _generate_missing_concepts(
         self,
@@ -358,17 +530,15 @@ class VisualBibleGenerator:
         missing_indices: list[int],
         num_scenes: int,
         model_name: str | None = None,
-    ) -> list[dict]:
-        """Second, targeted LLM call that generates ONLY the missing concepts.
+    ) -> tuple[list[dict], dict[str, Any]]:
+        """Targeted, batched and adaptively split recovery of missing concepts.
 
-        Reuses the same model pool/failover as the main call.  Returns a
-        list of scene-map entries (dicts) that have a valid ``scene`` index
-        and a non-empty ``visual_concept``; empty list on total failure.
+        A batch that fails is split into smaller halves and retried (down to a
+        single scene), while later batches continue independently.  Valid
+        entries from a partially successful batch are kept.  This prevents one
+        malformed/timeout response from collapsing the remaining scenes to
+        padding, as happened in the expanded canary (11/127 real entries).
         """
-        # Gap-fill is BATCHED: sending all missing concepts in one call (e.g.
-        # 100+ scenes) produced JSON truncated by max_tokens ("Unterminated
-        # string"), so the recovery call failed too. Chunks keep each response
-        # well inside the model's output budget.
         system_prompt = (
             "Eres un director de fotografia y diseno visual experto en documentales.\n"
             "Una biblia visual previa omitio los conceptos visuales de algunas escenas.\n"
@@ -384,59 +554,99 @@ class VisualBibleGenerator:
             '"visual_density": "simple|balanced|rich"}]}'
         )
 
-        try:
-            import os as _os
-            _chunk = int(_os.getenv("VISUAL_BIBLE_GAPFILL_CHUNK", "20") or 20)
-        except (TypeError, ValueError):
-            _chunk = 20
-        _chunk = max(1, _chunk)
+        chunk = max(1, _env_int("VISUAL_BIBLE_GAPFILL_CHUNK", 12))
+        requested = {int(i) for i in missing_indices}
+        pending: list[list[int]] = [
+            list(missing_indices[start:start + chunk])
+            for start in range(0, len(missing_indices), chunk)
+        ]
+        max_calls = max(
+            4,
+            2 * (len(pending) or 1) + 4,
+        )
+        max_calls = max(max_calls, _env_int("VISUAL_BIBLE_GAPFILL_MAX_CALLS", 32))
 
-        collected: list[dict] = []
-        indices = list(missing_indices)
-        for start in range(0, len(indices), _chunk):
-            batch = indices[start:start + _chunk]
-            missing_list = ", ".join(str(i) for i in batch)
-            user_prompt = (
-                f"Faltan los conceptos visuales de las escenas con indices: "
-                f"[{missing_list}] (de un total de {num_scenes} escenas).\n"
-                "Genera UNA entrada por escena faltante, cada una con su indice exacto.\n\n"
-                f"GUION:\n---\n{script_text}\n---"
+        stats: dict[str, Any] = {
+            "batches": 0,
+            "failed_batches": 0,
+            "entries": 0,
+            "model_usage": {},
+            "approx_prompt_tokens": 0,
+            "approx_completion_tokens": 0,
+        }
+        collected: dict[int, dict] = {}
+        attempts: dict[tuple[int, ...], int] = {}
+        calls = 0
+
+        while pending and calls < max_calls:
+            batch = pending.pop(0)
+            batch = [i for i in batch if i in requested and i not in collected]
+            if not batch:
+                continue
+            key = tuple(batch)
+            attempts[key] = attempts.get(key, 0) + 1
+            if attempts[key] > 2:
+                stats["failed_batches"] += 1
+                continue
+            result, used_model = self._gapfill_call(
+                batch=batch,
+                script_text=script_text,
+                num_scenes=num_scenes,
+                system_prompt=system_prompt,
+                model_name=model_name,
             )
-            result = None
-            for entry, client in self._script_gen.model_pool.iter_models():
-                if model_name and model_name not in (entry.model_id, entry.display_name):
-                    continue
-                try:
-                    result = self._script_gen._llm_json_call(
-                        thinking=True,
-                        client=client,
-                        model=entry.model_id,
-                        model_name=entry.display_name,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt},
-                        ],
-                        temperature=0.7,
-                    )
-                    break
-                except Exception as exc:
-                    logger.warning(
-                        "Visual bible gap fill: model %s failed (batch %d): %s",
-                        entry.display_name, start, exc,
-                    )
-            if isinstance(result, dict):
-                entries = result.get("scene_visual_map") or []
-                if isinstance(entries, list):
-                    collected.extend(
-                        e for e in entries
-                        if isinstance(e, dict)
-                        and (e.get("visual_concept") or "").strip()
-                    )
+            calls += 1
+            stats["batches"] += 1
+            stats["approx_prompt_tokens"] += max(
+                0, (len(script_text) if len(batch) > 1 else len(script_text)) // 4,
+            )
+            if result is None:
+                stats["failed_batches"] += 1
+                if len(batch) > 1:
+                    mid = len(batch) // 2
+                    pending.extend([batch[:mid], batch[mid:]])
+                continue
+
+            entries = result.get("scene_visual_map") or []
+            returned: set[int] = set()
+            if isinstance(entries, list):
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    try:
+                        idx = int(entry.get("scene", -1))
+                    except (TypeError, ValueError):
+                        continue
+                    if idx not in batch or not (entry.get("visual_concept") or "").strip():
+                        continue
+                    collected[idx] = entry
+                    returned.add(idx)
+            if returned:
+                stats["entries"] += len(returned)
+                stats["model_usage"][used_model or "unknown"] = (
+                    stats["model_usage"].get(used_model or "unknown", 0) + len(returned)
+                )
+                stats["approx_completion_tokens"] += max(
+                    0, len(json.dumps(
+                        [entry for idx, entry in collected.items() if idx in returned],
+                        ensure_ascii=False,
+                    )) // 4,
+                )
+            missing = [i for i in batch if i not in collected]
+            if missing:
+                if len(missing) > 1:
+                    mid = len(missing) // 2
+                    pending.extend([missing[:mid], missing[mid:]])
+                else:
+                    # One more attempt for a single scene, bounded by attempts.
+                    pending.append(missing)
+                if not returned:
+                    stats["failed_batches"] += 1
 
         if collected:
-            return collected
+            return list(collected.values()), stats
         logger.warning(
             "Visual bible gap fill failed — %d scenes stay without concepts",
             len(missing_indices),
         )
-        return []
+        return [], stats
