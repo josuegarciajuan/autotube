@@ -2530,8 +2530,8 @@ def _check_stats_collection_failed(db) -> int:
     """Alert when the last on-demand stats collection ended in error.
 
     Lee system_state['stats_collection_state'] (persistido por
-    api/main.py::_pin_stats_state). Auto-resuelve cuando una recolección
-    posterior termina en 'success'/'idle'.
+    api/services/stats_collection_service.py::StatsCollectionCoordinator).
+    Auto-resuelve cuando una recolección posterior termina en 'success'/'idle'.
     """
     created = 0
     try:

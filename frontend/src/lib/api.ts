@@ -37,6 +37,75 @@ export class ApiRequestError extends Error {
   }
 }
 
+// ── Stats collection (coordinador single-flight, oct 2026) ──────────
+// Contrato de GET /api/stats/collect/status y POST /api/stats/collect.
+// `stalled` es SOLO diagnóstico (sin progreso reciente): NO cierra el run —
+// una recolección deep legítima tarda 30-40 min. El run solo termina cuando
+// `status` es 'success' | 'error'.
+export interface StatsChannelSummary {
+  slug: string;
+  ok: boolean;
+  status: string;
+  skipped?: boolean;
+  reason?: string;
+  videos_updated?: number;
+  shorts_updated?: number;
+  analytics_updated?: number;
+  quota_exhausted?: boolean;
+  scrape_mode?: boolean;
+  scrape_fallback_videos?: number;
+  scrape_fallback_shorts?: number;
+  channel_scraped?: boolean;
+  deep?: boolean;
+  impressions_stored?: number;
+  ctr_stored?: number;
+  retention_curves_stored?: number;
+  traffic_stored?: number;
+  retention_stored?: number;
+  demographics_stored?: number;
+  reach?: Record<string, unknown> | null;
+  error?: string | null;
+  duration_s?: number;
+  over_channel_deadline?: boolean;
+}
+
+export interface StatsCollectionState {
+  status: 'idle' | 'running' | 'success' | 'error';
+  run_id?: string | null;
+  scope?: 'all' | 'channel';
+  deep?: boolean;
+  force?: boolean;
+  started_at?: number | null;
+  finished_at?: number | null;
+  heartbeat_at?: number | null;
+  last_progress_at?: number | null;
+  heartbeat_age_s?: number | null;
+  elapsed_s?: number | null;
+  /** Diagnóstico: sin progreso > STATS_STALL_THRESHOLD_S. NO es terminal. */
+  stalled?: boolean;
+  phase?: string | null;
+  current_channel_slug?: string | null;
+  completed_channels?: number;
+  total_channels?: number;
+  deadline_hit?: boolean;
+  scrape_mode?: boolean;
+  channels: StatsChannelSummary[];
+  result?: 'success' | 'partial' | 'error' | null;
+  reach?: Record<string, unknown> | null;
+  error?: string | null;
+}
+
+export interface StatsCollectResponse {
+  ok: boolean;
+  /** true: ya había una recolección en curso (se adjunta a ella, no es fallo). */
+  active?: boolean;
+  message?: string;
+  run_id?: string | null;
+  state?: StatsCollectionState;
+  deep?: boolean;
+  force?: boolean;
+}
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${url}`, {
     headers: { 'Content-Type': 'application/json', ...options?.headers },
@@ -244,9 +313,10 @@ export const api = {
     return request<any>(`/dashboard${qs}`)
   },
   getAllChannelStats: () => request<any>('/channels/stats-summary'),
-  collectStats: (deep?: boolean) =>
-    request<any>(`/stats/collect${deep ? '?deep=true' : ''}`, { method: 'POST' }),
-  getStatsCollectStatus: () => request<any>('/stats/collect/status'),
+  collectStats: (deep?: boolean): Promise<StatsCollectResponse> =>
+    request<StatsCollectResponse>(`/stats/collect${deep ? '?deep=true' : ''}`, { method: 'POST' }),
+  getStatsCollectStatus: (): Promise<StatsCollectionState> =>
+    request<StatsCollectionState>('/stats/collect/status'),
   getLogs: (channelId?: number) => request<any[]>(`/logs${channelId ? `?channel_id=${channelId}` : ''}`),
 
   // Marketing AI

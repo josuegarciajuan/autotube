@@ -258,34 +258,42 @@ async def collect_channel_stats(channel_id: int, background_tasks: BackgroundTas
     Útil para refrescar stats de un canal específico sin ejecutar
     la recolección global de todos los canales.
 
-    Ahora en background (thread pool): lanza la recolección y devuelve inmediatamente.
+    Single-flight (oct 2026): pasa por el MISMO coordinador que la recolección
+    global — si hay un run activo (global o por canal) NO se lanza otro
+    BackgroundTask (competirían por token OAuth, SQLite y cuota), se devuelve
+    el estado del run activo para que el panel se adjunte a él.
     """
     db = get_db()
     ch = db.get_channel(channel_id)
     if not ch:
         raise HTTPException(404, "Channel not found")
 
-    def _run():
-        # SYNC on purpose: collect_and_store does blocking I/O (Data API,
-        # Analytics API, yt-dlp). A sync function in BackgroundTasks runs in a
-        # thread pool, so it does NOT block the event loop (unlike async def).
-        from pipeline.youtube_stats import YouTubeStatsFetcher
-        import logging
-        logger = logging.getLogger("autotube.stats")
-        fetcher = YouTubeStatsFetcher(ch["slug"])
-        result = fetcher.collect_and_store(db)
-        logger.info(
-            "Stats collected for %s: %s videos, %s shorts, channel=%s",
-            ch["slug"],
-            result.get("videos_updated", 0),
-            result.get("shorts_updated", 0),
-            result.get("channel_updated", False),
-        )
+    from api.services.stats_collection_service import get_stats_coordinator
+    coord = get_stats_coordinator()
+    acquired, state = coord.try_acquire(
+        deep=False, force=False, scope="channel", channel_id=channel_id
+    )
+    if not acquired:
+        return {
+            "ok": False,
+            "active": True,
+            "message": "Ya hay una recolección de stats en curso",
+            "run_id": state.get("run_id"),
+            "state": state,
+        }
 
-    background_tasks.add_task(_run)
+    # _collect_youtube_stats vive en api.main (import perezoso: evitar ciclo
+    # de importación routers → main).
+    from api.main import _collect_youtube_stats
+    background_tasks.add_task(
+        _collect_youtube_stats, deep=False, force=False,
+        run_id=state.get("run_id"), only_channel_id=channel_id,
+    )
     return {
         "ok": True,
         "message": f"Recolección iniciada para {ch['name']} ({ch['slug']})",
+        "run_id": state.get("run_id"),
+        "state": state,
     }
 
 

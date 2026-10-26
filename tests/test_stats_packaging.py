@@ -120,7 +120,7 @@ def test_get_all_videos_analytics_metrics_validas(monkeypatch):
     class FakeQuery:
         def __init__(self, **kw):
             captured.update(kw)
-        def execute(self):
+        def execute(self, num_retries=0):  # oct 2026: .execute acotado con reintentos
             return {"rows": [["VID1", "10", "120", "1", "20.5", "50", "30", "5"]]}
 
     class FakeReports:

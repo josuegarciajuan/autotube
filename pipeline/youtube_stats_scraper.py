@@ -14,7 +14,10 @@ run for channels without an OAuth token (public data needs no auth).
 from __future__ import annotations
 
 import logging
+import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as _FuturesTimeout
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +40,33 @@ def _parse_int(value, default: int = 0) -> int:
         return default
 
 
+def _env_timeout(name: str, default: int) -> int:
+    """Entero de env con suelo de 10 s."""
+    try:
+        return max(10, int(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+# ── Timeouts de yt-dlp (oct 2026, fase anti-cuelgues) ───────────
+# Antes: ydl_opts sin socket_timeout → un socket muerto (o un bot-check lento)
+# colgaba el extractor indefinidamente Y `as_completed` esperaba sin límite.
+# Ahora cada conexión acota su socket y los reintentos están limitados; el
+# límite duro final es el proceso del recolector.
+YTDLP_SOCKET_TIMEOUT_S = _env_timeout("YTDLP_SOCKET_TIMEOUT_S", 30)
+
+
+def _ydl_base_opts() -> dict:
+    """Opciones comunes: socket acotado + reintentos limitados."""
+    return {
+        "quiet": True,
+        "no_warnings": True,
+        "socket_timeout": YTDLP_SOCKET_TIMEOUT_S,
+        "retries": 1,            # reconexiones HTTP (red)
+        "extractor_retries": 1,  # reintentos del extractor
+    }
+
+
 class YouTubeStatsScraper:
     """Scrape public YouTube stats without the Data API (no quota)."""
 
@@ -50,8 +80,7 @@ class YouTubeStatsScraper:
         import yt_dlp
 
         ydl_opts = {
-            "quiet": True,
-            "no_warnings": True,
+            **_ydl_base_opts(),
             "noplaylist": True,
             "skip_download": True,
             "ignoreerrors": True,
@@ -81,8 +110,15 @@ class YouTubeStatsScraper:
             "is_mock": False,
         }
 
-    def get_video_stats_batch(self, yt_video_ids: list[str]) -> dict[str, dict]:
+    def get_video_stats_batch(self, yt_video_ids: list[str], deadline: float = None) -> dict[str, dict]:
         """Scrape public stats for multiple videos in parallel.
+
+        Args:
+            yt_video_ids: video IDs a scrapear.
+            deadline: epoch opcional — si expira, deja de esperar el resto,
+                cancela los futures aún no arrancados y los marca como no
+                disponibles (is_mock=True, NUNCA métrica inventada). Los futures
+                en vuelo terminan acotados por socket_timeout.
 
         Returns a dict mapping yt_id -> {viewCount, likeCount, commentCount,
         is_mock}. Videos that could not be scraped (private/deleted/
@@ -97,22 +133,56 @@ class YouTubeStatsScraper:
         result: dict[str, dict] = {}
         workers = max(1, min(self.max_concurrency, len(unique_ids)))
 
+        # Ya vencido antes de empezar: no escrapear nada (explícito, no fabricado)
+        if deadline is not None and time.time() > deadline:
+            logger.warning(
+                "[%s] scrape batch: deadline ya superado — %d IDs marcados no disponibles",
+                self.slug, len(unique_ids),
+            )
+            for vid in unique_ids:
+                result[vid] = {
+                    "viewCount": "0", "likeCount": "0", "commentCount": "0",
+                    "is_mock": True,
+                }
+            result["_deadline_exceeded"] = True
+            return result
+
+        def _unavailable(vid: str) -> dict:
+            return {
+                "viewCount": "0", "likeCount": "0", "commentCount": "0",
+                "is_mock": True,
+            }
+
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futures = {ex.submit(self._scrape_one_video, vid): vid
                        for vid in unique_ids}
-            for fut in as_completed(futures):
-                vid = futures[fut]
-                try:
-                    result[vid] = fut.result()
-                except Exception as exc:
-                    logger.debug("[%s] scrape error for %s: %s",
-                                 self.slug, vid, exc)
-                    result[vid] = {
-                        "viewCount": "0",
-                        "likeCount": "0",
-                        "commentCount": "0",
-                        "is_mock": True,
-                    }
+            done_ids: set[str] = set()
+            try:
+                # as_completed acota la ESPERA total (no el hilo: los sockets ya
+                # tienen su propio timeout; un straggler muere por socket_timeout)
+                wait_s = None
+                if deadline is not None:
+                    wait_s = max(1, int(deadline - time.time()))
+                for fut in as_completed(futures, timeout=wait_s):
+                    vid = futures[fut]
+                    done_ids.add(vid)
+                    try:
+                        result[vid] = fut.result()
+                    except Exception as exc:
+                        logger.debug("[%s] scrape error for %s: %s",
+                                     self.slug, vid, exc)
+                        result[vid] = _unavailable(vid)
+            except _FuturesTimeout:
+                logger.warning(
+                    "[%s] scrape batch: deadline superado (%d/%d completados) "
+                    "— resto marcado no disponible",
+                    self.slug, len(done_ids), len(unique_ids),
+                )
+                for fut, vid in futures.items():
+                    if vid not in done_ids:
+                        fut.cancel()  # cancela los aún no arrancados
+                        result[vid] = _unavailable(vid)
+                result["_deadline_exceeded"] = True
         return result
 
     # ── Channel stats ────────────────────────────────────────
@@ -141,8 +211,7 @@ class YouTubeStatsScraper:
             return {}
 
         ydl_opts = {
-            "quiet": True,
-            "no_warnings": True,
+            **_ydl_base_opts(),
             "skip_download": True,
             "extract_flat": True,
             "playlistend": 1,

@@ -161,6 +161,49 @@ export default function Dashboard() {
     return ok.some((c: any) => c.quota_exhausted && (c.scrape_fallback_videos || 0) + (c.scrape_fallback_shorts || 0) === 0)
   }
 
+  // Etiquetas amigables para las etapas del coordinador (phase puede ser
+  // "channel:canal2:bulk_analytics" — nos quedamos con la última etapa).
+  const PHASE_ES: Record<string, string> = {
+    starting: 'iniciando',
+    channel: 'recolectando',
+    channel_stats: 'stats de canal',
+    data_api_videos: 'vídeos (Data API)',
+    data_api_shorts: 'shorts (Data API)',
+    scrape_fallback: 'scraping público',
+    bulk_analytics: 'analytics',
+    traffic_sources: 'fuentes de tráfico',
+    demographics: 'demografía',
+    retention_curves: 'curvas de retención',
+    daily_watchtime: 'watch-time diario',
+    reach_reports: 'informes de alcance',
+    revenue: 'ingresos',
+    milestones: 'hitos',
+  }
+
+  function describePhase(phase?: string | null): string {
+    if (!phase) return ''
+    const stage = phase.includes(':') ? phase.split(':').pop()! : phase
+    return PHASE_ES[stage] || stage
+  }
+
+  function describeRunning(s: any): string {
+    // Progreso real del coordinador: N/M canales, canal actual, etapa, tiempo.
+    const done = s.completed_channels ?? 0
+    const total = s.total_channels ?? 0
+    let msg = total > 0
+      ? `Recolectando stats (${done}/${total} canales)`
+      : 'Recolectando stats de YouTube...'
+    if (s.current_channel_slug) msg += ` · ${s.current_channel_slug}`
+    const stage = describePhase(s.phase)
+    if (stage) msg += ` · ${stage}`
+    if (typeof s.elapsed_s === 'number' && s.elapsed_s > 60) {
+      msg += ` · ${Math.floor(s.elapsed_s / 60)} min`
+    }
+    // stalled es SOLO diagnóstico: el run sigue vivo, NO es un error.
+    if (s.stalled) msg += ' · sin progreso reciente (sigue esperando...)'
+    return msg
+  }
+
   function applyStatsStatus(s: any, showBanner = true) {
     setCollectStatsState(s)
     if (s.status === 'success') {
@@ -177,16 +220,26 @@ export default function Dashboard() {
       }
     } else if (s.status === 'running') {
       setCollectStatsError(false)
-      setCollectStatsMsg('Recolectando stats de YouTube...')
+      setCollectStatsFinishedAt(null)
+      if (showBanner) setCollectStatsMsg(describeRunning(s))
     }
   }
+
+  // Reintento de polling: los fallos transitorios de red NO abandonan la
+  // recolección (antes un solo catch dejaba el botón libre mientras el run
+  // seguía vivo → riesgo de duplicados). Backoff creciente acotado (~5 min de
+  // tolerancia); pasado el límite, soltamos el polling sin marcar error.
+  const STATS_POLL_MAX_FAILURES = 15
+  const pollFailuresRef = useRef(0)
 
   async function pollStatsStatus() {
     const poll = async () => {
       try {
         const s = await api.getStatsCollectStatus()
+        pollFailuresRef.current = 0
         applyStatsStatus(s)
         if (s.status === 'running') {
+          // Sigue mientras haya run (incluido stalled: es diagnóstico)
           setTimeout(poll, 2000)
         } else {
           setCollectingStats(false)
@@ -195,7 +248,13 @@ export default function Dashboard() {
           refetchDashboard()
         }
       } catch {
-        setCollectingStats(false)
+        pollFailuresRef.current += 1
+        if (pollFailuresRef.current <= STATS_POLL_MAX_FAILURES) {
+          const delay = Math.min(2000 * pollFailuresRef.current, 30000)
+          setTimeout(poll, delay)
+        } else {
+          setCollectingStats(false)
+        }
       }
     }
     setTimeout(poll, 2000)
@@ -274,6 +333,8 @@ export default function Dashboard() {
     if (collectingStats) return
     setCollectingStats(true)
     setCollectStatsError(false)
+    setCollectStatsFinishedAt(null)
+    pollFailuresRef.current = 0
     setCollectStatsMsg('Recolectando stats de YouTube...')
     // Capture current KPI values as snapshot so we can show change after collection
     const k = data?.global_kpis
@@ -285,7 +346,12 @@ export default function Dashboard() {
       in_production: k?.in_production?.value ?? 0,
     })
     try {
-      await api.collectStats(true)  // deep=true: includes CTR, traffic, demographics
+      const resp = await api.collectStats(true)  // deep=true: includes CTR, traffic, demographics
+      if (resp?.active) {
+        // Ya había una recolección en curso (otra pestaña/click): nos adjuntamos
+        // a ese run — NO es un fallo. El single-flight del backend evita duplicados.
+        setCollectStatsMsg('Ya hay una recolección en curso; conectando al progreso...')
+      }
       pollStatsStatus()
     } catch (e: any) {
       setCollectStatsError(true)

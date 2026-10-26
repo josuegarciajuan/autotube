@@ -28,9 +28,12 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import os
 import pickle
+import time
 from typing import Any
 
+import httplib2
 from google.auth.transport.requests import AuthorizedSession, Request
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -59,6 +62,22 @@ _PAGE_KW = "page" + "Token"
 # (max_reports_per_job=0). 90 ≈ 3 meses de informes diarios: margen holgado sobre
 # los 30 días históricos que el API genera al crear un job nuevo.
 _MAX_REPORTS_HARD_CAP = 90
+
+
+def _env_timeout(name: str, default: int) -> int:
+    """Entero de env con suelo de 5 s."""
+    try:
+        return max(5, int(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+# ── Timeouts de red (oct 2026, fase anti-cuelgues) ──────────────
+# Descarga CSV acotada (antes timeout=120 inline fijo) y transporte Google con
+# timeout de socket (antes httplib2 sin timeout → cuelgues indefinidos).
+GOOGLE_HTTP_TIMEOUT_S = _env_timeout("GOOGLE_HTTP_TIMEOUT_S", 30)
+GOOGLE_EXECUTE_RETRIES = 1  # 1 reintento (2 intentos) para 5xx/429 transitorios
+REPORT_DOWNLOAD_TIMEOUT_S = _env_timeout("REACH_DOWNLOAD_TIMEOUT_S", 120)
 
 
 def _to_float(value: Any, default: float = 0.0) -> float:
@@ -145,7 +164,7 @@ class ReachReportClient:
 
         if creds.expired and creds.refresh_token:
             try:
-                creds.refresh(Request())
+                creds.refresh(Request(timeout=GOOGLE_HTTP_TIMEOUT_S))
                 with open(self._token_path, "wb") as f:
                     pickle.dump(creds, f)
             except Exception as exc:  # noqa: BLE001
@@ -158,8 +177,11 @@ class ReachReportClient:
 
         self._creds = creds
         try:
+            # Transporte acotado (timeout por petición) — igual que youtube_stats.
+            _http = httplib2.Http(timeout=GOOGLE_HTTP_TIMEOUT_S)
             self._service = build(
-                "youtubereporting", "v1", credentials=creds, cache_discovery=False
+                "youtubereporting", "v1", http=creds.authorize(_http),
+                cache_discovery=False,
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("Cannot build Reporting API service for %s: %s", self.slug, exc)
@@ -189,7 +211,7 @@ class ReachReportClient:
             resp = (
                 self._service.reportTypes()
                 .list(**{_PAGE_KW: page_cursor, "pageSize": 100})
-                .execute()
+                .execute(num_retries=GOOGLE_EXECUTE_RETRIES)
             )
             for rt in resp.get("reportTypes", []) or []:
                 self._report_types[rt.get("id", "")] = rt
@@ -218,7 +240,7 @@ class ReachReportClient:
                 resp = (
                     self._service.jobs()
                     .list(**{_PAGE_KW: page_cursor, "pageSize": 100})
-                    .execute()
+                    .execute(num_retries=GOOGLE_EXECUTE_RETRIES)
                 )
                 for job in resp.get("jobs", []) or []:
                     rid = job.get("reportTypeId", "")
@@ -253,7 +275,7 @@ class ReachReportClient:
                 created = (
                     self._service.jobs()
                     .create(body={"reportTypeId": rid, "name": f"autotube-{self.slug}-{rid}"})
-                    .execute()
+                    .execute(num_retries=GOOGLE_EXECUTE_RETRIES)
                 )
                 existing[rid] = created.get("id", "")
                 logger.info("[%s] job reach creado para %s", self.slug, rid)
@@ -289,7 +311,7 @@ class ReachReportClient:
                 self._service.jobs()
                 .reports()
                 .list(jobId=job_id, **{_PAGE_KW: page_cursor, "pageSize": 100})
-                .execute()
+                .execute(num_retries=GOOGLE_EXECUTE_RETRIES)
             )
             reports.extend(resp.get("reports", []) or [])
             page_cursor = resp.get("next" + "PageToken")
@@ -301,7 +323,7 @@ class ReachReportClient:
     def download_report(self, download_url: str) -> str:
         """Descarga el CSV de un reporte con la sesión autorizada del canal."""
         session = AuthorizedSession(self._creds)
-        resp = session.get(download_url, timeout=120)
+        resp = session.get(download_url, timeout=REPORT_DOWNLOAD_TIMEOUT_S)
         resp.raise_for_status()
         return resp.text
 
@@ -404,7 +426,7 @@ class ReachReportClient:
     # ── Sync ───────────────────────────────────────────────────
 
     def sync(self, db, *, max_reports_per_job: int = 10,
-             ignore_seen: bool = False) -> dict:
+             ignore_seen: bool = False, deadline: float = None) -> dict:
         """Sincroniza reach + basic: crea jobs y procesa reportes nuevos.
 
         Args:
@@ -416,6 +438,10 @@ class ReachReportClient:
                 Es idempotente porque los upserts son deterministas; sirve para
                 corregir filas escritas por la agregación antigua (segmentos que
                 se sobrescribían).
+            deadline: epoch opcional (deadline de canal del recolector) — si
+                expira ENTRE informes, deja de procesar marcando
+                ``deadline_exceeded`` (lo ya descargado queda persistido; el
+                resto baja en la siguiente recolección).
 
         Returns:
             Resumen con estado explícito del Reporting API:
@@ -471,6 +497,14 @@ class ReachReportClient:
         )
 
         for rid, job_id in jobs.items():
+            # Deadline cooperativo ENTRE jobs (operación segura)
+            if deadline is not None and time.time() > deadline:
+                logger.warning(
+                    "[%s] reach sync: deadline superado — se deja el resto de "
+                    "informes para la siguiente recolección", self.slug,
+                )
+                summary["deadline_exceeded"] = True
+                break
             if rid not in RELEVANT_REPORT_TYPES or not job_id:
                 continue
             try:
@@ -483,6 +517,16 @@ class ReachReportClient:
             summary["reports_available"] += len(reports)
             processed = 0
             for rep in reports:
+                # Deadline cooperativo ENTRE informes (cada descarga puede
+                # tardar hasta REPORT_DOWNLOAD_TIMEOUT_S)
+                if deadline is not None and time.time() > deadline:
+                    logger.warning(
+                        "[%s] reach sync: deadline superado tras %d descargas "
+                        "— se deja el resto para la siguiente recolección",
+                        self.slug, summary["reports_downloaded"],
+                    )
+                    summary["deadline_exceeded"] = True
+                    break
                 report_id = rep.get("id", "")
                 if not report_id or (not ignore_seen and db.reach_report_seen(report_id)):
                     continue
