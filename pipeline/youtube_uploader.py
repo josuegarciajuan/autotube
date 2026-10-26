@@ -23,6 +23,7 @@ from typing import Any, Optional
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
+from google_auth_httplib2 import AuthorizedHttp
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -43,6 +44,10 @@ SCOPES = [
 ]
 MAX_RETRIES = 5
 RETRY_BASE_DELAY = 2  # seconds
+
+# Timeout de socket del transporte con proxy (subidas: más holgado que las
+# lecturas de stats; acota cuelgues sin cortar subidas grandes por lentitud).
+UPLOAD_HTTP_TIMEOUT_S = int(os.environ.get("UPLOAD_HTTP_TIMEOUT_S", "300"))
 POST_UPLOAD_VERIFY_RETRIES = 4
 POST_UPLOAD_VERIFY_DELAY = 10  # seconds — YouTube processing may take a few secs
 
@@ -799,13 +804,19 @@ class YouTubeUploader:
 
             import httplib2
 
-            # Build with credentials (proxy will be injected if needed)
+            # Build with credentials (proxy will be injected if needed).
+            # google-apiclient rechaza recibir `http` y `credentials` a la vez:
+            # con proxy se usa SOLO el transporte autorizado. google-auth
+            # moderno no expone `credentials.authorize()` → AuthorizedHttp.
             kwargs = {"credentials": self._credentials, "cache_discovery": False}
-            
+
             if self._should_use_proxy():
-                http = self._credentials.authorize(httplib2.Http())
+                http = httplib2.Http(timeout=UPLOAD_HTTP_TIMEOUT_S)
                 self._configure_proxy(http)
-                kwargs["http"] = http
+                kwargs = {
+                    "http": AuthorizedHttp(self._credentials, http=http),
+                    "cache_discovery": False,
+                }
 
             self._service = build("youtube", "v3", **kwargs)
         return self._service

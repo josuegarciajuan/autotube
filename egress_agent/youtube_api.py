@@ -12,6 +12,7 @@ con el servicio para no arrastrar las side-effects de DB del uploader.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -28,6 +29,9 @@ _SCOPES = [
     "https://www.googleapis.com/auth/yt-analytics.readonly",
 ]
 
+# Timeout de socket del transporte googleapiclient (lecturas de Analytics).
+_GOOGLE_HTTP_TIMEOUT_S = int(os.environ.get("GOOGLE_HTTP_TIMEOUT_S", "30"))
+
 
 def _service(cfg: AgentConfig, api: str = "youtube", version: str = "v3"):
     """Construye un servicio googleapiclient autenticado (token local del agente).
@@ -42,12 +46,16 @@ def _service(cfg: AgentConfig, api: str = "youtube", version: str = "v3"):
         return uploader._get_service()
 
     # Para youtubeAnalytics, reutilizamos las credenciales refrescadas.
-    from googleapiclient.discovery import build
     import httplib2
+    from google_auth_httplib2 import AuthorizedHttp
+    from googleapiclient.discovery import build
 
     creds = uploader._credentials
-    http = creds.authorize(httplib2.Http())
-    return build(api, version, credentials=creds, http=http, cache_discovery=False)
+    # google-auth moderno NO expone credentials.authorize(); el wrapper válido
+    # es AuthorizedHttp. googleapiclient rechaza `http` + `credentials` juntos:
+    # se pasa SOLO el transporte autorizado (con timeout de socket acotado).
+    http = AuthorizedHttp(creds, http=httplib2.Http(timeout=_GOOGLE_HTTP_TIMEOUT_S))
+    return build(api, version, http=http, cache_discovery=False)
 
 
 def get_channel_info(cfg: AgentConfig) -> dict:
