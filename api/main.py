@@ -260,8 +260,10 @@ async def lifespan(app: FastAPI):
             "DB integrity check skipped: %s", _qc_exc,
         )
 
-    # Restore stats collection state from DB (survives server restarts)
-    _unpin_stats_state("stats_collection_state")
+    # Restore stats collection state from DB (survives server restarts).
+    # Un 'running' persistido pasa a error "Interrupted by server restart":
+    # el hilo recolector muere con el proceso, nunca puede seguir vivo.
+    get_stats_coordinator().recover_on_startup()
 
     # Auto-sync channel configs from Python modules → DB
     try:
@@ -2351,9 +2353,17 @@ async def _schedule_checker_loop():
             await _detect_and_clean_orphans()
             
             # Collect YouTube stats every 6 hours
+            # (INVARIANTE: STATS_AUTO_COLLECT nunca se activa — recolección
+            # solo manual desde el dashboard. Ruta mantenida por si cambia la
+            # política; pasa por el coordinador single-flight.)
             now = time.time()
             if STATS_AUTO_COLLECT and now - last_stats_collection > 21600:  # 6 hours
-                await _collect_youtube_stats()
+                _acquired, _st = _stats_coordinator.try_acquire(deep=False)
+                if _acquired:
+                    await asyncio.to_thread(
+                        _collect_youtube_stats, deep=False, force=False,
+                        run_id=_st.get("run_id"),
+                    )
                 last_stats_collection = now
                 # Persist so a restart doesn't trigger immediate re-collection
                 try:
@@ -3649,73 +3659,21 @@ async def _process_lifecycle_actions():
 
 import time as _time_module
 
-# ── Stats collection timeout watchdog ───────────────────────────
-_STATS_COLLECTION_TIMEOUT = 900  # seconds — auto-reset to error if stuck "running" > 15 min (bumped from 300: a full scrape-mode run with the incremental window can legitimately exceed 5 min)
+# ── Coordinador de recolección de stats (single-flight) ──────────
+# Sustituye al watchdog por duración total (_STATS_COLLECTION_TIMEOUT=900,
+# origen del falso "Timed out after 901s" de oct 2026): una recolección deep
+# legítima tarda 30-40 min. El coordinador garantiza single-flight, publica
+# progreso persistido (heartbeat/fase/canal) y expone deadlines que el
+# recolector comprueba SOLO entre operaciones seguras. Nunca marca error un
+# run cuyo hilo sigue vivo: `stalled` es diagnóstico, no terminal.
+from api.services.stats_collection_service import (
+    STATS_CHANNEL_MAX_DURATION_S,
+    STATS_RUN_MAX_DURATION_S,
+    STATS_STALL_THRESHOLD_S,
+    get_stats_coordinator,
+)
 
-# Tracks the state of on-demand stats collection so the UI can show
-# real progress/result feedback (survives page reloads + server restarts).
-STATS_COLLECTION_STATE = {
-    "status": "idle",          # idle | running | success | error
-    "started_at": None,        # epoch seconds
-    "finished_at": None,       # epoch seconds
-    "channels": [],            # per-channel summaries
-    "error": None,             # error message if status == error
-}
-
-
-def _pin_stats_state(key: str):
-    """Sync STATS_COLLECTION_STATE → system_state table so it survives restarts."""
-    try:
-        from database.db_extended import ExtendedDatabase
-        _db = ExtendedDatabase()
-        import json as _json
-        _db.set_system_state(key, _json.dumps(STATS_COLLECTION_STATE, default=str))
-    except Exception:
-        pass
-
-
-def _unpin_stats_state(key: str):
-    """Restore STATS_COLLECTION_STATE from system_state table on startup."""
-    try:
-        from database.db_extended import ExtendedDatabase
-        _db = ExtendedDatabase()
-        raw = _db.get_system_state(key)
-        if raw:
-            import json as _json
-            saved = _json.loads(raw)
-            if saved.get("status") == "running":
-                # Stuck "running" means the server crashed mid-collection — mark as error
-                STATS_COLLECTION_STATE.update({
-                    "status": "error",
-                    "started_at": saved.get("started_at"),
-                    "finished_at": _time_module.time(),
-                    "channels": saved.get("channels", []),
-                    "error": "Interrupted by server restart",
-                })
-            else:
-                STATS_COLLECTION_STATE.update(saved)
-    except Exception:
-        pass
-
-
-def _reset_stale_collection_state():
-    """If STATS_COLLECTION_STATE has been 'running' longer than the timeout,
-    auto-reset to error so the watchdog unlocks the dashboard button."""
-    if STATS_COLLECTION_STATE["status"] != "running":
-        return False
-    started = STATS_COLLECTION_STATE.get("started_at")
-    if not started:
-        return False
-    elapsed = _time_module.time() - started
-    if elapsed > _STATS_COLLECTION_TIMEOUT:
-        STATS_COLLECTION_STATE.update({
-            "status": "error",
-            "finished_at": _time_module.time(),
-            "error": f"Timed out after {elapsed:.0f}s",
-        })
-        _pin_stats_state("stats_collection_state")
-        return True
-    return False
+_stats_coordinator = get_stats_coordinator()
 
 
 def _emit_stats_coverage_alert(db, channel: dict, status: str, reason: str = ""):
@@ -3782,8 +3740,9 @@ def _emit_reach_api_alert(db, channel: dict, hint: str = ""):
         logger.warning("Could not emit reach API alert: %s", exc)
 
 
-def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api: bool = True):
-    """Collect YouTube stats for all active channels.
+def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api: bool = True,
+                           run_id: str = None, only_channel_id: int = None):
+    """Collect YouTube stats for all active channels (o uno solo).
 
     SYNC function on purpose: it performs blocking I/O (YouTube Data API,
     Analytics API, yt-dlp scraping). Starlette's BackgroundTasks runs sync
@@ -3799,6 +3758,15 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
         use_data_api: Global override. True (default): each channel decides by
               its OWN project breaker (Fase cuota ago 2026). False: everything
               runs in scrape-only mode (legacy callers).
+        run_id: run reservado previamente vía `_stats_coordinator.try_acquire()`.
+              Obligatorio: sin run propio la función no arranca (single-flight).
+        only_channel_id: si se indica, recolecta SOLO ese canal (endpoint por canal).
+
+    Ciclo de vida (oct 2026): el single-flight y el progreso los gestiona
+    `_stats_coordinator`. NO hay watchdog por duración total — un run deep
+    legítimo tarda 30-40 min. Los deadlines (run/canal) solo se comprueban
+    ENTRE operaciones seguras: abortan ordenadamente conservando lo
+    recolectado, jamás matan el hilo.
 
     Fase cuota (ago 2026): la decisión de usar Data API es POR CANAL. Cada
     canal consulta el breaker de su proyecto GCP (is_quota_exhausted_for_channel),
@@ -3807,29 +3775,47 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
     """
     import logging
     logger = logging.getLogger("autotube.stats")
+    coord = _stats_coordinator
 
-    STATS_COLLECTION_STATE.update({
-        "status": "running",
-        "started_at": _time_module.time(),
-        "finished_at": None,
-        "channels": [],
-        "error": None,
-        "scrape_mode": False,  # se rellena por canal abajo
-    })
-    _pin_stats_state("stats_collection_state")
+    # Single-flight: sin run reservado no se arranca nunca (un legado sin
+    # acquire sería un duplicado en potencia).
+    if not run_id or coord.current_run_id() != run_id:
+        logger.warning("stats run skipped: run_id ausente o sustituido (%s)", run_id)
+        return
 
+    deadline_hit = False
     try:
         from database.db_extended import ExtendedDatabase
         from pipeline.youtube_stats import YouTubeStatsFetcher
         from pipeline.monetization import calc_video_revenue, calc_channel_revenue_total
-        
+
         db = ExtendedDatabase()
         channels = db.get_channels(active_only=True)
+        if only_channel_id is not None:
+            channels = [ch for ch in channels if ch["id"] == only_channel_id]
+        coord.heartbeat(phase="starting", completed=0, total=len(channels))
         any_scrape_mode = False
 
         for ch in channels:
+            # ── Deadline de run: se comprueba ENTRE canales (operación segura).
+            # Aborta ordenadamente: los canales ya recolectados quedan intactos.
+            if coord.run_deadline_exceeded():
+                logger.warning(
+                    "stats run %s: superado STATS_RUN_MAX_DURATION_S (%ss) — "
+                    "abort ordenado tras %s canal(es)",
+                    run_id, STATS_RUN_MAX_DURATION_S,
+                    coord.snapshot().get("completed_channels"),
+                )
+                deadline_hit = True
+                break
+
             slug = ch["slug"]
             token_path = TOKENS_DIR / f"{slug}.pickle"
+            channel_started = _time_module.time()
+            coord.heartbeat(
+                phase="channel", channel_slug=slug,
+                channel_deadline_at=channel_started + STATS_CHANNEL_MAX_DURATION_S,
+            )
             # ── Per-channel Data API decision ──
             # Cada canal decide según el breaker de SU proyecto GCP. force=True
             # salta el breaker (uso manual del Data API a pesar de la alerta).
@@ -3841,7 +3827,7 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
                 # como "requiere autorización" (nunca ceros falsos) y se crea
                 # una alerta accionable. Se registra también en el ledger.
                 ch_status = "requires_authorization"
-                STATS_COLLECTION_STATE["channels"].append({
+                coord.record_channel({
                     "slug": slug, "ok": False, "skipped": True,
                     "status": ch_status,
                     "reason": "no token",
@@ -3856,7 +3842,7 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
                     pass
                 _emit_stats_coverage_alert(db, ch, ch_status, reason="No hay token OAuth en tokens/%s.pickle" % slug)
                 continue
-            
+
             try:
                 fetcher = YouTubeStatsFetcher(slug)
                 result = fetcher.collect_and_store(
@@ -3909,7 +3895,7 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
                     _emit_reach_api_alert(
                         db, ch, _reach.get("disabled_hint") or ""
                     )
-                STATS_COLLECTION_STATE["channels"].append({
+                coord.record_channel({
                     "slug": slug,
                     "ok": "error" not in result,
                     "status": ch_status,
@@ -3933,13 +3919,17 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
                     # Embudo de alcance (Reporting API): estado explícito por canal.
                     "reach": result.get("reach"),
                     "error": result.get("error"),
+                    # Diagnóstico de ritmo (fase 2 acotará el canal de verdad)
+                    "duration_s": round(_time_module.time() - channel_started, 1),
+                    "over_channel_deadline": _time_module.time() - channel_started > STATS_CHANNEL_MAX_DURATION_S,
                 })
-                
+
                 # Calculate and store estimated revenue for this channel
                 if ch.get("cpm_min") and ch.get("cpm_max"):
+                    coord.heartbeat(phase="revenue", channel_slug=slug)
                     cpm_min = ch["cpm_min"]
                     cpm_max = ch["cpm_max"]
-                    
+
                     # Per-video revenue
                     videos = db.get_videos(channel_id=ch["id"], limit=200)
                     for v in videos:
@@ -3958,7 +3948,7 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
                                         (rev_min, rev_max, latest_stats[-1]["id"]),
                                     )
                                     conn.commit()
-                    
+
                     # Channel-level revenue snapshot
                     revenue = calc_channel_revenue_total(db, ch["id"])
                     import sqlite3
@@ -3980,9 +3970,10 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
                         revenue.get("total_min", 0),
                         revenue.get("total_max", 0),
                     )
-                
+
                 # Check for newly achieved milestones
                 try:
+                    coord.heartbeat(phase="milestones", channel_slug=slug)
                     from pipeline.milestones import check_and_record_milestones
                     new_milestones = check_and_record_milestones(db, ch["id"])
                     if new_milestones > 0:
@@ -3992,7 +3983,7 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
                         )
                 except Exception as me:
                     logger.warning("Milestone check failed for %s: %s", slug, me)
-                    
+
             except Exception as exc:
                 logger.error("Stats collection failed for %s: %s", slug, exc)
                 try:
@@ -4004,7 +3995,7 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
                 except Exception:
                     pass
                 _emit_stats_coverage_alert(db, ch, "failed", reason=str(exc))
-                STATS_COLLECTION_STATE["channels"].append({
+                coord.record_channel({
                     "slug": slug, "ok": False, "status": "failed", "error": str(exc),
                 })
 
@@ -4014,7 +4005,7 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
         # error    = al menos un fallo técnico (el estado top-level se mantiene
         #            'success' solo cuando no hubo fallos, para no romper la UI;
         #            el campo `result` expresa la cobertura real).
-        chans = STATS_COLLECTION_STATE.get("channels", [])
+        chans = coord.snapshot().get("channels", [])
         any_failed = any(c.get("status") == "failed" for c in chans)
         any_missing = any(
             c.get("status") in ("requires_authorization", "public_only", "quota_limited")
@@ -4022,17 +4013,22 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
         )
         if any_failed:
             global_result = "error"
-        elif any_missing:
+        elif any_missing or deadline_hit:
             global_result = "partial"
         else:
             global_result = "success"
+        failed_slugs = [c.get("slug") for c in chans if c.get("status") == "failed"]
+        final_error = (
+            ("%d canal(es) fallaron: %s" % (len(failed_slugs), ", ".join(failed_slugs)))
+            if failed_slugs else None
+        )
 
         # ── Embudo de alcance (Reporting API): estado agregado ──
         # Distingue "API deshabilitada" de "informes aún no publicados (~48 h)" y
         # de "recolectado", para que la UI y las alertas no lean ceros sin contexto.
         reach_chans = [
             c.get("reach")
-            for c in STATS_COLLECTION_STATE.get("channels", [])
+            for c in coord.snapshot().get("channels", [])
             if isinstance(c.get("reach"), dict)
         ]
         _any_reach_disabled = any(bool(r.get("api_disabled")) for r in reach_chans)
@@ -4060,28 +4056,27 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
             ),
         }
 
-        STATS_COLLECTION_STATE.update({
-            "status": "success" if not any_failed else "error",
-            "result": global_result,
-            "finished_at": _time_module.time(),
-            "scrape_mode": any_scrape_mode,
-            "reach": reach_summary,
-        })
-        _pin_stats_state("stats_collection_state")
         # Force dashboard cache invalidation so the frontend sees fresh data
         try:
             from api.routers.dashboard import invalidate_dashboard_cache
             invalidate_dashboard_cache()
         except Exception:
             pass
+
+        coord.finish(
+            status="error" if any_failed else "success",
+            result=global_result,
+            reach=reach_summary,
+            scrape_mode=any_scrape_mode,
+            error=final_error,
+            deadline_hit=deadline_hit,
+        )
     except Exception as exc:
         logger.error("Stats collector error: %s", exc)
-        STATS_COLLECTION_STATE.update({
-            "status": "error",
-            "finished_at": _time_module.time(),
-            "error": str(exc),
-        })
-        _pin_stats_state("stats_collection_state")
+        coord.finish(status="error", error=str(exc))
+    finally:
+        # Red de seguridad: si finish() ya liberó, esto es no-op.
+        coord.release_if_owner(run_id)
 
 
 # ── App ──────────────────────────────────────────────────────
@@ -4245,29 +4240,36 @@ async def trigger_stats_collection(background_tasks: BackgroundTasks, deep: bool
         force: If True, force Data API usage even if quota is exhausted
                (instead of auto-switching to scrape mode).
 
-    Runs _collect_youtube_stats() as a background task and returns immediately.
-    Poll GET /api/stats/collect/status to know when it finishes and its result.
+    Single-flight (oct 2026): el run se reserva ANTES de programar la tarea
+    (try_acquire bajo mutex) — dos peticiones cercanas ya no pueden arrancar
+    dos recolecciones. Si hay un run activo se devuelve su estado con
+    `active: true` para que el panel se adjunte a él (no es un fallo).
+    Poll GET /api/stats/collect/status para progreso y resultado.
 
     Fase cuota (ago 2026): la decisión de usar Data API es POR CANAL — cada
     canal consulta el breaker de SU proyecto GCP. Un proyecto agotado ya NO
     arrastra a los canales de la otra cuenta a modo scraping.
     """
-    _reset_stale_collection_state()  # auto-recover from stuck "running"
-    if STATS_COLLECTION_STATE["status"] == "running":
+    acquired, state = _stats_coordinator.try_acquire(deep=deep, force=force)
+    if not acquired:
         return {
             "ok": False,
+            "active": True,
             "message": "Ya hay una recoleccion en curso",
-            "state": STATS_COLLECTION_STATE,
+            "run_id": state.get("run_id"),
+            "state": state,
         }
+    run_id = state.get("run_id")
     background_tasks.add_task(
-        _collect_youtube_stats, deep=deep, force=force
+        _collect_youtube_stats, deep=deep, force=force, run_id=run_id
     )
     return {
         "ok": True,
         "message": (
             "Recoleccion de stats iniciada (cada canal decide según la cuota de su cuenta)"
         ),
-        "state": STATS_COLLECTION_STATE,
+        "run_id": run_id,
+        "state": state,
         "deep": deep,
         "force": force,
     }
@@ -4275,9 +4277,15 @@ async def trigger_stats_collection(background_tasks: BackgroundTasks, deep: bool
 
 @app.get("/api/stats/collect/status")
 async def stats_collection_status():
-    """Return current/last state of the on-demand stats collection."""
-    _reset_stale_collection_state()  # auto-recover from stuck "running"
-    return STATS_COLLECTION_STATE
+    """Return current/last state of the on-demand stats collection.
+
+    SOLO LECTURA (oct 2026): antes este GET mutaba el estado vía el watchdog
+    `_reset_stale_collection_state` (falso "Timed out after 901s" a los 15 min
+    de un run deep de 30-40 min). Ahora `stalled` es un flag de diagnóstico
+    calculado al leer (sin progreso > STATS_STALL_THRESHOLD_S): NO libera el
+    run ni cambia el ciclo de vida. Solo `finish()` cierra el run.
+    """
+    return _stats_coordinator.snapshot()
 
 
 # ═══════════════════════════════════════════════════════════════════
