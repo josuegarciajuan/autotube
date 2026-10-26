@@ -1,6 +1,6 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { api, ApiRequestError } from '../lib/api'
+import { api, ApiRequestError, type AuthoritativeReplanState } from '../lib/api'
 import { useTodaySlots, useShortsSlotsToday, useShortsPlanningConfig, usePlanningConfig } from '../hooks/useQueries'
 import { Calendar, Smartphone, Play, Clock, CheckCircle2, Loader2, XCircle, Settings, Plus, Minus, RefreshCw, AlertTriangle, RotateCcw, ShieldCheck, Scissors } from 'lucide-react'
 import PipelineView from '../components/PipelineView'
@@ -22,6 +22,63 @@ interface ChannelSummary {
 function toLocal(ts: string): string {
   const m = ts.match(/(\d{2}):(\d{2})/)
   return m ? `${m[1]}:${m[2]}` : ts.slice(0, 5)
+}
+
+// ── Authoritative replan status helpers ───────────────────
+const REPLAN_ACTIVE = new Set(['queued', 'running'])
+const REPLAN_STEPS = [
+  { key: 'starting', label: 'Preparación', phases: ['queued', 'starting'] },
+  { key: 'repack', label: 'Repack', phases: ['repack', 'coverage', 'channel_done'] },
+  { key: 'horizon', label: 'Horizonte', phases: ['horizon'] },
+  { key: 'shorts', label: 'Shorts', phases: ['shorts'] },
+  { key: 'finalizing', label: 'Cierre', phases: ['finalizing', 'done'] },
+]
+
+function isActiveReplan(status?: string | null): boolean {
+  return Boolean(status && REPLAN_ACTIVE.has(status))
+}
+
+function replanStepIndex(replan?: AuthoritativeReplanState | null): number {
+  if (!replan) return -1
+  if (replan.status === 'success') return REPLAN_STEPS.length - 1
+  const phase = replan.phase || ''
+  const direct = REPLAN_STEPS.findIndex((step) => step.phases.includes(phase))
+  if (direct >= 0) return direct
+  const pct = Number(replan.progress_pct || 0)
+  if (pct >= 97) return 4
+  if (pct >= 90) return 3
+  if (pct >= 85) return 2
+  if (pct >= 10) return 1
+  return pct > 0 ? 0 : -1
+}
+
+function replanStatusLabel(replan?: AuthoritativeReplanState | null): string {
+  if (!replan) return 'Sin estado'
+  switch (replan.status) {
+    case 'queued': return 'En cola'
+    case 'running': return replan.stale ? 'Sin progreso reciente' : 'En curso'
+    case 'success': return 'Completada'
+    case 'blocked': return 'No aplicada'
+    case 'interrupted': return 'Interrumpida'
+    case 'error': return 'Fallida'
+    default: return 'Sin estado'
+  }
+}
+
+function formatElapsed(seconds?: number | null): string {
+  if (seconds === null || seconds === undefined) return '—'
+  const total = Math.max(0, Math.floor(seconds))
+  const mins = Math.floor(total / 60)
+  const secs = total % 60
+  if (mins <= 0) return `${secs}s`
+  const hours = Math.floor(mins / 60)
+  if (hours <= 0) return `${mins}m ${secs}s`
+  return `${hours}h ${mins % 60}m`
+}
+
+function replanSummary(replan?: AuthoritativeReplanState | null): any {
+  if (!replan) return null
+  return replan.summary || replan
 }
 
 // ── Today Status cards ───────────────────────────────────
@@ -579,19 +636,57 @@ function PlanningSection() {
 export default function Scheduling() {
   const [showReplanModal, setShowReplanModal] = useState(false)
   const [replanState, setReplanState] = useState<'idle' | 'loading-review' | 'review' | 'applying' | 'result' | 'error'>('idle')
-  const [replanResult, setReplanResult] = useState<any>(null)
+  const [replanResult, setReplanResult] = useState<AuthoritativeReplanState | null>(null)
   const [replanError, setReplanError] = useState<string | null>(null)
+  const [replanRecoverError, setReplanRecoverError] = useState<string | null>(null)
+  const [replanRecovering, setReplanRecovering] = useState(false)
   const reviewButtonRef = useRef<HTMLButtonElement>(null)
   const replanDialogRef = useRef<HTMLDivElement>(null)
   const replanTriggerRef = useRef<HTMLButtonElement>(null)
+  const replanTouchedRef = useRef(false)
   const queryClient = useQueryClient()
 
-  const openReplanReview = useCallback(async () => {
-    // Reprogramación TOTAL: no requiere preflight; se confirma y aplica directo.
+  const invalidatePlanningQueries = useCallback(async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['today-slots'] }),
+      queryClient.invalidateQueries({ queryKey: ['shorts-slots-today'] }),
+      queryClient.invalidateQueries({ queryKey: ['planned-slots'] }),
+      queryClient.invalidateQueries({ queryKey: ['week-slots'] }),
+      queryClient.invalidateQueries({ queryKey: ['planning-config'] }),
+      queryClient.invalidateQueries({ queryKey: ['shorts-planning-config'] }),
+      queryClient.invalidateQueries({ queryKey: ['active-jobs'] }),
+    ])
+  }, [queryClient])
+
+  const openReplanReview = useCallback(() => {
+    replanTouchedRef.current = true
     setShowReplanModal(true)
+    setReplanError(null)
+    setReplanRecoverError(null)
+    // While a run is active (or interrupted), opening the button must resume
+    // its live status instead of offering another confirmation.
+    if (
+      replanResult &&
+      (isActiveReplan(replanResult.status) ||
+        replanResult.status === 'interrupted' ||
+        replanResult.status === 'error' ||
+        replanResult.status === 'blocked')
+    ) {
+      setReplanState('result')
+      return
+    }
+    // Reprogramación TOTAL: no requiere preflight; se confirma y aplica directo.
     setReplanState('review')
     setReplanResult(null)
+  }, [replanResult])
+
+  const openNewReplanReview = useCallback(() => {
+    replanTouchedRef.current = true
+    setShowReplanModal(true)
     setReplanError(null)
+    setReplanRecoverError(null)
+    setReplanState('review')
+    setReplanResult(null)
   }, [])
 
   const closeReplanModal = useCallback(() => {
@@ -625,7 +720,57 @@ export default function Scheduling() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [showReplanModal, replanState, closeReplanModal])
 
+  // Recover the live run after a page reload without starting a second one.
+  useEffect(() => {
+    let cancelled = false
+    api.authoritativeFullReplanStatus()
+      .then((status) => {
+        if (cancelled || replanTouchedRef.current) return
+        if (isActiveReplan(status.status) || status.status === 'interrupted') {
+          setReplanResult(status)
+          setReplanState('result')
+          setShowReplanModal(true)
+        }
+      })
+      .catch(() => { /* no run info yet; the normal button remains usable */ })
+    return () => { cancelled = true }
+  }, [])
+
+  // Poll the persisted run even when the modal is closed. Terminal states stop
+  // the loop; success refreshes the planning views only once.
+  useEffect(() => {
+    const runId = replanResult?.run_id
+    if (!runId || !isActiveReplan(replanResult?.status)) return
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let invalidated = false
+
+    const poll = async () => {
+      try {
+        const next = await api.authoritativeFullReplanStatus(runId)
+        if (cancelled) return
+        setReplanResult(next)
+        if (next.status === 'success' && !invalidated) {
+          invalidated = true
+          await invalidatePlanningQueries()
+        }
+        if (isActiveReplan(next.status)) {
+          timer = setTimeout(poll, 2500)
+        }
+      } catch {
+        if (!cancelled) timer = setTimeout(poll, 5000)
+      }
+    }
+
+    timer = setTimeout(poll, 2000)
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [replanResult?.run_id, replanResult?.status, invalidatePlanningQueries])
+
   const handleReplan = useCallback(async () => {
+    replanTouchedRef.current = true
     setReplanState('applying')
     setReplanResult(null)
     setReplanError(null)
@@ -636,15 +781,7 @@ export default function Scheduling() {
       // The 202 response only confirms that the persistent run was queued.
       // Planning queries must not be refreshed as if the work had finished.
       if (result?.ok && !result?.queued && result?.status === 'success') {
-        await Promise.all([
-          queryClient.invalidateQueries({ queryKey: ['today-slots'] }),
-          queryClient.invalidateQueries({ queryKey: ['shorts-slots-today'] }),
-          queryClient.invalidateQueries({ queryKey: ['planned-slots'] }),
-          queryClient.invalidateQueries({ queryKey: ['week-slots'] }),
-          queryClient.invalidateQueries({ queryKey: ['planning-config'] }),
-          queryClient.invalidateQueries({ queryKey: ['shorts-planning-config'] }),
-          queryClient.invalidateQueries({ queryKey: ['active-jobs'] }),
-        ])
+        await invalidatePlanningQueries()
       }
     } catch (e: any) {
       const message = e?.message || 'No se pudo aplicar la reprogramación.'
@@ -653,13 +790,52 @@ export default function Scheduling() {
         : message)
       setReplanState('error')
     }
-  }, [queryClient])
+  }, [invalidatePlanningQueries])
 
-  const replanQueued = Boolean(
-    replanResult?.queued ||
-    replanResult?.status === 'queued' ||
-    replanResult?.status === 'running'
+  const handleRecover = useCallback(async () => {
+    if (!replanResult?.run_id || replanRecovering) return
+    setReplanRecovering(true)
+    setReplanRecoverError(null)
+    try {
+      const resumed = await api.recoverAuthoritativeFullReplan(replanResult.run_id)
+      setReplanResult(resumed)
+      setReplanState('result')
+    } catch (e: any) {
+      const message = e?.message || 'No se pudo reanudar la reprogramación.'
+      setReplanRecoverError(
+        e instanceof ApiRequestError && e.code === 'REPLAN_RECOVERY_EXHAUSTED'
+          ? 'Se agotó el número de recuperaciones automáticas. Lanza una reprogramación nueva.'
+          : message,
+      )
+    } finally {
+      setReplanRecovering(false)
+    }
+  }, [replanResult?.run_id, replanRecovering])
+
+  const replanActive = isActiveReplan(replanResult?.status)
+  const replanInterrupted = replanResult?.status === 'interrupted'
+  const replanSuccess = replanResult?.status === 'success'
+  const replanOrphaned = Boolean(replanActive && replanResult?.orphaned)
+  const replanFailed = replanResult?.status === 'blocked' || replanResult?.status === 'error'
+  const canRecover = Boolean(
+    (replanInterrupted || replanOrphaned) &&
+    (replanResult?.recovery_available || replanOrphaned),
   )
+  const finalSummary = replanSummary(replanResult)
+  const phaseStep = replanStepIndex(replanResult)
+  const progressPct = Math.max(0, Math.min(100, Number(replanResult?.progress_pct ?? 0)))
+  const replanChannels = replanResult?.channels || []
+  const replanTitle = replanOrphaned
+    ? 'Worker no disponible'
+    : replanActive
+      ? 'Reprogramación en curso'
+      : replanInterrupted
+        ? 'Reprogramación interrumpida'
+        : replanSuccess
+          ? 'Reprogramación aplicada'
+          : replanResult?.status === 'blocked'
+            ? 'Reprogramación no aplicada'
+            : 'Reprogramación fallida'
 
   return (
     <div className="max-w-6xl mx-auto space-y-6 animate-fade-in">
@@ -675,19 +851,75 @@ export default function Scheduling() {
           disabled={replanState === 'loading-review' || replanState === 'applying'}
           className="flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 hover:bg-amber-500/20 hover:text-amber-200 text-sm font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          {replanState === 'loading-review' || replanState === 'applying' ? (
+          {replanActive || replanState === 'loading-review' || replanState === 'applying' ? (
             <Loader2 size={14} className="animate-spin" />
+          ) : replanInterrupted ? (
+            <AlertTriangle size={14} />
           ) : (
             <RotateCcw size={14} />
           )}
-          {replanState === 'loading-review' || replanState === 'applying' ? 'Reprogramando...' : 'Reprogramar Ahora'}
+          {replanActive
+            ? 'Reprogramando...'
+            : replanInterrupted
+              ? 'Revisar interrupción'
+              : 'Reprogramar Ahora'}
         </button>
       </div>
+
+      {/* Live status remains visible even when the modal is closed. */}
+      {(replanActive || replanInterrupted || replanFailed) && !showReplanModal && replanResult && (
+        <button
+          onClick={openReplanReview}
+          className={`w-full text-left rounded-xl border px-4 py-3 transition-colors ${
+            replanInterrupted || replanFailed
+              ? 'bg-amber-500/10 border-amber-500/30 hover:bg-amber-500/15'
+              : 'bg-dark-800/70 border-surface-border hover:bg-dark-700/70'
+          }`}
+        >
+          <div className="flex items-center gap-3">
+            {replanActive ? (
+              <Loader2 size={16} className="animate-spin text-amber-400 shrink-0" />
+            ) : (
+              <AlertTriangle size={16} className="text-amber-400 shrink-0" />
+            )}
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-sm text-white font-medium">
+                  {replanInterrupted
+                    ? 'Reprogramación interrumpida'
+                    : replanFailed ? 'Reprogramación fallida' : 'Reprogramación en curso'}
+                </p>
+                <span className="text-[11px] text-gray-500 font-mono">{replanResult.run_id}</span>
+              </div>
+              <p className="text-xs text-gray-400 truncate">
+                {replanInterrupted || replanFailed
+                  ? replanResult.error || 'Abre el detalle para revisar el estado.'
+                  : `${replanStatusLabel(replanResult)} · ${replanResult.completed_channels || 0}/${replanResult.total_channels || 0} canales${replanResult.current_channel_slug ? ` · ${replanResult.current_channel_slug}` : ''}`}
+              </p>
+            </div>
+            <span className="text-xs text-amber-300 shrink-0">Ver</span>
+          </div>
+          {replanActive && (
+            <div
+              className="mt-2 h-1.5 rounded-full bg-white/5 overflow-hidden"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={progressPct}
+            >
+              <div
+                className="h-full rounded-full bg-amber-400 transition-all duration-500"
+                style={{ width: `${Math.max(2, progressPct)}%` }}
+              />
+            </div>
+          )}
+        </button>
+      )}
 
       {/* ── Replan confirmation modal ── */}
       {showReplanModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onMouseDown={closeReplanModal}>
-          <div ref={replanDialogRef} role="dialog" aria-modal="true" aria-labelledby="replan-dialog-title" tabIndex={-1} className="bg-dark-800 border border-surface-border rounded-2xl p-6 w-full max-w-md shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
+          <div ref={replanDialogRef} role="dialog" aria-modal="true" aria-labelledby="replan-dialog-title" tabIndex={-1} className="bg-dark-800 border border-surface-border rounded-2xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
             {replanState === 'loading-review' || replanState === 'applying' ? (
               /* ── Loading state ── */
               <div className="flex flex-col items-center gap-4 py-6">
@@ -698,58 +930,166 @@ export default function Scheduling() {
                 </p>
               </div>
             ) : replanState === 'result' && replanResult ? (
-              /* ── Result state ── */
-              <div className="space-y-4">
-                <div className="flex items-center gap-2">
-                  {replanQueued ? (
-                    <Loader2 size={20} className="animate-spin text-amber-400" />
-                  ) : replanResult.ok ? (
-                    <CheckCircle2 size={20} className="text-green-400" />
+              /* ── Result / live status state ── */
+              <div className="space-y-4" aria-live="polite">
+                <div className="flex items-start gap-2">
+                  {replanActive && !replanOrphaned ? (
+                    <Loader2 size={20} className="animate-spin text-amber-400 shrink-0 mt-0.5" />
+                  ) : replanSuccess ? (
+                    <CheckCircle2 size={20} className="text-green-400 shrink-0 mt-0.5" />
                   ) : (
-                    <AlertTriangle size={20} className="text-amber-400" />
+                    <AlertTriangle size={20} className="text-amber-400 shrink-0 mt-0.5" />
                   )}
-                    <h3 id="replan-dialog-title" className="text-white font-semibold text-base">
-                    {replanQueued
-                      ? 'Reprogramación en curso'
-                      : replanResult.ok ? 'Reprogramación aplicada' : 'Reprogramación no aplicada'}
-                  </h3>
+                  <div className="min-w-0">
+                    <h3 id="replan-dialog-title" className="text-white font-semibold text-base">{replanTitle}</h3>
+                    <p className="text-[11px] text-gray-500 mt-0.5">
+                      {replanStatusLabel(replanResult)}
+                      {replanResult.run_id ? <span className="font-mono"> · run {replanResult.run_id}</span> : null}
+                    </p>
+                  </div>
                 </div>
 
-                {replanQueued && (
-                  <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-xs text-amber-200 space-y-2">
-                    <p>La operación se está ejecutando en segundo plano; ya no depende de esta ventana.</p>
-                    <p className="text-amber-300/80">Puedes cerrar el diálogo. La planificación se actualizará cuando termine (puede tardar varios minutos).</p>
-                    {replanResult.run_id && (
-                      <p className="font-mono text-[11px] text-gray-400">run: {replanResult.run_id}</p>
+                {replanActive && replanResult.stale && !replanOrphaned && (
+                  <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-xs text-amber-200">
+                    Sin heartbeat desde hace {formatElapsed(replanResult.heartbeat_age_s)}. El worker sigue vivo;
+                    no se lanzará otro run mientras tanto.
+                  </div>
+                )}
+
+                {replanOrphaned && (
+                  <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-xs text-amber-200">
+                    El worker propietario ya no está vivo. Puedes reclamar el run para continuar sin duplicarlo.
+                  </div>
+                )}
+
+                {(replanActive || replanInterrupted || progressPct > 0) && (
+                  <div className="bg-dark-700/40 rounded-lg p-3">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="text-gray-400">
+                        {replanActive ? 'Progreso de la reprogramación' : 'Último progreso conocido'}
+                      </span>
+                      <span className={replanActive ? 'text-amber-300' : 'text-gray-400'}>{progressPct}%</span>
+                    </div>
+                    <div
+                      className="mt-2 h-2 rounded-full bg-white/5 overflow-hidden"
+                      role="progressbar"
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={progressPct}
+                    >
+                      <div
+                        className={`h-full rounded-full transition-all duration-500 ${
+                          replanSuccess ? 'bg-green-400' : replanFailed || replanInterrupted ? 'bg-amber-500' : 'bg-amber-400'
+                        }`}
+                        style={{ width: `${Math.max(2, progressPct)}%` }}
+                      />
+                    </div>
+                    <div className="grid grid-cols-5 gap-1 mt-2">
+                      {REPLAN_STEPS.map((step, index) => {
+                        const done = replanSuccess || index < phaseStep
+                        const current = !replanSuccess && index === phaseStep
+                        return (
+                          <div key={step.key}>
+                            <div className={`h-1 rounded-full ${done ? 'bg-green-400/80' : current ? 'bg-amber-400' : 'bg-white/10'}`} />
+                            <p className={`mt-1 text-[9px] text-center truncate ${current ? 'text-amber-300' : done ? 'text-green-400/80' : 'text-gray-600'}`}>
+                              {step.label}
+                            </p>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {replanActive && (
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <div className="bg-dark-700/40 rounded-lg p-2">
+                      <p className="text-gray-500">Canales</p>
+                      <p className="text-white mt-0.5">{replanResult.completed_channels || 0}/{replanResult.total_channels || 0}</p>
+                    </div>
+                    <div className="bg-dark-700/40 rounded-lg p-2">
+                      <p className="text-gray-500">Tiempo</p>
+                      <p className="text-white mt-0.5">{formatElapsed(replanResult.elapsed_s)}</p>
+                    </div>
+                    <div className="col-span-2 bg-dark-700/40 rounded-lg p-2">
+                      <p className="text-gray-500">Canal actual</p>
+                      <p className="text-white mt-0.5 truncate">{replanResult.current_channel_slug || 'Preparando siguiente fase'}</p>
+                    </div>
+                  </div>
+                )}
+
+                {replanSuccess && finalSummary && (
+                  <div className="bg-dark-700/50 rounded-lg p-3 grid grid-cols-2 gap-2 text-xs">
+                    <div><span className="text-neon-cyan">{finalSummary.slots_cleared ?? 0}</span> <span className="text-gray-400">slots reprogramados</span></div>
+                    <div><span className="text-neon-cyan">{finalSummary.videos_retimed ?? 0}</span> <span className="text-gray-400">vídeos reasignados</span></div>
+                    <div><span className="text-green-400">{finalSummary.today_forced ?? 0}</span> <span className="text-gray-400">forzados hoy</span></div>
+                    <div><span className="text-gray-300">{finalSummary.jobs_cancelled ?? 0}</span> <span className="text-gray-400">jobs cancelados</span></div>
+                    {replanResult.duration_s != null && (
+                      <div className="col-span-2 text-gray-500">Duración: {formatElapsed(replanResult.duration_s)}</div>
                     )}
                   </div>
                 )}
 
-                {!replanQueued && replanResult.ok && (
-                  <div className="bg-dark-700/50 rounded-lg p-3 space-y-1 text-xs">
-                    <p className="text-gray-400">
-                      <span className="text-neon-cyan">{replanResult.slots_cleared}</span> slots borrados y reprogramados
-                    </p>
-                    <p className="text-gray-400">
-                      <span className="text-neon-cyan">{replanResult.videos_retimed}</span> vídeos reasignados (pendientes + calentando)
-                    </p>
-                    <p className="text-gray-400">
-                      <span className="text-green-400">{replanResult.today_forced}</span> publicaciones forzadas para hoy
-                    </p>
-                    <p className="text-gray-500">
-                      <span className="text-gray-300">{replanResult.jobs_cancelled}</span> jobs en cola cancelados
-                    </p>
+                {(replanInterrupted || replanFailed) && replanResult.error && (
+                  <p className="text-amber-200 text-xs bg-amber-500/10 rounded-lg p-3" role="alert">
+                    {replanResult.error}
+                  </p>
+                )}
+
+                {replanRecoverError && (
+                  <p className="text-amber-200 text-xs bg-amber-500/10 rounded-lg p-3" role="alert">
+                    {replanRecoverError}
+                  </p>
+                )}
+
+                {replanInterrupted && !canRecover && (
+                  <p className="text-gray-500 text-xs">
+                    Se agotó la recuperación automática. Cierra y lanza una nueva reprogramación.
+                  </p>
+                )}
+
+                {replanChannels.length > 0 && (
+                  <div>
+                    <p className="text-[11px] text-gray-500 mb-1">Canales completados</p>
+                    <div className="max-h-32 overflow-auto rounded-lg bg-dark-700/30 divide-y divide-white/5">
+                      {replanChannels.map((channel) => (
+                        <div key={channel.slug} className="flex items-center justify-between gap-2 px-2.5 py-1.5 text-[11px]">
+                          <span className="text-gray-300 truncate">{channel.slug}</span>
+                          <span className="text-gray-500 shrink-0">
+                            {channel.repacked} reprogramados · hoy {channel.today?.forced ?? 0}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 )}
 
-                <div className="flex gap-2">
+                <div className="flex gap-2 pt-1">
                   <button
                     ref={reviewButtonRef}
                     onClick={closeReplanModal}
-                    className="px-4 py-2 rounded-lg bg-dark-600 text-gray-300 hover:bg-dark-500 text-sm transition-colors ml-auto"
+                    className={`px-4 py-2 rounded-lg bg-dark-600 text-gray-300 hover:bg-dark-500 text-sm transition-colors ${canRecover ? '' : 'ml-auto'}`}
                   >
-                    Cerrar
+                    {replanActive ? 'Cerrar y seguir en segundo plano' : 'Cerrar'}
                   </button>
+                  {canRecover && (
+                    <button
+                      onClick={handleRecover}
+                      disabled={replanRecovering}
+                      className="flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-300 hover:bg-amber-500/30 text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {replanRecovering ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                      {replanRecovering ? 'Reanudando...' : replanOrphaned ? 'Reclamar y reanudar' : 'Reanudar'}
+                    </button>
+                  )}
+                  {!replanActive && !canRecover && (replanSuccess || replanFailed || replanInterrupted) && (
+                    <button
+                      onClick={openNewReplanReview}
+                      className="flex-1 px-4 py-2 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-300 hover:bg-amber-500/30 text-sm font-medium transition-colors"
+                    >
+                      Nueva reprogramación
+                    </button>
+                  )}
                 </div>
               </div>
             ) : replanState === 'error' ? (

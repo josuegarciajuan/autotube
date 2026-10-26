@@ -59,6 +59,22 @@ def test_start_returns_immediately_and_joins_active_run():
                  completed_channels=0, total_channels=2)
         started.set()
         assert release.wait(3), "test runner was not released"
+        progress(
+            "channel_done", current_channel_slug=None,
+            completed_channels=1, total_channels=2,
+            channel_summary={
+                "slug": "canal2", "repacked": 2,
+                "today": {"forced": 1, "need": 1, "reason": "ok"},
+            },
+        )
+        progress(
+            "channel_done", current_channel_slug=None,
+            completed_channels=2, total_channels=2,
+            channel_summary={
+                "slug": "canal3", "repacked": 2,
+                "today": {"forced": 0, "need": 0, "reason": "ok"},
+            },
+        )
         progress("finalizing", current_channel_slug=None,
                  completed_channels=2, total_channels=2)
         return {
@@ -96,6 +112,10 @@ def test_start_returns_immediately_and_joins_active_run():
     assert final["summary"]["slots_cleared"] == 4
     assert final["phase"] == "done"
     assert final["completed_channels"] == 2
+    assert final["progress_pct"] == 100
+    assert final["duration_s"] is not None
+    assert [ch["slug"] for ch in final["channels"]] == ["canal2", "canal3"]
+    assert final["channels"][1]["today"]["forced"] == 0
     assert db.persisted()["status"] == "success"
 
 

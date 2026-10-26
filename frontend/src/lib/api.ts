@@ -37,10 +37,17 @@ export interface AuthoritativeReplanState {
   started_at?: string | null;
   finished_at?: string | null;
   elapsed_s?: number | null;
+  duration_s?: number | null;
   heartbeat_age_s?: number | null;
   current_channel_slug?: string | null;
   completed_channels?: number;
   total_channels?: number;
+  channels?: Array<{
+    slug: string;
+    repacked: number;
+    today?: { forced?: number; need?: number; reason?: string };
+  }>;
+  progress_pct?: number;
   attempt?: number;
   recovery_attempts?: number;
   recovered_from?: string | null;

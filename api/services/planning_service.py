@@ -5795,6 +5795,10 @@ def authoritative_replan(
             current_channel_slug=None,
             completed_channels=completed_channels,
             total_channels=len(channels),
+            channel_summary={
+                "slug": slug,
+                **summary["channels"][slug],
+            },
         )
 
     # ── 3. Regenerar horizonte de generación (bypass ventana silenciosa) ──

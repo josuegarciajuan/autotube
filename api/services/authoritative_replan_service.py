@@ -16,6 +16,8 @@ This coordinator decouples the request from the work:
   - The owner is identified by PID + Linux start ticks, so PID reuse cannot
     turn a dead run into a false live owner. Snapshots distinguish live,
     orphaned, stale and interrupted runs.
+  - Snapshots include coarse overall progress, phase, current channel and the
+    per-channel completion summaries consumed by the live modal polling.
   - A run interrupted by an API restart becomes ``interrupted`` and exposes an
     explicit, bounded recovery action. It is never retried silently.
 
@@ -108,6 +110,8 @@ def _fresh_state() -> dict:
         "current_channel_slug": None,
         "completed_channels": 0,
         "total_channels": 0,
+        "channels": [],
+        "progress_pct": 0,
         "summary": None,
         "error": None,
         # Owner/lease: pid_start_ticks protects against PID reuse across boots.
@@ -492,18 +496,58 @@ class AuthoritativeReplanCoordinator:
         with self._mutex:
             if self._state.get("run_id") != run_id:
                 return
+            channel_summary = updates.pop("channel_summary", None)
             self._state.update(updates)
+            if isinstance(channel_summary, dict) and channel_summary:
+                channels = list(self._state.get("channels") or [])
+                slug = channel_summary.get("slug")
+                # Progress callbacks are idempotent; never duplicate a channel.
+                if not slug or not any(c.get("slug") == slug for c in channels):
+                    channels.append(channel_summary)
+                    self._state["channels"] = channels
+            self._state["progress_pct"] = self._progress_pct(self._state)
             self._pin_locked(db)
+
+    @staticmethod
+    def _progress_pct(state: dict) -> int:
+        """Coarse overall progress derived from phase + completed channels."""
+        status = state.get("status")
+        phase = state.get("phase")
+        if status == "success" or phase == "done":
+            return 100
+        if status == "queued" or phase == "queued":
+            return 0
+        try:
+            completed = max(0, int(state.get("completed_channels") or 0))
+            total = max(0, int(state.get("total_channels") or 0))
+        except (TypeError, ValueError):
+            completed, total = 0, 0
+        if phase == "starting":
+            return 5
+        if phase in ("repack", "coverage", "channel_done"):
+            base = 10 + (70 * completed // total if total else 0)
+            return min(80, base)
+        if phase == "horizon":
+            return 85
+        if phase == "shorts":
+            return 90
+        if phase == "finalizing":
+            return 97
+        if phase in ("interrupted", "error"):
+            return min(95, 10 + (70 * completed // total if total else 0))
+        return 0
 
     def _snapshot_locked(self) -> dict:
         state = {**self._state}
         state["summary"] = self._state.get("summary")
+        state["channels"] = list(self._state.get("channels") or [])
+        state["progress_pct"] = self._progress_pct(self._state)
         state["ok"] = bool(
             self._state.get("ok")
             and self._state.get("status") not in ("error", "not_found")
         )
         now = time.time()
-        for key in ("created_at", "started_at", "heartbeat_at"):
+        for key in ("created_at", "started_at", "heartbeat_at", "finished_at"):
             age_key = f"{key}_age_s"
             state[age_key] = None
             raw = self._state.get(key)
@@ -515,10 +559,20 @@ class AuthoritativeReplanCoordinator:
                     state[age_key] = max(0, int(now - parsed.timestamp()))
                 except (TypeError, ValueError):
                     pass
-        state["elapsed_s"] = state.get("started_at_age_s") if state.get("started_at") else None
-        state["heartbeat_age_s"] = state.get("heartbeat_at_age_s")
-
+        duration_s = None
+        if (
+            state.get("started_at_age_s") is not None
+            and state.get("finished_at_age_s") is not None
+        ):
+            duration_s = max(
+                0,
+                state["started_at_age_s"] - state["finished_at_age_s"],
+            )
+        state["duration_s"] = duration_s
         status = self._state.get("status")
+        elapsed = state.get("started_at_age_s") if status in _ACTIVE_STATUSES else duration_s
+        state["elapsed_s"] = elapsed
+        state["heartbeat_age_s"] = state.get("heartbeat_at_age_s")
         heartbeat_age = state.get("heartbeat_age_s")
         active = status in _ACTIVE_STATUSES
         owner_alive = self._owner_alive(self._state) if active else False
