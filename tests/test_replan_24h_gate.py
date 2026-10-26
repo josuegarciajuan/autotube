@@ -82,6 +82,7 @@ def db(tmp_path):
             status TEXT NOT NULL DEFAULT 'pending',
             slot_position INTEGER DEFAULT 0,
             source_mode TEXT DEFAULT 'original',
+            franja_dup_index INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE shorts_planned_slots (
@@ -93,6 +94,7 @@ def db(tmp_path):
             status TEXT NOT NULL DEFAULT 'pending',
             short_type TEXT NOT NULL DEFAULT 'native',
             slot_position INTEGER DEFAULT 0,
+            franja_dup_index INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE shorts_planning_config (

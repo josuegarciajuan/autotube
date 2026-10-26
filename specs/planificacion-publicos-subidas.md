@@ -45,20 +45,31 @@ hacerse lo más cerca posible de ella.
 
 ## "Reprogramar Ahora" (botón de Programación)
 
-`POST /api/planning/full-replan/authoritative` → `authoritative_replan()`
-(`api/services/planning_service.py`). Al pulsarlo:
+`POST /api/planning/full-replan/authoritative` **responde `202` de inmediato** y
+encola un run persistido gestionado por `authoritative_replan_service.py`. El
+trabajo real (`authoritative_replan()`) corre fuera de la petición HTTP:
 
 1. Borra **todos** los `planned_slots` y `shorts_planned_slots` pendientes y
    cancela los `generation_jobs` en cola (protege `running`: invariante de una
    sola generación).
 2. Reasigna `target_public_at` + `scheduled_upload_at` de pendientes y
    calentando (`apply_publish_repack`, `force_yt=True`).
-3. Fuerza `publishAt` en YouTube de los ya subidos (videos.update, 50 u/vídeo).
-4. Cubre el déficit de HOY (`remediate_today_public_deficit`).
+3. Fuerza `publishAt` en YouTube dentro de un presupuesto total acotado
+   (`AUTHORITATIVE_REPLAN_MAX_YT_UPDATES`, por defecto 100). Si YouTube rechaza,
+   **no se actualiza la DB**; si YouTube acepta y la DB falla, se intenta
+   rollback remoto y se registra cualquier discrepancia.
+4. Cubre el déficit de HOY (`remediate_today_public_deficit`) con el presupuesto
+   restante.
 5. Regenera shorts (3/día) y reconstruye el horizonte de generación.
 
-Es **idempotente** y está pensado para pulsarse cuando algo se descuadre: un
-clic y el sistema vuelve a estar al día.
+Es **idempotente** y está pensado para pulsarse cuando algo se descuadre. Un
+segundo POST durante un run activo se une al mismo `run_id`; no inicia otro.
+
+- Seguimiento: `GET /api/planning/full-replan/authoritative/status`.
+- Recuperación explícita de un run interrumpido:
+  `POST /api/planning/full-replan/authoritative/recover`.
+- `stale`, `orphaned`, `interrupted`, `partial` y los contadores remotos son
+  parte del contrato observable del panel.
 
 ## Dónde vive cada pieza
 
@@ -70,7 +81,11 @@ clic y el sistema vuelve a estar al día.
 | Gates de subida + prioridad + cortocircuito | `api/services/upload_scheduler.py` |
 | Catch-up diario | `api/services/publish_coverage.py` |
 | Reprogramación total | `api/services/planning_service.py` |
-| Botón | `frontend/src/pages/Scheduling.tsx`, `frontend/src/lib/api.ts` |
+| Ciclo asíncrono, lease y recuperación | `api/services/authoritative_replan_service.py` |
+| Control remoto YouTube | `pipeline/youtube_uploader.py` |
+| Botón y progreso en vivo | `frontend/src/pages/Scheduling.tsx`, `frontend/src/lib/api.ts` |
+| Decisión arquitectónica | `docs/adr/ADR-20261026-authoritative-replan-async.md` |
+| Runbook operativo | `docs/runbook-authoritative-replan.md` |
 
 ## Cómo verificar
 

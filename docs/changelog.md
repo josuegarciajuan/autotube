@@ -1,3 +1,24 @@
+## 2026-10-26 — Reprogramación autoritativa asíncrona, recuperable y acotada
+
+- `POST /api/planning/full-replan/authoritative` devuelve **202** con `run_id`;
+  el replan completo corre fuera de la petición HTTP y conserva `_REPLAN_LOCK`.
+- Estado persistido en `system_state["authoritative_replan_state"]` con fases,
+  progreso, canales completados, lease por PID+start ticks y estados
+  `stale`/`orphaned`/`interrupted`.
+- Nuevo `GET .../authoritative/status` y `POST .../authoritative/recover`
+  (recuperación explícita y acotada; nunca automática).
+- La UI hace polling, reanuda el seguimiento tras recargar y muestra progreso
+  por fase/canal, incidencias y acción de recuperación.
+- `videos.update` usa timeout corto y reintentos solo transitorios; el replan
+  comparte un presupuesto remoto con la cobertura diaria. Si YouTube acepta y
+  la DB falla, se intenta rollback remoto; cualquier discrepancia restante se
+  marca `partial` y se registra como crítica.
+- Docs: `docs/adr/ADR-20261026-authoritative-replan-async.md`,
+  `docs/runbook-authoritative-replan.md` y contrato actualizado en
+  `specs/planificacion-publicos-subidas.md`.
+- Tests nuevos: `tests/test_authoritative_replan_async.py`,
+  `tests/test_replan_remote_updates.py`.
+
 ## 2026-10-25 — P00–P05 engineering closure + controlled canary (opt-in)
 
 - P00–P05 externally approved and closed: `AUTOTUBE_SEMANTIC_VISUAL_SELECTION_ENGINEERING_COMPLETE`.

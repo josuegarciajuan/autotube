@@ -641,8 +641,17 @@ tocar las subidas. Es el interruptor operativo para liberar potencia de cálculo
 - **Cap por cuenta cuenta solo `uploaded_at`** (subidas reales), nunca `published_at`.
 - **Nunca `error` por cap/ventana**; cortocircuito al tope de cuenta (sin bucle).
 - **"Reprogramar Ahora"** = `POST /api/planning/full-replan/authoritative`
-  (`authoritative_replan`): borra la programación pendiente, reasigna pendientes
-  y calentando, fuerza `publishAt` y regenera el plan. Idempotente.
+  (`authoritative_replan_service` + `authoritative_replan`): responde **202**
+  con `run_id` y ejecuta fuera de la petición HTTP; borra la programación
+  pendiente, reasigna pendientes y calentando, fuerza `publishAt` dentro de un
+  presupuesto remoto y regenera el plan. Es idempotente: un POST durante un run
+  activo se une al mismo run. Seguimiento en
+  `GET .../authoritative/status`; recuperación explícita en
+  `POST .../authoritative/recover`. Un run interrumpido nunca se reintenta en
+  silencio. Invariantes y operación:
+  `specs/planificacion-publicos-subidas.md`,
+  `docs/adr/ADR-20261026-authoritative-replan-async.md`,
+  `docs/runbook-authoritative-replan.md`.
 - **Inventario primero (oct 2026):** el replan autoritativo llama a
   `apply_publish_repack(..., prioritize_awaiting=True)`: ordena los ya subidos
   primero y, entre los pendientes de subir, por `target_public_at` (compromiso
