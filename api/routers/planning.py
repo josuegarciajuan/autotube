@@ -683,6 +683,35 @@ def authoritative_full_replan_status(
     return state
 
 
+@router.post("/full-replan/authoritative/recover", status_code=202)
+def authoritative_full_replan_recover(
+    run_id: Optional[str] = Query(None),
+    horizon_days: Optional[int] = Query(None, ge=1, le=31),
+):
+    """Explicitly retry the latest interrupted authoritative replan.
+
+    Recovery is bounded and never starts a second writer while the original
+    run is still alive. Only an interrupted run is eligible.
+    """
+    from api.services.authoritative_replan_service import (
+        ReplanNotRecoverable,
+        get_authoritative_replan_coordinator,
+    )
+    try:
+        return get_authoritative_replan_coordinator().recover(
+            db=get_db(), run_id=run_id, horizon_days=horizon_days,
+        )
+    except ReplanNotRecoverable as exc:
+        raise HTTPException(
+            409,
+            detail={
+                "code": exc.code,
+                "message": str(exc),
+                "status": (exc.snapshot or {}).get("status"),
+            },
+        ) from exc
+
+
 @router.post("/full-replan")
 def full_replan():
     """Deprecated dangerous reset; clients must use preflight then apply."""

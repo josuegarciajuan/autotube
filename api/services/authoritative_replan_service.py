@@ -13,8 +13,11 @@ This coordinator decouples the request from the work:
     planning loops, so only one replan writer runs at a time.
   - Every stage is persisted in ``system_state['authoritative_replan_state']``
     (queue, channel repack, horizon, shorts, terminal result/error).
-  - A run interrupted by an API restart is marked as an error on startup. The
-    operation is idempotent, so the operator can safely launch it again.
+  - The owner is identified by PID + Linux start ticks, so PID reuse cannot
+    turn a dead run into a false live owner. Snapshots distinguish live,
+    orphaned, stale and interrupted runs.
+  - A run interrupted by an API restart becomes ``interrupted`` and exposes an
+    explicit, bounded recovery action. It is never retried silently.
 
 The coordinator deliberately keeps only the latest run. It is an operational
 command, not an audit log; terminal results remain available until the next
@@ -38,12 +41,59 @@ STATE_KEY = "authoritative_replan_state"
 _ACTIVE_STATUSES = ("queued", "running")
 _ERROR_MAX_CHARS = 2000
 
+def _env_int(name: str, default: int, minimum: int) -> int:
+    try:
+        return max(minimum, int(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+# A run is only a candidate for recovery when it was interrupted, never when
+# it failed its own work. A second restart while recovering must not loop
+# forever without an operator decision.
+MAX_RECOVERY_ATTEMPTS = _env_int(
+    "AUTHORITATIVE_REPLAN_MAX_RECOVERY_ATTEMPTS", 1, minimum=0
+)
+
+# Stage callbacks can be separated by a long per-channel repack (minutes).
+# Treat this as a diagnostic threshold, not as permission to kill the thread.
+STALE_AFTER_S = _env_int(
+    "AUTHORITATIVE_REPLAN_STALE_S", 1800, minimum=60
+)
+
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _proc_start_ticks(pid: int) -> Optional[int]:
+    """Return Linux /proc start time ticks for PID, or None if it is gone.
+
+    ``/proc/<pid>/stat`` field 22 distinguishes a live owner from a reused PID.
+    """
+    try:
+        with open(f"/proc/{int(pid)}/stat", "r", encoding="utf-8") as handle:
+            raw = handle.read()
+        close_paren = raw.rfind(")")
+        if close_paren < 0:
+            return None
+        fields = raw[close_paren + 2:].split()
+        # After comm, field 3 is state; starttime is field 22 overall.
+        return int(fields[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _process_identity() -> dict:
+    pid = os.getpid()
+    return {
+        "pid": pid,
+        "pid_start_ticks": _proc_start_ticks(pid),
+    }
+
+
 def _fresh_state() -> dict:
+    owner = _process_identity()
     return {
         "ok": True,
         "run_id": None,
@@ -60,8 +110,31 @@ def _fresh_state() -> dict:
         "total_channels": 0,
         "summary": None,
         "error": None,
-        "pid": os.getpid(),
+        # Owner/lease: pid_start_ticks protects against PID reuse across boots.
+        "pid": owner["pid"],
+        "pid_start_ticks": owner["pid_start_ticks"],
+        "owner_alive": True,
+        "orphaned": False,
+        "stale": False,
+        "stale_after_s": STALE_AFTER_S,
+        # Recovery metadata (explicit, finite).
+        "attempt": 0,
+        "recovery_attempts": 0,
+        "recovered_from": None,
+        "interrupted_at": None,
+        "interrupt_reason": None,
+        "recoverable": False,
+        "recovery_available": False,
     }
+
+
+class ReplanNotRecoverable(RuntimeError):
+    """The latest run is not an interrupted run eligible for recovery."""
+
+    def __init__(self, message: str, code: str, snapshot: dict):
+        super().__init__(message)
+        self.code = code
+        self.snapshot = snapshot
 
 
 class AuthoritativeReplanCoordinator:
@@ -84,57 +157,112 @@ class AuthoritativeReplanCoordinator:
         with self._mutex:
             self._ensure_loaded_locked(db)
 
-            if (
-                self._state.get("status") in _ACTIVE_STATUSES
-                and self._thread is not None
-                and self._thread.is_alive()
-            ):
-                snapshot = self._snapshot_locked()
-                snapshot.update({"queued": True, "joined": True})
-                return snapshot
+            if self._state.get("status") in _ACTIVE_STATUSES:
+                # Same process + live worker: never start a second writer.
+                if self._thread is not None and self._thread.is_alive():
+                    snapshot = self._snapshot_locked()
+                    snapshot.update({"queued": True, "joined": True})
+                    return snapshot
+
+                # Another live process owns the persisted run. Joining is
+                # safer than interrupting a job this process cannot see.
+                if (
+                    int(self._state.get("pid") or 0) != os.getpid()
+                    and self._owner_alive(self._state)
+                ):
+                    snapshot = self._snapshot_locked()
+                    snapshot.update({"queued": True, "joined": True})
+                    return snapshot
+
+                # No live owner: reclaim the ghost run before starting anew.
+                self._mark_interrupted_locked(
+                    db,
+                    reason="owner_not_alive",
+                    message="Interrupted: previous worker is no longer alive",
+                )
+
+            return self._start_locked(
+                db, horizon_days=horizon_days, joined=False,
+            )
+
+    def recover(
+        self,
+        db,
+        run_id: Optional[str] = None,
+        horizon_days: Optional[int] = None,
+    ) -> dict:
+        """Explicitly retry the latest interrupted run, at most once.
+
+        Recovery is intentionally not automatic: an API restart can happen at
+        any point, and the operator must be able to decide when to resume a
+        side-effecting operation (YouTube publishAt updates). The retry is
+        still bounded by ``MAX_RECOVERY_ATTEMPTS`` so a crash loop cannot
+        hammer the scheduler forever.
+        """
+        with self._mutex:
+            self._ensure_loaded_locked(db)
+
+            if run_id and self._state.get("run_id") != run_id:
+                raise ReplanNotRecoverable(
+                    "Replan run not found (only the latest run is retained)",
+                    "REPLAN_NOT_FOUND",
+                    self._snapshot_locked(),
+                )
 
             if self._state.get("status") in _ACTIVE_STATUSES:
-                # A persisted active state without a live owner belongs to a
-                # previous process (or a thread that died before its handler).
-                # Never leave the panel permanently blocked by it.
-                self._state.update({
-                    "ok": False,
-                    "status": "error",
-                    "queued": False,
-                    "error": "Interrupted by server restart",
-                    "finished_at": _utcnow_iso(),
-                    "heartbeat_at": _utcnow_iso(),
-                    "phase": "interrupted",
-                })
-                self._pin_locked(db)
+                if self._thread is not None and self._thread.is_alive():
+                    snapshot = self._snapshot_locked()
+                    snapshot.update({"queued": True, "joined": True, "recovered": False})
+                    return snapshot
+                if (
+                    int(self._state.get("pid") or 0) != os.getpid()
+                    and self._owner_alive(self._state)
+                ):
+                    snapshot = self._snapshot_locked()
+                    snapshot.update({"queued": True, "joined": True, "recovered": False})
+                    return snapshot
+                self._mark_interrupted_locked(
+                    db,
+                    reason="owner_not_alive",
+                    message="Interrupted: previous worker is no longer alive",
+                )
 
-            run_id = uuid.uuid4().hex[:12]
-            now = _utcnow_iso()
-            self._state = {
-                **_fresh_state(),
-                "run_id": run_id,
-                "status": "queued",
-                "queued": True,
-                "created_at": now,
-                "heartbeat_at": now,
-                "horizon_days": int(horizon_days),
-                "phase": "queued",
-                "pid": os.getpid(),
-            }
-            self._pin_locked(db)
-
-            thread = threading.Thread(
-                target=self._execute,
-                args=(run_id, db, int(horizon_days)),
-                name=f"authoritative-replan-{run_id}",
-                daemon=True,
+            legacy_interrupted = (
+                self._state.get("status") == "error"
+                and self._state.get("phase") == "interrupted"
             )
-            self._thread = thread
-            thread.start()
-            snapshot = self._snapshot_locked()
-            snapshot.update({"queued": True, "joined": False})
-            logger.info(
-                "authoritative replan %s queued (horizon=%dd)", run_id, horizon_days
+            if self._state.get("status") != "interrupted" and not legacy_interrupted:
+                raise ReplanNotRecoverable(
+                    "The latest authoritative replan is not recoverable",
+                    "REPLAN_NOT_RECOVERABLE",
+                    self._snapshot_locked(),
+                )
+
+            attempts = int(self._state.get("recovery_attempts") or 0)
+            if attempts >= MAX_RECOVERY_ATTEMPTS:
+                raise ReplanNotRecoverable(
+                    "Maximum recovery attempts reached for this replan",
+                    "REPLAN_RECOVERY_EXHAUSTED",
+                    self._snapshot_locked(),
+                )
+
+            previous_run = self._state.get("run_id")
+            effective_horizon = int(
+                horizon_days or self._state.get("horizon_days") or 7
+            )
+            snapshot = self._start_locked(
+                db,
+                horizon_days=effective_horizon,
+                joined=False,
+                recovered_from=previous_run,
+                recovery_attempts=attempts + 1,
+            )
+            snapshot["recovered"] = True
+            logger.warning(
+                "authoritative replan %s recovered from interrupted run %s "
+                "(attempt %d/%d)",
+                snapshot.get("run_id"), previous_run,
+                attempts + 1, MAX_RECOVERY_ATTEMPTS,
             )
             return snapshot
 
@@ -167,25 +295,120 @@ class AuthoritativeReplanCoordinator:
                 return self._snapshot_locked()
 
             state = {**_fresh_state(), **saved}
-            if state.get("status") in _ACTIVE_STATUSES:
-                state.update({
-                    "ok": False,
-                    "status": "error",
-                    "queued": False,
-                    "error": "Interrupted by server restart",
-                    "finished_at": _utcnow_iso(),
-                    "heartbeat_at": _utcnow_iso(),
-                    "phase": "interrupted",
-                })
-                logger.warning(
-                    "authoritative replan %s interrupted by restart",
-                    state.get("run_id"),
-                )
             self._state = state
             self._thread = None
             self._loaded = True
-            self._pin_locked(db)
+            another_live_owner = (
+                int(state.get("pid") or 0) != os.getpid()
+                and self._owner_alive(state)
+            )
+            if state.get("status") in _ACTIVE_STATUSES and not another_live_owner:
+                self._mark_interrupted_locked(
+                    db,
+                    reason="server_restart",
+                    message="Interrupted by server restart",
+                )
+                logger.warning(
+                    "authoritative replan %s interrupted by restart; "
+                    "explicit recovery available",
+                    state.get("run_id"),
+                )
+            else:
+                # Terminal state or a genuinely live owner in another process:
+                # preserve it instead of inventing an interruption.
+                self._pin_locked(db)
             return self._snapshot_locked()
+
+    # ── Lifecycle helpers ─────────────────────────────────────
+
+    def _start_locked(
+        self,
+        db,
+        horizon_days: int,
+        joined: bool,
+        recovered_from: Optional[str] = None,
+        recovery_attempts: int = 0,
+    ) -> dict:
+        run_id = uuid.uuid4().hex[:12]
+        now = _utcnow_iso()
+        owner = _process_identity()
+        previous_attempt = int(self._state.get("attempt") or 0)
+        self._state = {
+            **_fresh_state(),
+            "run_id": run_id,
+            "status": "queued",
+            "queued": True,
+            "created_at": now,
+            "heartbeat_at": now,
+            "horizon_days": int(horizon_days),
+            "phase": "queued",
+            "attempt": previous_attempt + 1,
+            "recovery_attempts": int(recovery_attempts),
+            "recovered_from": recovered_from,
+            **owner,
+            "owner_alive": True,
+        }
+        self._pin_locked(db)
+
+        thread = threading.Thread(
+            target=self._execute,
+            args=(run_id, db, int(horizon_days)),
+            name=f"authoritative-replan-{run_id}",
+            daemon=True,
+        )
+        self._thread = thread
+        thread.start()
+        snapshot = self._snapshot_locked()
+        snapshot.update({"queued": True, "joined": joined})
+        logger.info(
+            "authoritative replan %s queued (horizon=%dd, attempt=%d, recovered_from=%s)",
+            run_id, horizon_days, self._state.get("attempt"), recovered_from,
+        )
+        return snapshot
+
+    def _mark_interrupted_locked(self, db, reason: str, message: str) -> None:
+        now = _utcnow_iso()
+        self._state.update({
+            "ok": False,
+            "status": "interrupted",
+            "queued": False,
+            "error": message,
+            "finished_at": now,
+            "heartbeat_at": now,
+            "interrupted_at": now,
+            "interrupt_reason": reason,
+            "phase": "interrupted",
+            "current_channel_slug": None,
+            "owner_alive": False,
+            "orphaned": True,
+            "stale": False,
+            "recoverable": True,
+            "recovery_available": (
+                int(self._state.get("recovery_attempts") or 0)
+                < MAX_RECOVERY_ATTEMPTS
+            ),
+        })
+        self._pin_locked(db)
+
+    @staticmethod
+    def _owner_alive(state: dict) -> bool:
+        try:
+            pid = int(state.get("pid") or 0)
+        except (TypeError, ValueError):
+            return False
+        if pid <= 0:
+            return False
+        current_ticks = _proc_start_ticks(pid)
+        if current_ticks is None:
+            return False
+        expected = state.get("pid_start_ticks")
+        if expected is not None:
+            try:
+                return int(expected) == int(current_ticks)
+            except (TypeError, ValueError):
+                return False
+        # Legacy state (pre-lease) cannot prove ownership after PID reuse.
+        return pid == os.getpid()
 
     # ── Worker ────────────────────────────────────────────────
 
@@ -198,6 +421,9 @@ class AuthoritativeReplanCoordinator:
             phase="starting",
             started_at=_utcnow_iso(),
             heartbeat_at=_utcnow_iso(),
+            owner_alive=True,
+            orphaned=False,
+            stale=False,
         )
 
         def progress(phase: str, **fields: Any) -> None:
@@ -228,6 +454,10 @@ class AuthoritativeReplanCoordinator:
                 finished_at=_utcnow_iso(),
                 heartbeat_at=_utcnow_iso(),
                 current_channel_slug=None,
+                error=None,
+                recoverable=False,
+                recovery_available=False,
+                interrupt_reason=None,
             )
             logger.info(
                 "authoritative replan %s finished: status=%s slots=%s videos=%s",
@@ -251,6 +481,9 @@ class AuthoritativeReplanCoordinator:
                 finished_at=_utcnow_iso(),
                 heartbeat_at=_utcnow_iso(),
                 current_channel_slug=None,
+                recoverable=False,
+                recovery_available=False,
+                interrupt_reason=None,
             )
 
     # ── State helpers ─────────────────────────────────────────
@@ -283,6 +516,30 @@ class AuthoritativeReplanCoordinator:
                 except (TypeError, ValueError):
                     pass
         state["elapsed_s"] = state.get("started_at_age_s") if state.get("started_at") else None
+        state["heartbeat_age_s"] = state.get("heartbeat_at_age_s")
+
+        status = self._state.get("status")
+        heartbeat_age = state.get("heartbeat_age_s")
+        active = status in _ACTIVE_STATUSES
+        owner_alive = self._owner_alive(self._state) if active else False
+        state["owner_alive"] = owner_alive
+        state["orphaned"] = bool(active and not owner_alive)
+        state["stale"] = bool(
+            status == "running"
+            and heartbeat_age is not None
+            and heartbeat_age > STALE_AFTER_S
+        )
+        state["stale_after_s"] = STALE_AFTER_S
+        state["max_recovery_attempts"] = MAX_RECOVERY_ATTEMPTS
+        state["recoverable"] = bool(
+            status == "interrupted"
+            or (status == "error" and self._state.get("phase") == "interrupted")
+        )
+        state["recovery_available"] = bool(
+            state["recoverable"]
+            and int(self._state.get("recovery_attempts") or 0)
+            < MAX_RECOVERY_ATTEMPTS
+        )
         return state
 
     def _ensure_loaded_locked(self, db) -> None:

@@ -28,17 +28,31 @@ export interface FullReplanApplyResult {
 export interface AuthoritativeReplanState {
   ok: boolean;
   run_id: string | null;
-  status: 'idle' | 'queued' | 'running' | 'success' | 'blocked' | 'error' | 'not_found';
+  status: 'idle' | 'queued' | 'running' | 'success' | 'blocked' | 'error' | 'interrupted' | 'not_found';
   queued?: boolean;
   joined?: boolean;
+  recovered?: boolean;
   phase?: string | null;
   created_at?: string | null;
   started_at?: string | null;
   finished_at?: string | null;
   elapsed_s?: number | null;
+  heartbeat_age_s?: number | null;
   current_channel_slug?: string | null;
   completed_channels?: number;
   total_channels?: number;
+  attempt?: number;
+  recovery_attempts?: number;
+  recovered_from?: string | null;
+  recoverable?: boolean;
+  recovery_available?: boolean;
+  max_recovery_attempts?: number;
+  interrupt_reason?: string | null;
+  interrupted_at?: string | null;
+  owner_alive?: boolean;
+  orphaned?: boolean;
+  stale?: boolean;
+  stale_after_s?: number;
   summary?: Record<string, any> | null;
   error?: string | null;
 }
@@ -418,6 +432,12 @@ export const api = {
   authoritativeFullReplanStatus: (runId?: string) => {
     const qs = runId ? `?run_id=${encodeURIComponent(runId)}` : ''
     return request<AuthoritativeReplanState>(`/planning/full-replan/authoritative/status${qs}`)
+  },
+  recoverAuthoritativeFullReplan: (runId?: string) => {
+    const qs = runId ? `?run_id=${encodeURIComponent(runId)}` : ''
+    return request<AuthoritativeReplanState>(`/planning/full-replan/authoritative/recover${qs}`, {
+      method: 'POST',
+    })
   },
 
   // Optimal Publish Slots (v10)
