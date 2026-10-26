@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import Optional, Any
 
 import httplib2
+import requests
 from google.auth.transport.requests import Request
+from google_auth_httplib2 import AuthorizedHttp
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
@@ -46,10 +48,26 @@ GOOGLE_HTTP_TIMEOUT_S = _env_timeout("GOOGLE_HTTP_TIMEOUT_S", 30)
 GOOGLE_EXECUTE_RETRIES = 1  # 1 reintento (2 intentos), backoff ~1-2 s
 
 
+class _TimeoutSession(requests.Session):
+    """`requests.Session` con timeout por defecto (refresh OAuth acotado).
+
+    google-auth 2.54 `Request.__init__` solo acepta `session=` (no `timeout=`),
+    así que el timeout se inyecta en la sesión subyacente.
+    """
+
+    def request(self, *args, **kwargs):
+        kwargs.setdefault("timeout", GOOGLE_HTTP_TIMEOUT_S)
+        return super().request(*args, **kwargs)
+
+
 def _bounded_http(creds):
-    """Transporte autenticado con timeout de socket acotado."""
-    http = httplib2.Http(timeout=GOOGLE_HTTP_TIMEOUT_S)
-    return creds.authorize(http)
+    """Transporte autenticado google-auth con timeout de socket acotado.
+
+    google-auth moderno NO expone `credentials.authorize()` (eso era
+    oauth2client) y `google.auth.transport.httplib2` ya no existe en 2.54:
+    el wrapper canónico es `google_auth_httplib2.AuthorizedHttp`.
+    """
+    return AuthorizedHttp(creds, http=httplib2.Http(timeout=GOOGLE_HTTP_TIMEOUT_S))
 
 
 def _set_quota_exhausted_global(channel_slug: str = "stats_collector"):
@@ -98,7 +116,7 @@ class YouTubeStatsFetcher:
 
         if creds.expired and creds.refresh_token:
             try:
-                creds.refresh(Request(timeout=GOOGLE_HTTP_TIMEOUT_S))
+                creds.refresh(Request(session=_TimeoutSession()))
                 with open(self._token_path, "wb") as f:
                     pickle.dump(creds, f)
             except Exception as exc:

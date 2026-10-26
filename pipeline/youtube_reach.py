@@ -34,7 +34,9 @@ import time
 from typing import Any
 
 import httplib2
+import requests
 from google.auth.transport.requests import AuthorizedSession, Request
+from google_auth_httplib2 import AuthorizedHttp
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
@@ -78,6 +80,15 @@ def _env_timeout(name: str, default: int) -> int:
 GOOGLE_HTTP_TIMEOUT_S = _env_timeout("GOOGLE_HTTP_TIMEOUT_S", 30)
 GOOGLE_EXECUTE_RETRIES = 1  # 1 reintento (2 intentos) para 5xx/429 transitorios
 REPORT_DOWNLOAD_TIMEOUT_S = _env_timeout("REACH_DOWNLOAD_TIMEOUT_S", 120)
+
+
+class _TimeoutSession(requests.Session):
+    """Sesión con timeout por defecto para el refresh OAuth (mismo criterio
+    que youtube_stats: google-auth 2.54 no acepta `Request(timeout=...)`)."""
+
+    def request(self, *args, **kwargs):
+        kwargs.setdefault("timeout", GOOGLE_HTTP_TIMEOUT_S)
+        return super().request(*args, **kwargs)
 
 
 def _to_float(value: Any, default: float = 0.0) -> float:
@@ -164,7 +175,7 @@ class ReachReportClient:
 
         if creds.expired and creds.refresh_token:
             try:
-                creds.refresh(Request(timeout=GOOGLE_HTTP_TIMEOUT_S))
+                creds.refresh(Request(session=_TimeoutSession()))
                 with open(self._token_path, "wb") as f:
                     pickle.dump(creds, f)
             except Exception as exc:  # noqa: BLE001
@@ -180,7 +191,8 @@ class ReachReportClient:
             # Transporte acotado (timeout por petición) — igual que youtube_stats.
             _http = httplib2.Http(timeout=GOOGLE_HTTP_TIMEOUT_S)
             self._service = build(
-                "youtubereporting", "v1", http=creds.authorize(_http),
+                "youtubereporting", "v1",
+                http=AuthorizedHttp(creds, http=_http),
                 cache_discovery=False,
             )
         except Exception as exc:  # noqa: BLE001
