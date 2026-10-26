@@ -14,6 +14,7 @@ Architecture:
 import hashlib
 import json
 import logging
+import os
 import secrets
 import sqlite3
 import threading
@@ -5041,6 +5042,19 @@ _FULL_REPLAN_COOLDOWN_MIN = 2  # minimum minutes between full replans
 _last_full_replan_ts: Optional[datetime] = None
 
 
+def _authoritative_yt_update_budget() -> int:
+    """Máximo de vídeos cuyo publishAt se intenta actualizar en un replan.
+
+    El presupuesto es por RUN y por vídeo (no por reintento HTTP). Evita que una
+    resincronización grande consuma cuota sin control. 0 = no tocar YouTube
+    (la DB de los vídeos no subidos sí se puede replanificar).
+    """
+    try:
+        return max(0, int(os.getenv("AUTHORITATIVE_REPLAN_MAX_YT_UPDATES", "100")))
+    except (TypeError, ValueError):
+        return 100
+
+
 _SAFE_REPLAN_TOKEN_TTL_MINUTES = 10
 _SAFE_REPLAN_DB_RETRIES = 3
 _SAFE_REPLAN_RETRY_DELAYS = (0.05, 0.15)
@@ -5708,6 +5722,14 @@ def authoritative_replan(
         "jobs_cancelled": 0,
         "videos_retimed": 0,
         "today_forced": 0,
+        "yt_updates_attempted": 0,
+        "yt_updates_succeeded": 0,
+        "yt_updates_failed": 0,
+        "yt_updates_limited": 0,
+        "yt_rollbacks": 0,
+        "yt_db_mismatches": 0,
+        "db_updates_failed": 0,
+        "yt_update_budget": _authoritative_yt_update_budget(),
         "channels": {},
         "shorts": {},
         "horizon": None,
@@ -5745,6 +5767,8 @@ def authoritative_replan(
     import pytz
 
     completed_channels = 0
+    yt_budget = int(summary["yt_update_budget"])
+    yt_attempted = 0
     for ch in channels:
         ch_id = int(ch["id"])
         slug = ch.get("slug") or f"canal{ch_id}"
@@ -5753,23 +5777,41 @@ def authoritative_replan(
             current_channel_slug=slug,
             completed_channels=completed_channels,
             total_channels=len(channels),
+            yt_updates_attempted=summary["yt_updates_attempted"],
+            yt_updates_failed=summary["yt_updates_failed"],
+            yt_updates_limited=summary["yt_updates_limited"],
         )
+        rep = {}
         try:
             rep = apply_publish_repack(
                 db, ch_id, slug,
                 dry_run=False, quota_gate=False, force_yt=True,
                 prioritize_awaiting=True,
-            )
-            repacked = int((rep or {}).get("rescheduled", 0) or 0)
+                max_yt_updates=max(0, yt_budget - yt_attempted),
+            ) or {}
+            repacked = int(rep.get("rescheduled", 0) or 0)
         except Exception as exc:
             logger.warning("authoritative_replan: repack %s falló: %s", slug, exc)
             repacked = 0
+
+        rep_attempted = int(rep.get("yt_attempted", 0) or 0)
+        yt_attempted += rep_attempted
+        summary["yt_updates_attempted"] += rep_attempted
+        summary["yt_updates_succeeded"] += int(rep.get("yt_succeeded", 0) or 0)
+        summary["yt_updates_failed"] += int(rep.get("yt_failed", 0) or 0)
+        summary["yt_updates_limited"] += int(rep.get("yt_skipped_limit", 0) or 0)
+        summary["yt_rollbacks"] += int(rep.get("yt_rollback", 0) or 0)
+        summary["yt_db_mismatches"] += int(rep.get("yt_db_mismatch", 0) or 0)
+        summary["db_updates_failed"] += int(rep.get("db_failed", 0) or 0)
 
         _report(
             "coverage",
             current_channel_slug=slug,
             completed_channels=completed_channels,
             total_channels=len(channels),
+            yt_updates_attempted=summary["yt_updates_attempted"],
+            yt_updates_failed=summary["yt_updates_failed"],
+            yt_updates_limited=summary["yt_updates_limited"],
         )
         today_info = {"forced": 0, "need": 0, "reason": "skip"}
         try:
@@ -5779,15 +5821,57 @@ def authoritative_replan(
             ) or 0)
             cfg = db.get_channel_planning_config(ch_id) or {}
             tz = pytz.timezone(cfg.get("publish_timezone", "Europe/Madrid"))
-            today_info = remediate_today_public_deficit(db, slug, ch_id, tz, cap)
+            today_info = remediate_today_public_deficit(
+                db, slug, ch_id, tz, cap,
+                max_yt_updates=max(0, yt_budget - yt_attempted),
+            )
         except Exception as exc:
-            today_info = {"forced": 0, "need": 0, "reason": f"error: {exc}"}
+            today_info = {
+                "forced": 0, "need": 0,
+                "yt_attempted": 0, "yt_failed": 0, "yt_limited": 0,
+                "reason": f"error: {exc}",
+            }
+
+        today_attempted = int(today_info.get("yt_attempted", 0) or 0)
+        today_forced = int(today_info.get("forced", 0) or 0)
+        yt_attempted += today_attempted
+        summary["yt_updates_attempted"] += today_attempted
+        summary["yt_updates_succeeded"] += today_forced
+        summary["yt_updates_failed"] += int(today_info.get("yt_failed", 0) or 0)
+        summary["yt_updates_limited"] += int(today_info.get("yt_limited", 0) or 0)
+        summary["yt_rollbacks"] += int(today_info.get("yt_rollback", 0) or 0)
+        summary["yt_db_mismatches"] += int(today_info.get("yt_db_mismatch", 0) or 0)
+        summary["db_updates_failed"] += int(today_info.get("db_failed", 0) or 0)
 
         summary["videos_retimed"] += repacked
-        summary["today_forced"] += int(today_info.get("forced", 0) or 0)
+        summary["today_forced"] += today_forced
         summary["channels"][slug] = {
             "repacked": repacked,
             "today": today_info,
+            "yt_attempted": rep_attempted + today_attempted,
+            "yt_succeeded": (
+                int(rep.get("yt_succeeded", 0) or 0) + today_forced
+            ),
+            "yt_failed": (
+                int(rep.get("yt_failed", 0) or 0)
+                + int(today_info.get("yt_failed", 0) or 0)
+            ),
+            "yt_limited": (
+                int(rep.get("yt_skipped_limit", 0) or 0)
+                + int(today_info.get("yt_limited", 0) or 0)
+            ),
+            "yt_rollback": (
+                int(rep.get("yt_rollback", 0) or 0)
+                + int(today_info.get("yt_rollback", 0) or 0)
+            ),
+            "yt_db_mismatch": (
+                int(rep.get("yt_db_mismatch", 0) or 0)
+                + int(today_info.get("yt_db_mismatch", 0) or 0)
+            ),
+            "db_failed": (
+                int(rep.get("db_failed", 0) or 0)
+                + int(today_info.get("db_failed", 0) or 0)
+            ),
         }
         completed_channels += 1
         _report(
@@ -5795,6 +5879,9 @@ def authoritative_replan(
             current_channel_slug=None,
             completed_channels=completed_channels,
             total_channels=len(channels),
+            yt_updates_attempted=summary["yt_updates_attempted"],
+            yt_updates_failed=summary["yt_updates_failed"],
+            yt_updates_limited=summary["yt_updates_limited"],
             channel_summary={
                 "slug": slug,
                 **summary["channels"][slug],
@@ -5860,14 +5947,27 @@ def authoritative_replan(
     except Exception:
         pass
 
+    summary["partial"] = bool(
+        summary["yt_db_mismatches"] or summary["db_updates_failed"]
+    )
     _report(
         "finalizing",
         completed_channels=completed_channels,
         total_channels=len(channels),
+        yt_updates_attempted=summary["yt_updates_attempted"],
+        yt_updates_failed=summary["yt_updates_failed"],
+        yt_updates_limited=summary["yt_updates_limited"],
+        partial=summary["partial"],
     )
     logger.info(
-        "authoritative_replan: %d vídeos reprogramados, %d forzados hoy, %d slots",
+        "authoritative_replan: %d vídeos reprogramados, %d forzados hoy, %d slots; "
+        "YouTube updates intentados=%d ok=%d fallos=%d limitados=%d "
+        "rollbacks=%d mismatches=%d db_failed=%d (budget=%d)",
         summary["videos_retimed"], summary["today_forced"], summary["slots_cleared"],
+        summary["yt_updates_attempted"], summary["yt_updates_succeeded"],
+        summary["yt_updates_failed"], summary["yt_updates_limited"],
+        summary["yt_rollbacks"], summary["yt_db_mismatches"],
+        summary["db_updates_failed"], summary["yt_update_budget"],
     )
     return summary
 

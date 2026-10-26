@@ -825,17 +825,25 @@ export default function Scheduling() {
   const phaseStep = replanStepIndex(replanResult)
   const progressPct = Math.max(0, Math.min(100, Number(replanResult?.progress_pct ?? 0)))
   const replanChannels = replanResult?.channels || []
+  const replanPartial = Boolean(
+    replanSuccess &&
+    (replanResult?.partial ||
+      Number(finalSummary?.yt_db_mismatches || 0) > 0 ||
+      Number(finalSummary?.db_updates_failed || 0) > 0),
+  )
   const replanTitle = replanOrphaned
     ? 'Worker no disponible'
     : replanActive
       ? 'Reprogramación en curso'
       : replanInterrupted
         ? 'Reprogramación interrumpida'
-        : replanSuccess
-          ? 'Reprogramación aplicada'
-          : replanResult?.status === 'blocked'
-            ? 'Reprogramación no aplicada'
-            : 'Reprogramación fallida'
+        : replanPartial
+          ? 'Reprogramación aplicada con incidencias'
+          : replanSuccess
+            ? 'Reprogramación aplicada'
+            : replanResult?.status === 'blocked'
+              ? 'Reprogramación no aplicada'
+              : 'Reprogramación fallida'
 
   return (
     <div className="max-w-6xl mx-auto space-y-6 animate-fade-in">
@@ -935,7 +943,7 @@ export default function Scheduling() {
                 <div className="flex items-start gap-2">
                   {replanActive && !replanOrphaned ? (
                     <Loader2 size={20} className="animate-spin text-amber-400 shrink-0 mt-0.5" />
-                  ) : replanSuccess ? (
+                  ) : replanSuccess && !replanPartial ? (
                     <CheckCircle2 size={20} className="text-green-400 shrink-0 mt-0.5" />
                   ) : (
                     <AlertTriangle size={20} className="text-amber-400 shrink-0 mt-0.5" />
@@ -1015,6 +1023,14 @@ export default function Scheduling() {
                       <p className="text-gray-500">Canal actual</p>
                       <p className="text-white mt-0.5 truncate">{replanResult.current_channel_slug || 'Preparando siguiente fase'}</p>
                     </div>
+                    {replanResult.yt_updates_attempted != null && (
+                      <div className="col-span-2 bg-dark-700/40 rounded-lg p-2">
+                        <p className="text-gray-500">YouTube</p>
+                        <p className="text-white mt-0.5">
+                          {replanResult.yt_updates_attempted} intentos · {replanResult.yt_updates_failed ?? 0} fallos · {replanResult.yt_updates_limited ?? 0} omitidos por límite
+                        </p>
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -1024,9 +1040,27 @@ export default function Scheduling() {
                     <div><span className="text-neon-cyan">{finalSummary.videos_retimed ?? 0}</span> <span className="text-gray-400">vídeos reasignados</span></div>
                     <div><span className="text-green-400">{finalSummary.today_forced ?? 0}</span> <span className="text-gray-400">forzados hoy</span></div>
                     <div><span className="text-gray-300">{finalSummary.jobs_cancelled ?? 0}</span> <span className="text-gray-400">jobs cancelados</span></div>
+                    {finalSummary.yt_updates_attempted != null && (
+                      <div className="col-span-2 text-gray-500">
+                        YouTube: {finalSummary.yt_updates_succeeded ?? 0} actualizados · {finalSummary.yt_updates_failed ?? 0} fallos · {finalSummary.yt_updates_limited ?? 0} omitidos por límite
+                        {finalSummary.yt_update_budget != null ? ` (presupuesto ${finalSummary.yt_update_budget})` : ''}
+                      </div>
+                    )}
                     {replanResult.duration_s != null && (
                       <div className="col-span-2 text-gray-500">Duración: {formatElapsed(replanResult.duration_s)}</div>
                     )}
+                  </div>
+                )}
+
+                {replanPartial && (
+                  <div className="bg-amber-500/10 border border-amber-500/25 rounded-lg p-3 text-xs text-amber-200 space-y-1">
+                    <p>
+                      {finalSummary?.yt_db_mismatches ?? 0} discrepancia(s) DB/YouTube y{' '}
+                      {finalSummary?.db_updates_failed ?? 0} escritura(s) DB fallida(s).
+                    </p>
+                    <p className="text-amber-300/80">
+                      Se intentaron {finalSummary?.yt_rollbacks ?? 0} rollback(s) remotos. Revisa los vídeos afectados antes de la siguiente reprogramación.
+                    </p>
                   </div>
                 )}
 

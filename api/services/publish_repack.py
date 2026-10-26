@@ -170,8 +170,13 @@ def apply_publish_repack(
             targets posteriores al hueco más temprano calculado.
 
     Returns:
-        dict con {channel_id, slug, total, rescheduled, no_change, yt_failed,
+        dict con {channel_id, slug, total, rescheduled, no_change,
+        yt_attempted, yt_succeeded, yt_failed, yt_skipped_limit,
         quota_skipped, details: [...]}
+
+        ``yt_attempted`` cuenta VÍDEOS cuyo update remoto se intentó (no
+        reintentos HTTP internos). Los omitidos por ``max_yt_updates`` no tocan
+        la DB, de modo que YouTube y la DB siguen apuntando al mismo target.
     """
     from pipeline.publish_scheduler import repack_channel_publish_times
 
@@ -277,7 +282,9 @@ def apply_publish_repack(
         "channel_id": channel_id, "slug": slug,
         "total": len(changes),
         "rescheduled": 0, "no_change": sum(1 for c in changes if not c["changed"]),
-        "yt_failed": 0, "quota_skipped": 0,
+        "yt_attempted": 0, "yt_succeeded": 0, "yt_failed": 0,
+        "yt_skipped_limit": 0, "yt_rollback": 0, "yt_db_mismatch": 0,
+        "db_failed": 0, "quota_skipped": 0,
         "details": [dict(c) for c in changes],
     }
 
@@ -380,7 +387,7 @@ def apply_publish_repack(
         return result
 
     # ── 3. Aplicar ──
-    yt_used = 0
+    yt_attempted = 0
     uploader_cache = {}
 
     for item in changes:
@@ -393,7 +400,8 @@ def apply_publish_repack(
 
         # ── 3a. Reprogramar en YouTube (solo ya subidos) ──
         if item["requires_yt_update"]:
-            if max_yt_updates is not None and yt_used >= max_yt_updates:
+            if max_yt_updates is not None and yt_attempted >= max_yt_updates:
+                result["yt_skipped_limit"] += 1
                 logger.info(
                     "[%s] repack: límite de %d updates alcanzado — #%d pospuesto "
                     "(no se toca DB para no desincronizar con YouTube)",
@@ -405,6 +413,7 @@ def apply_publish_repack(
                 # siguiente pasada (el canal sigue en _channels_need_repack).
                 continue
             else:
+                yt_attempted += 1
                 try:
                     from pipeline.youtube_uploader import YouTubeUploader
                     up = uploader_cache.get(slug)
@@ -416,7 +425,7 @@ def apply_publish_repack(
                     res = up.set_publish_at(item["yt_video_id"], new_target)
                     if not res.get("updated"):
                         raise RuntimeError(f"respuesta inesperada: {res}")
-                    yt_used += 1
+                    result["yt_succeeded"] += 1
                 except Exception as exc:
                     logger.warning(
                         "[%s] ⚠️ YouTube rechazó reprogramar #%d (%s) — publicará solo a %s",
@@ -468,7 +477,34 @@ def apply_publish_repack(
                     pass
                 conn.commit()
         except Exception as exc:
+            result["db_failed"] += 1
             logger.error("[%s] repack: DB update failed #%d: %s", slug, video_id, exc)
+            # YouTube already moved but the DB still holds the old target.
+            # Best effort: put YouTube back where the DB says it is. If that
+            # rollback also fails, record the mismatch explicitly for the next
+            # force_yt pass / operator review.
+            if (
+                item["requires_yt_update"]
+                and item.get("changed")
+                and old_target
+                and old_target != new_target
+            ):
+                try:
+                    up.set_publish_at(item["yt_video_id"], old_target)
+                    result["yt_rollback"] += 1
+                    logger.warning(
+                        "[%s] repack: rollback de YouTube OK para #%d → %s "
+                        "(la DB conserva el target anterior)",
+                        slug, video_id, old_target[:19],
+                    )
+                except Exception as rollback_exc:
+                    result["yt_db_mismatch"] += 1
+                    logger.critical(
+                        "[%s] repack: MISMATCH DB/YouTube en #%d (yt=%s): "
+                        "YouTube=%s, DB=%s, rollback falló: %s",
+                        slug, video_id, item["yt_video_id"],
+                        new_target[:19], old_target[:19], rollback_exc,
+                    )
             continue
 
         # ── 3c. Log ──
@@ -494,6 +530,7 @@ def apply_publish_repack(
             item["yt_video_id"] or "-",
         )
 
+    result["yt_attempted"] = yt_attempted
     return result
 
 
