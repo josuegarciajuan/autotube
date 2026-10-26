@@ -237,14 +237,28 @@ def _resolve_deficit_alert(db, slug: str, channel_id: int | None) -> int:
 _CATCHUP_STAGGER_MIN = 10
 
 
-def remediate_today_public_deficit(db, slug: str, channel_id: int, tz,
-                                   cap: int) -> dict:
+def remediate_today_public_deficit(
+    db,
+    slug: str,
+    channel_id: int,
+    tz,
+    cap: int,
+    max_yt_updates: int | None = None,
+) -> dict:
     """Fuerza la publicación de warming para cubrir el déficit de HOY.
 
-    Returns: {published, committed, need, forced, reason}.
+    ``max_yt_updates`` acota las llamadas remotas de esta remediación. Nunca
+    actualiza la DB si YouTube rechazó el cambio.
+
+    Returns: {published, committed, need, forced, yt_attempted, yt_failed,
+    yt_limited, reason}.
     """
     from api.time_utils import parse_utc
-    out = {"published": 0, "committed": 0, "need": 0, "forced": 0, "reason": ""}
+    out = {
+        "published": 0, "committed": 0, "need": 0, "forced": 0,
+        "yt_attempted": 0, "yt_failed": 0, "yt_limited": 0,
+        "yt_rollback": 0, "yt_db_mismatch": 0, "db_failed": 0, "reason": "",
+    }
     if not cap or cap <= 0:
         return out
     now = datetime.now(timezone.utc)
@@ -280,7 +294,10 @@ def remediate_today_public_deficit(db, slug: str, channel_id: int, tz,
         if target is not None and target.astimezone(tz).date() == today_local:
             out["committed"] += 1
             continue
-        candidates.append((int(r["id"]), str(r["yt_video_id"]), status))
+        candidates.append((
+            int(r["id"]), str(r["yt_video_id"]), status,
+            str(r["target_public_at"]) if r["target_public_at"] else None,
+        ))
 
     out["need"] = max(0, int(cap) - (out["published"] + out["committed"]))
     if out["need"] <= 0:
@@ -288,6 +305,11 @@ def remediate_today_public_deficit(db, slug: str, channel_id: int, tz,
         return out
     if not candidates:
         out["reason"] = "déficit sin material warming"
+        return out
+
+    if max_yt_updates is not None and max_yt_updates <= 0:
+        out["yt_limited"] = min(out["need"], len(candidates))
+        out["reason"] = "presupuesto YouTube agotado"
         return out
 
     # Autenticación perezosa (una sola vez por canal)
@@ -302,13 +324,30 @@ def remediate_today_public_deficit(db, slug: str, channel_id: int, tz,
         return out
 
     base = now + timedelta(minutes=5 + (channel_id % 4) * 3)
-    for idx, (vid, yt_id, _status) in enumerate(candidates[: out["need"]]):
+    wanted = candidates[: out["need"]]
+    for idx, (vid, yt_id, _status, old_target) in enumerate(wanted):
+        if max_yt_updates is not None and out["yt_attempted"] >= max_yt_updates:
+            out["yt_limited"] = max(0, len(wanted) - out["yt_attempted"])
+            break
+        out["yt_attempted"] += 1
         target_dt = base + timedelta(minutes=idx * _CATCHUP_STAGGER_MIN)
         target_iso = target_dt.astimezone(timezone.utc).isoformat()
         try:
             res = uploader.set_publish_at(yt_id, target_iso)
             if not res.get("updated"):
                 raise RuntimeError(f"respuesta inesperada: {res}")
+        except Exception as exc:
+            out["yt_failed"] += 1
+            logger.warning(
+                "[%s] Public catch-up: no se pudo adelantar #%d (%s): %s",
+                slug, vid, yt_id, exc,
+            )
+            if exc.__class__.__name__ == "QuotaExhaustedError":
+                out["reason"] = "cuota de YouTube agotada durante la remediación"
+                return out
+            continue
+
+        try:
             # Sincronizar TODAS las representaciones del compromiso (fix oct
             # 2026): el repack escribe videos.target_public_at,
             # planned_slots.target_public_at y las acciones `go_public`; si el
@@ -336,17 +375,48 @@ def remediate_today_public_deficit(db, slug: str, channel_id: int, tz,
                 except Exception:
                     pass
                 conn.commit()
-            out["forced"] += 1
-            logger.info(
-                "[%s] Public catch-up: #%d (%s) publishAt → %s (déficit hoy)",
-                slug, vid, yt_id, target_iso[:16],
-            )
         except Exception as exc:
-            logger.warning(
-                "[%s] Public catch-up: no se pudo adelantar #%d (%s): %s",
-                slug, vid, yt_id, exc,
+            out["db_failed"] += 1
+            logger.error(
+                "[%s] Public catch-up: DB update failed #%d después de "
+                "actualizar YouTube: %s", slug, vid, exc,
             )
-    out["reason"] = f"déficit {out['need']} → forzados {out['forced']}"
+            if old_target and old_target != target_iso:
+                try:
+                    uploader.set_publish_at(yt_id, old_target)
+                    out["yt_rollback"] += 1
+                    logger.warning(
+                        "[%s] Public catch-up: rollback de YouTube OK #%d → %s",
+                        slug, vid, old_target[:19],
+                    )
+                except Exception as rollback_exc:
+                    out["yt_db_mismatch"] += 1
+                    logger.critical(
+                        "[%s] Public catch-up: MISMATCH DB/YouTube #%d (%s): "
+                        "YouTube=%s, DB=%s, rollback falló: %s",
+                        slug, vid, yt_id, target_iso[:19], old_target[:19],
+                        rollback_exc,
+                    )
+            else:
+                out["yt_db_mismatch"] += 1
+                logger.critical(
+                    "[%s] Public catch-up: MISMATCH DB/YouTube #%d (%s): "
+                    "sin target anterior para rollback (YouTube=%s)",
+                    slug, vid, yt_id, target_iso[:19],
+                )
+            continue
+
+        out["forced"] += 1
+        logger.info(
+            "[%s] Public catch-up: #%d (%s) publishAt → %s (déficit hoy)",
+            slug, vid, yt_id, target_iso[:16],
+        )
+    out["reason"] = (
+        f"déficit {out['need']} → forzados {out['forced']}"
+        f" (yt {out['yt_attempted']} intentos, {out['yt_failed']} fallos,"
+        f" {out['yt_limited']} limitados, {out['db_failed']} db_failed,"
+        f" {out['yt_db_mismatch']} mismatches)"
+    )
     return out
 
 

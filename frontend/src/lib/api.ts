@@ -48,6 +48,15 @@ export interface AuthoritativeReplanState {
     today?: { forced?: number; need?: number; reason?: string };
   }>;
   progress_pct?: number;
+  yt_updates_attempted?: number;
+  yt_updates_succeeded?: number;
+  yt_updates_failed?: number;
+  yt_updates_limited?: number;
+  yt_rollbacks?: number;
+  yt_db_mismatches?: number;
+  db_updates_failed?: number;
+  yt_update_budget?: number;
+  partial?: boolean;
   attempt?: number;
   recovery_attempts?: number;
   recovered_from?: string | null;

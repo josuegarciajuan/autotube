@@ -112,6 +112,12 @@ def _fresh_state() -> dict:
         "total_channels": 0,
         "channels": [],
         "progress_pct": 0,
+        "yt_updates_attempted": 0,
+        "yt_updates_succeeded": 0,
+        "yt_updates_failed": 0,
+        "yt_updates_limited": 0,
+        "yt_update_budget": None,
+        "partial": False,
         "summary": None,
         "error": None,
         # Owner/lease: pid_start_ticks protects against PID reuse across boots.

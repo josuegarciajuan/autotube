@@ -21,6 +21,7 @@ import zlib
 from pathlib import Path
 from typing import Any, Optional
 
+import httplib2
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_httplib2 import AuthorizedHttp
@@ -66,6 +67,15 @@ THUMBNAIL_MATCH_THRESHOLD = float(os.getenv("THUMBNAIL_MATCH_THRESHOLD", "8"))
 # blindaje ciego): solo se omite la repetición redundante.
 PUBLISH_AT_REPEAT_COOLDOWN_MIN = int(os.getenv("PUBLISH_AT_REPEAT_COOLDOWN_MIN", "60"))
 PUBLISH_AT_REPEAT_TOLERANCE_MIN = 5  # mismo target si dista < 5 min
+
+# Metadata/status updates (videos.update) are idempotent, small requests. Give
+# them a short socket timeout and a bounded retry budget, independently from
+# resumable uploads (which legitimately need minutes).
+STATUS_UPDATE_HTTP_TIMEOUT_S = int(os.getenv("YT_STATUS_UPDATE_HTTP_TIMEOUT_S", "20"))
+STATUS_UPDATE_RETRIES = max(0, int(os.getenv("YT_STATUS_UPDATE_RETRIES", "1")))
+STATUS_UPDATE_RETRY_BASE_DELAY_S = max(
+    0.0, float(os.getenv("YT_STATUS_UPDATE_RETRY_BASE_DELAY_S", "1.0"))
+)
 
 
 class QuotaExhaustedError(RuntimeError):
@@ -174,6 +184,7 @@ class YouTubeUploader:
         self._token_path = TOKENS_DIR / f"{account_name}.pickle"
         self._credentials: Credentials | None = None
         self._service: Any = None
+        self._update_http: Any = None
         self._config: Any = None
 
     # ── Client secret per channel ─────────────────────────────
@@ -794,6 +805,105 @@ class YouTubeUploader:
             f.flush()
             os.fsync(f.fileno())  # ensure full write to disk before releasing lock
         logger.info("Token saved to %s", self._token_path)
+
+    def _get_update_http(self) -> Any:
+        """Authorized short-timeout transport for videos.update calls.
+
+        Uploads keep their long timeout; only small idempotent metadata writes
+        use this transport so a hung socket cannot block a replan indefinitely.
+        """
+        if getattr(self, "_update_http", None) is not None:
+            return self._update_http
+        credentials = getattr(self, "_credentials", None)
+        if credentials is None:
+            # Test doubles may bypass authenticate(); let the service default
+            # transport handle the request in that case.
+            return None
+        http = httplib2.Http(timeout=STATUS_UPDATE_HTTP_TIMEOUT_S)
+        if self._should_use_proxy():
+            self._configure_proxy(http)
+        self._update_http = AuthorizedHttp(credentials, http=http)
+        return self._update_http
+
+    def _is_retryable_http_error(self, exc: HttpError) -> bool:
+        """Only transient status-update failures are retried."""
+        detail = self._http_error_detail(exc)
+        try:
+            status = int(detail.get("status") or 0)
+        except (TypeError, ValueError):
+            status = 0
+        reason = str(detail.get("reason") or "")
+        return status in (408, 429, 500, 502, 503, 504) or reason in (
+            "rateLimitExceeded",
+            "userRateLimitExceeded",
+            "backendError",
+            "internalError",
+        )
+
+    def _execute_status_update(
+        self,
+        request_factory,
+        *,
+        video_id: str,
+        caller: str = "set_publish_at",
+    ) -> int:
+        """Execute an idempotent videos.update with timeout and bounded retries.
+
+        Returns the number of attempts. ``videos.update`` is safe to retry for
+        the same payload, including after a timeout where the response was lost.
+        Permanent errors (quota, auth, invalid) are never retried here.
+        """
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                request = request_factory()
+                http = self._get_update_http()
+                if http is not None:
+                    request.execute(http=http)
+                else:
+                    request.execute()
+                return attempts
+            except HttpError as exc:
+                self._raise_if_quota_exceeded(
+                    exc,
+                    caller,
+                    operation="videos.update",
+                    units=50,
+                    yt_id=video_id,
+                )
+                if not self._is_retryable_http_error(exc) or attempts > STATUS_UPDATE_RETRIES:
+                    raise
+                delay = STATUS_UPDATE_RETRY_BASE_DELAY_S * (2 ** (attempts - 1))
+                logger.warning(
+                    "[%s] videos.update transitorio para %s (intento %d/%d); "
+                    "reintento en %.1fs: %s",
+                    self.channel_slug or self.account_name,
+                    video_id,
+                    attempts,
+                    STATUS_UPDATE_RETRIES + 1,
+                    delay,
+                    self._http_error_detail(exc),
+                )
+                time.sleep(delay)
+            except (httplib2.HttpLib2Error, TimeoutError, ConnectionError, OSError) as exc:
+                self._record_api_failure(
+                    "videos.update", 50, caller, exc, yt_id=video_id,
+                )
+                if attempts > STATUS_UPDATE_RETRIES:
+                    raise
+                delay = STATUS_UPDATE_RETRY_BASE_DELAY_S * (2 ** (attempts - 1))
+                logger.warning(
+                    "[%s] error de red en videos.update para %s "
+                    "(intento %d/%d); reintento en %.1fs: %s",
+                    self.channel_slug or self.account_name,
+                    video_id,
+                    attempts,
+                    STATUS_UPDATE_RETRIES + 1,
+                    delay,
+                    exc,
+                )
+                time.sleep(delay)
 
     def _get_service(self) -> Any:
         """Build authenticated YouTube API service (with optional proxy)."""
@@ -1508,6 +1618,7 @@ class YouTubeUploader:
             return {
                 "updated": True, "yt_video_id": video_id,
                 "publish_at": publish_at, "skipped_recent": True,
+                "attempts": 0,
             }
 
         service = self._get_service()
@@ -1520,17 +1631,11 @@ class YouTubeUploader:
             },
         }
 
-        try:
-            service.videos().update(
-                part="status",
-                body=body,
-            ).execute()
-        except HttpError as exc:
-            self._raise_if_quota_exceeded(
-                exc, "set_publish_at",
-                operation="videos.update", units=50, yt_id=video_id,
-            )
-            raise
+        attempts = self._execute_status_update(
+            lambda: service.videos().update(part="status", body=body),
+            video_id=video_id,
+            caller="set_publish_at",
+        )
 
         # ── Track quota (diagnostic) ──────────────────────────────
         track_quota(self.quota_slug, "videos.update", 50,
@@ -1538,10 +1643,15 @@ class YouTubeUploader:
         self._stamp_publish_at(video_id, publish_at)
 
         logger.info(
-            "[%s] publishAt reprogramado para video %s → %s",
-            self.channel_slug, video_id, publish_at,
+            "[%s] publishAt reprogramado para video %s → %s (attempts=%d)",
+            self.channel_slug, video_id, publish_at, attempts,
         )
-        return {"updated": True, "yt_video_id": video_id, "publish_at": publish_at}
+        return {
+            "updated": True,
+            "yt_video_id": video_id,
+            "publish_at": publish_at,
+            "attempts": attempts,
+        }
 
     @staticmethod
     def _targets_within(a, b, minutes: int = PUBLISH_AT_REPEAT_TOLERANCE_MIN) -> bool:
