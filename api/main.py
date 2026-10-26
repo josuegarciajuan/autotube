@@ -265,6 +265,20 @@ async def lifespan(app: FastAPI):
     # el hilo recolector muere con el proceso, nunca puede seguir vivo.
     get_stats_coordinator().recover_on_startup()
 
+    # The authoritative replan also runs in-process (sharing _REPLAN_LOCK).
+    # A persisted queued/running state cannot outlive the API process, so mark
+    # it interrupted instead of leaving the panel blocked by a ghost run.
+    try:
+        from api.services.authoritative_replan_service import (
+            get_authoritative_replan_coordinator,
+        )
+        get_authoritative_replan_coordinator().recover_on_startup()
+    except Exception as _replan_recover_exc:
+        logging.getLogger("autotube.startup").warning(
+            "Authoritative replan state recovery skipped: %s",
+            _replan_recover_exc,
+        )
+
     # Auto-sync channel configs from Python modules → DB
     try:
         from config.config_bridge import sync_all_configs_to_db

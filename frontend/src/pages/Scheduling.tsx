@@ -633,7 +633,9 @@ export default function Scheduling() {
       const result = await api.authoritativeFullReplan()
       setReplanResult(result)
       setReplanState('result')
-      if (result?.ok) {
+      // The 202 response only confirms that the persistent run was queued.
+      // Planning queries must not be refreshed as if the work had finished.
+      if (result?.ok && !result?.queued && result?.status === 'success') {
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: ['today-slots'] }),
           queryClient.invalidateQueries({ queryKey: ['shorts-slots-today'] }),
@@ -652,6 +654,12 @@ export default function Scheduling() {
       setReplanState('error')
     }
   }, [queryClient])
+
+  const replanQueued = Boolean(
+    replanResult?.queued ||
+    replanResult?.status === 'queued' ||
+    replanResult?.status === 'running'
+  )
 
   return (
     <div className="max-w-6xl mx-auto space-y-6 animate-fade-in">
@@ -693,17 +701,31 @@ export default function Scheduling() {
               /* ── Result state ── */
               <div className="space-y-4">
                 <div className="flex items-center gap-2">
-                  {replanResult.ok ? (
+                  {replanQueued ? (
+                    <Loader2 size={20} className="animate-spin text-amber-400" />
+                  ) : replanResult.ok ? (
                     <CheckCircle2 size={20} className="text-green-400" />
                   ) : (
                     <AlertTriangle size={20} className="text-amber-400" />
                   )}
                     <h3 id="replan-dialog-title" className="text-white font-semibold text-base">
-                    {replanResult.ok ? 'Reprogramación aplicada' : 'Reprogramación no aplicada'}
+                    {replanQueued
+                      ? 'Reprogramación en curso'
+                      : replanResult.ok ? 'Reprogramación aplicada' : 'Reprogramación no aplicada'}
                   </h3>
                 </div>
 
-                {replanResult.ok && (
+                {replanQueued && (
+                  <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-xs text-amber-200 space-y-2">
+                    <p>La operación se está ejecutando en segundo plano; ya no depende de esta ventana.</p>
+                    <p className="text-amber-300/80">Puedes cerrar el diálogo. La planificación se actualizará cuando termine (puede tardar varios minutos).</p>
+                    {replanResult.run_id && (
+                      <p className="font-mono text-[11px] text-gray-400">run: {replanResult.run_id}</p>
+                    )}
+                  </div>
+                )}
+
+                {!replanQueued && replanResult.ok && (
                   <div className="bg-dark-700/50 rounded-lg p-3 space-y-1 text-xs">
                     <p className="text-gray-400">
                       <span className="text-neon-cyan">{replanResult.slots_cleared}</span> slots borrados y reprogramados
