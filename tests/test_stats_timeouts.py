@@ -27,11 +27,6 @@ class _FakeCreds:
     expired = False
     valid = True
 
-    def authorize(self, http):
-        assert http.timeout == ys.GOOGLE_HTTP_TIMEOUT_S, \
-            f"build debe usar transporte con timeout (vino {http.timeout}s)"
-        return http
-
 
 def test_build_usa_http_acotado(tmp_path, monkeypatch):
     f = ys.YouTubeStatsFetcher("canal3")
@@ -40,6 +35,14 @@ def test_build_usa_http_acotado(tmp_path, monkeypatch):
     f._token_path = token_file
 
     built = {}
+    seen_timeouts = []
+
+    class FakeAuthorizedHttp:
+        def __init__(self, creds, http=None):
+            # google-auth 2.54: el wrapper canónico es AuthorizedHttp(creds, http)
+            assert http is not None, "debe recibir transporte httplib2"
+            seen_timeouts.append(http.timeout)
+            self.timeout = http.timeout
 
     def fake_build(svc, ver, http=None, credentials=None, cache_discovery=False):
         # `http=` acotado es excluyente con `credentials=` (socket infinito)
@@ -47,10 +50,31 @@ def test_build_usa_http_acotado(tmp_path, monkeypatch):
         built[svc] = http
         return object()
 
+    monkeypatch.setattr(ys, "AuthorizedHttp", FakeAuthorizedHttp)
     monkeypatch.setattr(ys, "build", fake_build)
     monkeypatch.setattr(ys.pickle, "load", lambda fp: _FakeCreds())
     assert f.authenticate()
     assert "youtube" in built and "youtubeAnalytics" in built
+    assert seen_timeouts and all(t == ys.GOOGLE_HTTP_TIMEOUT_S for t in seen_timeouts)
+
+
+def test_timeout_session_inyecta_timeout(monkeypatch):
+    """El refresh OAuth (Request(session=...)) queda acotado por la sesión."""
+    import requests
+    seen = {}
+
+    def fake_request(self, method, url, **kw):
+        seen.update(kw)
+        return "ok"
+
+    monkeypatch.setattr(requests.Session, "request", fake_request)
+    s = ys._TimeoutSession()
+    assert s.request("GET", "http://example.invalid") == "ok"
+    assert seen.get("timeout") == ys.GOOGLE_HTTP_TIMEOUT_S
+    # un timeout explícito del llamador manda
+    seen.clear()
+    s.request("GET", "http://example.invalid", timeout=7)
+    assert seen.get("timeout") == 7
 
 
 # ── Deadline cooperativo en batches ──────────────────────────
