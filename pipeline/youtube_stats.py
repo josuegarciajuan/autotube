@@ -5,11 +5,14 @@ optionally the YouTube Analytics API for advanced metrics.
 """
 
 import logging
+import os
 import pickle
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Any
 
+import httplib2
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -20,6 +23,33 @@ from config.settings import TOKENS_DIR
 from api.services.quota_tracker import track_quota
 
 logger = logging.getLogger(__name__)
+
+
+# ── Timeouts de red (oct 2026, fase anti-cuelgues) ──────────────
+# Antes: build() sin `http` → httplib2.Http() SIN timeout → cualquier socket
+# muerto colgaba la recolección indefinidamente (un run deep tarda 30-40 min;
+# un cuelgue real era indistinguible de un run lento). Ahora TODO el tráfico
+# Google (Data API, Analytics API, refresh OAuth) usa un transporte acotado y
+# `.execute(num_retries=...)` da un reintento único con backoff corto para
+# 5xx/429 transitorios. El corte por deadline de canal es ADEMÁS cooperativo
+# (entre llamadas), ver collect_and_store(deadline=...).
+
+def _env_timeout(name: str, default: int) -> int:
+    """Entero de env con suelo de 5 s (evita valores absurdos)."""
+    try:
+        return max(5, int(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+GOOGLE_HTTP_TIMEOUT_S = _env_timeout("GOOGLE_HTTP_TIMEOUT_S", 30)
+GOOGLE_EXECUTE_RETRIES = 1  # 1 reintento (2 intentos), backoff ~1-2 s
+
+
+def _bounded_http(creds):
+    """Transporte autenticado con timeout de socket acotado."""
+    http = httplib2.Http(timeout=GOOGLE_HTTP_TIMEOUT_S)
+    return creds.authorize(http)
 
 
 def _set_quota_exhausted_global(channel_slug: str = "stats_collector"):
@@ -68,7 +98,7 @@ class YouTubeStatsFetcher:
 
         if creds.expired and creds.refresh_token:
             try:
-                creds.refresh(Request())
+                creds.refresh(Request(timeout=GOOGLE_HTTP_TIMEOUT_S))
                 with open(self._token_path, "wb") as f:
                     pickle.dump(creds, f)
             except Exception as exc:
@@ -78,11 +108,16 @@ class YouTubeStatsFetcher:
         if not creds.valid:
             return False
 
-        self._service = build("youtube", "v3", credentials=creds, cache_discovery=False)
+        # Transporte acotado (timeout por petición). Pasar `http=` es excluyente
+        # con `credentials=`; AuthorizedHttp refresca tokens 401 en vuelo.
+        self._service = build(
+            "youtube", "v3", http=_bounded_http(creds), cache_discovery=False
+        )
 
         try:
             self._analytics_service = build(
-                "youtubeAnalytics", "v2", credentials=creds, cache_discovery=False
+                "youtubeAnalytics", "v2",
+                http=_bounded_http(creds), cache_discovery=False
             )
         except Exception:
             self._analytics_service = None
@@ -107,7 +142,7 @@ class YouTubeStatsFetcher:
             resp = (
                 self._service.videos()
                 .list(part="statistics,snippet,contentDetails,status", id=yt_video_id)
-                .execute()
+                .execute(num_retries=GOOGLE_EXECUTE_RETRIES)
             )
 
             # ── Track quota (diagnostic) ──────────────────────────
@@ -145,11 +180,14 @@ class YouTubeStatsFetcher:
 
     _DATA_API_BATCH_SIZE = 50  # YouTube's max IDs per videos().list() call
 
-    def get_video_stats_batch(self, yt_video_ids: list[str]) -> dict[str, dict]:
+    def get_video_stats_batch(self, yt_video_ids: list[str], deadline: float = None) -> dict[str, dict]:
         """Get basic stats for multiple videos in a single API call.
 
         Args:
             yt_video_ids: List of YouTube video IDs (max 50 per call).
+            deadline: epoch opcional — si expira ENTRE lotes, aborta ordenado
+                marcando los IDs restantes como is_mock (no disponible, nunca
+                métrica inventada) y devuelve además `_deadline_exceeded`.
 
         Returns:
             Dict mapping yt_video_id → {viewCount, likeCount, commentCount, title,
@@ -168,6 +206,24 @@ class YouTubeStatsFetcher:
         # Split into batches of 50 (API limit)
         result: dict[str, dict] = {}
         for i in range(0, len(yt_video_ids), self._DATA_API_BATCH_SIZE):
+            # Deadline cooperativo: se comprueba ENTRE lotes (operación segura)
+            if deadline is not None and time.time() > deadline:
+                logger.warning(
+                    "[%s] Data API batch: deadline superado antes del lote %d/%d "
+                    "— %d IDs restantes marcados no disponibles",
+                    self.slug,
+                    i // self._DATA_API_BATCH_SIZE + 1,
+                    (len(yt_video_ids) + self._DATA_API_BATCH_SIZE - 1)
+                    // self._DATA_API_BATCH_SIZE,
+                    len(yt_video_ids) - i,
+                )
+                for vid in yt_video_ids[i:]:
+                    if vid not in result:
+                        mock = self._mock_stats(vid)
+                        mock["is_mock"] = True
+                        result[vid] = mock
+                result["_deadline_exceeded"] = True
+                break
             batch = yt_video_ids[i : i + self._DATA_API_BATCH_SIZE]
             try:
                 resp = (
@@ -177,7 +233,7 @@ class YouTubeStatsFetcher:
                         id=",".join(batch),
                         maxResults=50,
                     )
-                    .execute()
+                    .execute(num_retries=GOOGLE_EXECUTE_RETRIES)
                 )
 
                 # ── Track quota (diagnostic) — 1 unit per batch of 50 IDs ──
@@ -245,7 +301,7 @@ class YouTubeStatsFetcher:
                     metrics="estimatedMinutesWatched,averageViewDuration",
                     filters=f"video=={yt_video_id}",
                 )
-                .execute()
+                .execute(num_retries=GOOGLE_EXECUTE_RETRIES)
             )
             rows = resp.get("rows", [])
             if rows:
@@ -307,7 +363,7 @@ class YouTubeStatsFetcher:
                     metrics="averageViewDuration,averageViewPercentage",
                     filters=f"video=={yt_video_id}",
                 )
-                .execute()
+                .execute(num_retries=GOOGLE_EXECUTE_RETRIES)
             )
             rows = resp.get("rows", [])
             if rows and len(rows[0]) >= 2:
@@ -322,12 +378,16 @@ class YouTubeStatsFetcher:
 
         return {}
 
-    def get_all_videos_analytics(self, video_ids: list[str], days: int = 365) -> dict[str, dict]:
+    def get_all_videos_analytics(self, video_ids: list[str], days: int = 365, deadline: float = None) -> dict[str, dict]:
         """Get analytics for multiple videos in a single API call.
 
         Uses dimensions=video to fetch estimatedMinutesWatched,
         averageViewDuration, subscribersGained, averageViewPercentage, views,
         likes and comments for all videos at once.
+
+        Args:
+            deadline: epoch opcional — si expira ENTRE lotes, aborta ordenado
+                devolviendo lo acumulado (parcial explícito, sin fabricar datos).
 
         v51: se eliminaron `impressions`/`impressionsClickThroughRate` porque NO
         son métricas válidas de la Analytics API (devolvían 400 y rompían la
@@ -361,6 +421,14 @@ class YouTubeStatsFetcher:
         result = {}
 
         for i in range(0, len(video_ids), MAX_IDS_PER_CALL):
+            # Deadline cooperativo: se comprueba ENTRE lotes (operación segura)
+            if deadline is not None and time.time() > deadline:
+                logger.warning(
+                    "[%s] bulk analytics: deadline superado antes del lote %d — "
+                    "devuelto parcial con %d vídeos",
+                    self.slug, i // MAX_IDS_PER_CALL + 1, len(result),
+                )
+                break
             batch = video_ids[i : i + MAX_IDS_PER_CALL]
             try:
                 start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -383,7 +451,7 @@ class YouTubeStatsFetcher:
                         filters=f"video=={','.join(batch)}",
                         maxResults=200,
                     )
-                    .execute()
+                    .execute(num_retries=GOOGLE_EXECUTE_RETRIES)
                 )
                 rows = resp.get("rows", [])
                 for row in rows:
@@ -450,7 +518,7 @@ class YouTubeStatsFetcher:
                     dimensions="day",
                     maxResults=min(days, 200),
                 )
-                .execute()
+                .execute(num_retries=GOOGLE_EXECUTE_RETRIES)
             )
             rows = resp.get("rows", [])
             result = []
@@ -504,7 +572,7 @@ class YouTubeStatsFetcher:
                     dimensions="hour,creatorContentType",
                     sort="hour,creatorContentType",
                 )
-                .execute()
+                .execute(num_retries=GOOGLE_EXECUTE_RETRIES)
             )
             rows = resp.get("rows", [])
             if rows:
@@ -546,7 +614,7 @@ class YouTubeStatsFetcher:
                     dimensions="hour",
                     sort="hour",
                 )
-                .execute()
+                .execute(num_retries=GOOGLE_EXECUTE_RETRIES)
             )
             rows = resp.get("rows", [])
             if rows:
@@ -611,7 +679,7 @@ class YouTubeStatsFetcher:
                     maxResults=50,
                     sort="-views",
                 )
-                .execute()
+                .execute(num_retries=GOOGLE_EXECUTE_RETRIES)
             )
             rows = resp.get("rows", [])
             if not rows:
@@ -666,7 +734,7 @@ class YouTubeStatsFetcher:
             resp = (
                 self._service.channels()
                 .list(part="statistics,snippet", mine=True)
-                .execute()
+                .execute(num_retries=GOOGLE_EXECUTE_RETRIES)
             )
 
             # ── Track quota (diagnostic) ──────────────────────────
@@ -712,7 +780,7 @@ class YouTubeStatsFetcher:
                     endDate=end_date,
                     metrics="estimatedMinutesWatched",
                 )
-                .execute()
+                .execute(num_retries=GOOGLE_EXECUTE_RETRIES)
             )
             rows = resp.get("rows", [])
             if rows and rows[0]:
@@ -744,7 +812,7 @@ class YouTubeStatsFetcher:
             resp = (
                 self._service.channels()
                 .list(part="contentDetails", mine=True)
-                .execute()
+                .execute(num_retries=GOOGLE_EXECUTE_RETRIES)
             )
             items = resp.get("items", [])
             if items:
@@ -785,7 +853,7 @@ class YouTubeStatsFetcher:
                         maxResults=min(50, max_results - len(videos)),
                         pageToken=page_token,
                     )
-                    .execute()
+                    .execute(num_retries=GOOGLE_EXECUTE_RETRIES)
                 )
             except HttpError as exc:
                 logger.error("playlistItems API failed for %s: %s", self.slug, exc)
@@ -879,7 +947,7 @@ class YouTubeStatsFetcher:
                         filters=f"video=={','.join(batch)}",
                         maxResults=2000,
                     )
-                    .execute()
+                    .execute(num_retries=GOOGLE_EXECUTE_RETRIES)
                 )
                 rows = resp.get("rows", [])
                 for row in rows:
@@ -940,7 +1008,7 @@ class YouTubeStatsFetcher:
                         filters=f"video=={','.join(batch)}",
                         maxResults=200,
                     )
-                    .execute()
+                    .execute(num_retries=GOOGLE_EXECUTE_RETRIES)
                 )
                 rows = resp.get("rows", [])
                 for row in rows:
@@ -994,7 +1062,7 @@ class YouTubeStatsFetcher:
                     filters=f"video=={video_id}",
                     maxResults=200,
                 )
-                .execute()
+                .execute(num_retries=GOOGLE_EXECUTE_RETRIES)
             )
 
         try:
@@ -1056,7 +1124,7 @@ class YouTubeStatsFetcher:
                     dimensions="ageGroup,gender",
                     maxResults=200,
                 )
-                .execute()
+                .execute(num_retries=GOOGLE_EXECUTE_RETRIES)
             )
             rows = resp.get("rows", [])
             result = []
@@ -1160,6 +1228,8 @@ class YouTubeStatsFetcher:
         deep: bool = False,
         use_data_api: bool = True,
         scrape_fallback: bool = True,
+        deadline: float = None,
+        progress=None,
     ) -> dict:
         """Collect stats for all uploaded videos and the channel, store in DB.
 
@@ -1168,6 +1238,16 @@ class YouTubeStatsFetcher:
           - YouTube Analytics API (watch time / retention) — separate quota.
           - Public scraping via yt-dlp (views / likes / comments / subs) — zero
             Data API quota, works even without an OAuth token.
+
+        Args:
+            deadline: epoch opcional (deadline de CANAL, fijado por el
+                recolector). Cooperativo: se comprueba ENTRE etapas/lotes
+                (operaciones seguras) y aborta ordenadamente conservando todo
+                lo ya almacenado; marca ``result['deadline_exceeded']=True``.
+                Nunca interrumpe una llamada HTTP en curso — eso lo acota el
+                transporte (GOOGLE_HTTP_TIMEOUT_S / socket_timeout de yt-dlp).
+            progress: callback opcional ``progress(stage: str)`` para que el
+                coordinador publique el heartbeat por etapa.
 
         Returns summary dict including analytics_updated count and
         quota_exhausted flag for UI feedback.
@@ -1246,10 +1326,36 @@ class YouTubeStatsFetcher:
         # quota-unavailable so every fallback path (analytics + scrape) runs.
         quota_exhausted = not use_data_api
 
+        # ── Deadline cooperativo de canal (oct 2026) ──
+        # Comprobado ENTRE etapas; aborta ordenado conservando lo recolectado.
+        deadline_exceeded = False
+
+        def _expired() -> bool:
+            return bool(deadline and time.time() > deadline)
+
+        def _stage(stage: str) -> bool:
+            """Reporta progreso y devuelve False si el deadline ya expiró."""
+            nonlocal deadline_exceeded
+            if progress:
+                try:
+                    progress(stage)
+                except Exception:  # noqa: BLE001
+                    pass
+            if _expired():
+                if not deadline_exceeded:
+                    logger.warning(
+                        "[%s] deadline de canal superado antes de '%s' — abort "
+                        "ordenado (se conserva lo recolectado)", self.slug, stage,
+                    )
+                deadline_exceeded = True
+                result["deadline_exceeded"] = True
+                return False
+            return True
+
         # ── Channel stats (Data API → scrape fallback) ──
         channel = db.get_channel_by_slug(self.slug)
         channel_stats = None
-        if channel:
+        if channel and _stage("channel_stats"):
             if use_data_api:
                 channel_stats = self.get_channel_stats()
             # Watch time acumulado de 12 meses (ventana móvil YPP de 4.000h),
@@ -1331,11 +1437,14 @@ class YouTubeStatsFetcher:
 
         # ── Video stats — BATCH via Data API (50 IDs per call) ──
         inserted_video_ids: set[int] = set()  # track which videos got real Data API rows
-        if use_data_api and not quota_exhausted and video_yt_ids:
-            batch_result = self.get_video_stats_batch(video_yt_ids)
+        if use_data_api and not quota_exhausted and video_yt_ids and _stage("data_api_videos"):
+            batch_result = self.get_video_stats_batch(video_yt_ids, deadline=deadline)
             if batch_result.get("_quota_exhausted"):
                 quota_exhausted = True
                 result["quota_exhausted"] = True
+            elif batch_result.get("_deadline_exceeded"):
+                deadline_exceeded = True
+                result["deadline_exceeded"] = True
             else:
                 for yt_id, stats in batch_result.items():
                     if yt_id.startswith("_"):  # skip meta keys
@@ -1352,11 +1461,15 @@ class YouTubeStatsFetcher:
 
         # ── Shorts stats — batch via Data API (skip if quota already gone) ──
         inserted_short_ids: set[int] = set()
-        if use_data_api and not quota_exhausted and short_yt_ids:
-            batch_result = self.get_video_stats_batch(short_yt_ids)
+        if (use_data_api and not quota_exhausted and short_yt_ids
+                and _stage("data_api_shorts")):
+            batch_result = self.get_video_stats_batch(short_yt_ids, deadline=deadline)
             if batch_result.get("_quota_exhausted"):
                 quota_exhausted = True
                 result["quota_exhausted"] = True
+            elif batch_result.get("_deadline_exceeded"):
+                deadline_exceeded = True
+                result["deadline_exceeded"] = True
             else:
                 short_map = {s["youtube_id"]: s for s in shorts if s.get("youtube_id")}
                 for yt_id, stats in batch_result.items():
@@ -1388,7 +1501,7 @@ class YouTubeStatsFetcher:
         scraped_short_stats: dict[str, dict] = {}
         analytics_fallback_video_ids: set[int] = set()
         analytics_fallback_short_ids: set[int] = set()
-        if scraper and quota_exhausted:
+        if scraper and quota_exhausted and _stage("scrape_fallback"):
             try:
                 eligible_v = db.get_scrape_eligible_video_ids(
                     channel["id"] if channel else None,
@@ -1410,7 +1523,11 @@ class YouTubeStatsFetcher:
                     "[%s] scrape: %d/%d videos eligible (fresh/old skipped)",
                     self.slug, len(remaining_v), len(videos),
                 )
-                scraped_video_stats = scraper.get_video_stats_batch(remaining_v)
+                scraped_video_stats = scraper.get_video_stats_batch(
+                    remaining_v, deadline=deadline
+                )
+                if scraped_video_stats.get("_deadline_exceeded"):
+                    result["deadline_exceeded"] = True
             try:
                 eligible_s = db.get_scrape_eligible_short_ids(
                     channel["id"] if channel else None,
@@ -1432,12 +1549,19 @@ class YouTubeStatsFetcher:
                     "[%s] scrape: %d/%d shorts eligible (fresh/old skipped)",
                     self.slug, len(remaining_s), len(shorts),
                 )
-                scraped_short_stats = scraper.get_video_stats_batch(remaining_s)
+                scraped_short_stats = scraper.get_video_stats_batch(
+                    remaining_s, deadline=deadline
+                )
+                if scraped_short_stats.get("_deadline_exceeded"):
+                    result["deadline_exceeded"] = True
 
         # ── Bulk video analytics (Analytics API — separate quota, always works) ──
-        if video_yt_ids and self._analytics_service:
+        if (video_yt_ids and self._analytics_service
+                and _stage("bulk_analytics")):
             try:
-                bulk_analytics = self.get_all_videos_analytics(video_yt_ids)
+                bulk_analytics = self.get_all_videos_analytics(
+                    video_yt_ids, deadline=deadline
+                )
                 if bulk_analytics:
                     video_id_map = {
                         v["yt_video_id"]: v["id"]
@@ -1660,7 +1784,8 @@ class YouTubeStatsFetcher:
                 )
 
         # ── Deep analytics (CTR, traffic, demographics) ──
-        if deep and channel and video_yt_ids and self._analytics_service:
+        if (deep and channel and video_yt_ids and self._analytics_service
+                and _stage("deep_analytics")):
             logger.info("Deep analytics collection starting for %s (%d videos)", self.slug, len(video_yt_ids))
 
             # Impresiones orgánicas + CTR: NO vienen de la Analytics API (no
@@ -1670,105 +1795,116 @@ class YouTubeStatsFetcher:
             # Ver `scripts/collect_reach_reports.py`.
 
             # Collect traffic sources
-            try:
-                traffic_data = self.get_video_traffic_sources(video_yt_ids, days=30)
-                stored_traffic = 0
-                for v in videos:
-                    yt_id = v.get("yt_video_id")
-                    if not yt_id:
-                        continue
-                    sources = traffic_data.get(yt_id, [])
-                    if sources:
-                        db.insert_video_analytics_batch(
-                            v["id"], yt_id, "traffic_source", sources,
-                        )
-                        stored_traffic += 1
-                result["traffic_stored"] = stored_traffic
-                logger.info("Deep analytics: %d traffic source sets stored for %s",
-                           stored_traffic, self.slug)
-            except Exception as exc:
-                logger.error("Deep analytics (traffic sources) failed for %s: %s", self.slug, exc)
+            if _stage("traffic_sources"):
+                try:
+                    traffic_data = self.get_video_traffic_sources(video_yt_ids, days=30)
+                    stored_traffic = 0
+                    for v in videos:
+                        yt_id = v.get("yt_video_id")
+                        if not yt_id:
+                            continue
+                        sources = traffic_data.get(yt_id, [])
+                        if sources:
+                            db.insert_video_analytics_batch(
+                                v["id"], yt_id, "traffic_source", sources,
+                            )
+                            stored_traffic += 1
+                    result["traffic_stored"] = stored_traffic
+                    logger.info("Deep analytics: %d traffic source sets stored for %s",
+                               stored_traffic, self.slug)
+                except Exception as exc:
+                    logger.error("Deep analytics (traffic sources) failed for %s: %s", self.slug, exc)
 
             # Collect channel demographics
-            try:
-                demo_data = self.get_channel_demographics(days=90)
-                if demo_data:
-                    db.insert_channel_demographics(channel["id"], demo_data)
-                    result["demographics_stored"] = len(demo_data)
-                    logger.info("Deep analytics: %d demographic segments stored for %s",
-                               len(demo_data), self.slug)
-                else:
+            if _stage("demographics"):
+                try:
+                    demo_data = self.get_channel_demographics(days=90)
+                    if demo_data:
+                        db.insert_channel_demographics(channel["id"], demo_data)
+                        result["demographics_stored"] = len(demo_data)
+                        logger.info("Deep analytics: %d demographic segments stored for %s",
+                                   len(demo_data), self.slug)
+                    else:
+                        result["demographics_stored"] = 0
+                except Exception as exc:
+                    logger.error("Deep analytics (demographics) failed for %s: %s", self.slug, exc)
                     result["demographics_stored"] = 0
-            except Exception as exc:
-                logger.error("Deep analytics (demographics) failed for %s: %s", self.slug, exc)
-                result["demographics_stored"] = 0
 
             # ── Curvas de retención (Fase 3 del experimento de alcance) ──
             # audienceWatchRatio × elapsedVideoTimeRatio, una curva por vídeo.
             # Se limita a los N long-forms recientes para acotar la cuota de la
             # Analytics API (pool propio, no toca la cuota del Data API).
             # Persiste en video_analytics_detailed (sin migración).
-            try:
-                from config.config_bridge import get_channel_config
-                _rcfg = get_channel_config(self.slug)
-                result["retention_curves_stored"] = 0
-                if getattr(_rcfg, "RETENTION_FEEDBACK_ENABLED", True):
-                    _max_v = int(
-                        getattr(_rcfg, "RETENTION_CURVE_MAX_VIDEOS", 20) or 20
-                    )
-                    _lookback = int(
-                        getattr(_rcfg, "RETENTION_LOOKBACK_DAYS", 90) or 90
-                    )
-                    # Solo long-forms ya subidos (con yt_video_id), recientes.
-                    _curve_videos = [v for v in videos if v.get("yt_video_id")]
-                    _curve_videos.sort(
-                        key=lambda v: str(
-                            v.get("published_at") or v.get("uploaded_at") or ""
-                        ),
-                        reverse=True,
-                    )
-                    _curve_videos = _curve_videos[:_max_v]
-                    _stored = 0
-                    for v in _curve_videos:
-                        yt_id = v.get("yt_video_id")
-                        try:
-                            curve = self.get_video_audience_retention(
-                                yt_id, days=_lookback
-                            )
-                        except Exception as exc:  # noqa: BLE001
-                            logger.debug(
-                                "Retention curve failed for %s: %s", yt_id, exc
-                            )
-                            continue
-                        if not curve:
-                            continue
-                        db.insert_video_analytics_batch(
-                            v["id"], yt_id, "audience_retention",
-                            [{"dimension": p["dimension"],
-                              "metric_value": p["metric_value"]} for p in curve],
+            if _stage("retention_curves"):
+                try:
+                    from config.config_bridge import get_channel_config
+                    _rcfg = get_channel_config(self.slug)
+                    result["retention_curves_stored"] = 0
+                    if getattr(_rcfg, "RETENTION_FEEDBACK_ENABLED", True):
+                        _max_v = int(
+                            getattr(_rcfg, "RETENTION_CURVE_MAX_VIDEOS", 20) or 20
                         )
-                        _rrp = [{"dimension": p["dimension"],
-                                 "metric_value": p["rrp"]}
-                                for p in curve if p.get("rrp") is not None]
-                        if _rrp:
+                        _lookback = int(
+                            getattr(_rcfg, "RETENTION_LOOKBACK_DAYS", 90) or 90
+                        )
+                        # Solo long-forms ya subidos (con yt_video_id), recientes.
+                        _curve_videos = [v for v in videos if v.get("yt_video_id")]
+                        _curve_videos.sort(
+                            key=lambda v: str(
+                                v.get("published_at") or v.get("uploaded_at") or ""
+                            ),
+                            reverse=True,
+                        )
+                        _curve_videos = _curve_videos[:_max_v]
+                        _stored = 0
+                        for v in _curve_videos:
+                            # Deadline cooperativo ENTRE vídeos (1 llamada API/vídeo)
+                            if _expired():
+                                logger.warning(
+                                    "[%s] retention curves: deadline superado (%d/%d) "
+                                    "— resto omitido", self.slug, _stored, len(_curve_videos),
+                                )
+                                result["deadline_exceeded"] = True
+                                break
+                            yt_id = v.get("yt_video_id")
+                            try:
+                                curve = self.get_video_audience_retention(
+                                    yt_id, days=_lookback
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                logger.debug(
+                                    "Retention curve failed for %s: %s", yt_id, exc
+                                )
+                                continue
+                            if not curve:
+                                continue
                             db.insert_video_analytics_batch(
-                                v["id"], yt_id, "audience_retention_rrp", _rrp,
+                                v["id"], yt_id, "audience_retention",
+                                [{"dimension": p["dimension"],
+                                  "metric_value": p["metric_value"]} for p in curve],
                             )
-                        _stored += 1
-                    result["retention_curves_stored"] = _stored
-                    logger.info(
-                        "Deep analytics: %d retention curves stored for %s",
-                        _stored, self.slug,
+                            _rrp = [{"dimension": p["dimension"],
+                                     "metric_value": p["rrp"]}
+                                    for p in curve if p.get("rrp") is not None]
+                            if _rrp:
+                                db.insert_video_analytics_batch(
+                                    v["id"], yt_id, "audience_retention_rrp", _rrp,
+                                )
+                            _stored += 1
+                        result["retention_curves_stored"] = _stored
+                        logger.info(
+                            "Deep analytics: %d retention curves stored for %s",
+                            _stored, self.slug,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(
+                        "Deep analytics (retention curves) failed for %s: %s",
+                        self.slug, exc,
                     )
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "Deep analytics (retention curves) failed for %s: %s",
-                    self.slug, exc,
-                )
-                result["retention_curves_stored"] = 0
+                    result["retention_curves_stored"] = 0
 
         # ── Daily channel analytics ──
-        if channel and self._analytics_service:
+        if channel and self._analytics_service and _stage("daily_watchtime"):
             try:
                 daily = self.get_channel_daily_analytics(days=365)
                 if daily:
@@ -1780,7 +1916,7 @@ class YouTubeStatsFetcher:
         # ── Embudo de alcance (Reporting API reach, cuota propia) ──
         # La Analytics API no expone impresiones orgánicas + CTR; el Reporting
         # API sí. Best-effort: nunca debe romper la recolección de stats.
-        if deep and channel:
+        if deep and channel and _stage("reach_reports"):
             try:
                 from config.config_bridge import get_channel_config
                 _cfg = get_channel_config(self.slug)
@@ -1795,6 +1931,7 @@ class YouTubeStatsFetcher:
                             max_reports_per_job=int(
                                 getattr(_cfg, "REACH_REPORTS_MAX_PER_JOB", 0) or 0
                             ),
+                            deadline=deadline,
                         )
                     else:
                         # Sin token/servicio: estado explícito para que el panel

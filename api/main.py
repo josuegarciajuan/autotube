@@ -3845,8 +3845,17 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
 
             try:
                 fetcher = YouTubeStatsFetcher(slug)
+                # Deadline de canal (fase 2 anti-cuelgues): acota el canal de
+                # forma cooperativa (entre etapas/lotes) + transporte HTTP con
+                # timeout por petición. `progress` publica el heartbeat por etapa.
+                channel_deadline = channel_started + STATS_CHANNEL_MAX_DURATION_S
+
+                def _progress(stage: str, _slug: str = slug):
+                    coord.heartbeat(phase=f"channel:{_slug}:{stage}")
+
                 result = fetcher.collect_and_store(
-                    db, deep=deep, use_data_api=channel_use_data_api
+                    db, deep=deep, use_data_api=channel_use_data_api,
+                    deadline=channel_deadline, progress=_progress,
                 )
                 if result.get("scrape_mode"):
                     any_scrape_mode = True
@@ -3919,9 +3928,12 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
                     # Embudo de alcance (Reporting API): estado explícito por canal.
                     "reach": result.get("reach"),
                     "error": result.get("error"),
-                    # Diagnóstico de ritmo (fase 2 acotará el canal de verdad)
+                    # Diagnóstico de ritmo (fase 2: deadline acota el canal de verdad)
                     "duration_s": round(_time_module.time() - channel_started, 1),
-                    "over_channel_deadline": _time_module.time() - channel_started > STATS_CHANNEL_MAX_DURATION_S,
+                    "over_channel_deadline": bool(
+                        result.get("deadline_exceeded")
+                        or (_time_module.time() - channel_started > STATS_CHANNEL_MAX_DURATION_S)
+                    ),
                 })
 
                 # Calculate and store estimated revenue for this channel
