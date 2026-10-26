@@ -25,6 +25,24 @@ export interface FullReplanApplyResult {
   preserved: number;
 }
 
+export interface AuthoritativeReplanState {
+  ok: boolean;
+  run_id: string | null;
+  status: 'idle' | 'queued' | 'running' | 'success' | 'blocked' | 'error' | 'not_found';
+  queued?: boolean;
+  joined?: boolean;
+  phase?: string | null;
+  created_at?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  elapsed_s?: number | null;
+  current_channel_slug?: string | null;
+  completed_channels?: number;
+  total_channels?: number;
+  summary?: Record<string, any> | null;
+  error?: string | null;
+}
+
 export class ApiRequestError extends Error {
   status: number
   code?: string
@@ -395,7 +413,12 @@ export const api = {
   // Reprogramación TOTAL autoritativa ("Reprogramar Ahora"): borra la
   // programación pendiente, reasigna vídeos (pendientes + calentando), fuerza
   // su publishAt en YouTube y regenera el plan. Sin token de confirmación.
-  authoritativeFullReplan: () => request<any>('/planning/full-replan/authoritative', { method: 'POST' }),
+  authoritativeFullReplan: () =>
+    request<AuthoritativeReplanState>('/planning/full-replan/authoritative', { method: 'POST' }),
+  authoritativeFullReplanStatus: (runId?: string) => {
+    const qs = runId ? `?run_id=${encodeURIComponent(runId)}` : ''
+    return request<AuthoritativeReplanState>(`/planning/full-replan/authoritative/status${qs}`)
+  },
 
   // Optimal Publish Slots (v10)
   getOptimalSlots: (channelId: number) =>

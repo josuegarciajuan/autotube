@@ -20,7 +20,7 @@ import threading
 import functools
 import time
 from datetime import date, datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Callable, Optional
 from zoneinfo import ZoneInfo
 import pytz
 from api.time_utils import local_to_utc, sqlite_utc, MADRID, UTC
@@ -5662,7 +5662,11 @@ def _cancel_queued_jobs_for_replan(conn) -> int:
 
 
 @_replan_locked
-def authoritative_replan(db=None, horizon_days: int = 7) -> dict:
+def authoritative_replan(
+    db=None,
+    horizon_days: int = 7,
+    progress: Optional[Callable[..., None]] = None,
+) -> dict:
     """Reprogramación TOTAL autoritativa — botón "Reprogramar Ahora".
 
     Regla dura (sep 2026): a diferencia de safe_full_replan (que nunca borra ni
@@ -5680,6 +5684,10 @@ def authoritative_replan(db=None, horizon_days: int = 7) -> dict:
 
     Pensado para ejecutarse cuando "algo se descuadra": un clic y el sistema
     vuelve a estar al día de forma completa.
+
+    ``progress`` es un callback opcional ``(stage, **fields)`` para publicar
+    avance persistido mientras corre (lo usa el coordinador asíncrono). Un
+    fallo del observador nunca interrumpe la reprogramación.
     """
     import time as _time
     global _post_full_replan_block_until
@@ -5705,6 +5713,17 @@ def authoritative_replan(db=None, horizon_days: int = 7) -> dict:
         "horizon": None,
     }
 
+    def _report(stage: str, **fields: Any) -> None:
+        """Publish coarse progress without letting an observer break the replan."""
+        if progress is None:
+            return
+        try:
+            progress(stage, **fields)
+        except Exception as exc:
+            logger.debug("authoritative_replan progress callback failed: %s", exc)
+
+    _report("starting", completed_channels=0, total_channels=len(channels))
+
     # ── 1. Borrar programación pendiente + jobs en cola ──────────────
     with db._connect() as conn:
         summary["slots_cleared"] = conn.execute(
@@ -5725,9 +5744,16 @@ def authoritative_replan(db=None, horizon_days: int = 7) -> dict:
     from api.services.publish_coverage import remediate_today_public_deficit
     import pytz
 
+    completed_channels = 0
     for ch in channels:
         ch_id = int(ch["id"])
         slug = ch.get("slug") or f"canal{ch_id}"
+        _report(
+            "repack",
+            current_channel_slug=slug,
+            completed_channels=completed_channels,
+            total_channels=len(channels),
+        )
         try:
             rep = apply_publish_repack(
                 db, ch_id, slug,
@@ -5739,6 +5765,12 @@ def authoritative_replan(db=None, horizon_days: int = 7) -> dict:
             logger.warning("authoritative_replan: repack %s falló: %s", slug, exc)
             repacked = 0
 
+        _report(
+            "coverage",
+            current_channel_slug=slug,
+            completed_channels=completed_channels,
+            total_channels=len(channels),
+        )
         today_info = {"forced": 0, "need": 0, "reason": "skip"}
         try:
             from api.services.channel_policy import policy_value
@@ -5757,8 +5789,20 @@ def authoritative_replan(db=None, horizon_days: int = 7) -> dict:
             "repacked": repacked,
             "today": today_info,
         }
+        completed_channels += 1
+        _report(
+            "channel_done",
+            current_channel_slug=None,
+            completed_channels=completed_channels,
+            total_channels=len(channels),
+        )
 
     # ── 3. Regenerar horizonte de generación (bypass ventana silenciosa) ──
+    _report(
+        "horizon",
+        completed_channels=completed_channels,
+        total_channels=len(channels),
+    )
     try:
         global _last_horizon_replan_ts
         _post_full_replan_block_until = None
@@ -5788,6 +5832,11 @@ def authoritative_replan(db=None, horizon_days: int = 7) -> dict:
         logger.debug("authoritative_replan: no se pudo encolar replan: %s", exc)
 
     # ── 4. Regenerar shorts (3/día) ──────────────────────────────────
+    _report(
+        "shorts",
+        completed_channels=completed_channels,
+        total_channels=len(channels),
+    )
     try:
         from api.services.shorts_scheduler import generate_upcoming_shorts
         summary["shorts"] = generate_upcoming_shorts(days=horizon_days, db=db)
@@ -5807,6 +5856,11 @@ def authoritative_replan(db=None, horizon_days: int = 7) -> dict:
     except Exception:
         pass
 
+    _report(
+        "finalizing",
+        completed_channels=completed_channels,
+        total_channels=len(channels),
+    )
     logger.info(
         "authoritative_replan: %d vídeos reprogramados, %d forzados hoy, %d slots",
         summary["videos_retimed"], summary["today_forced"], summary["slots_cleared"],

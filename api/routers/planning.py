@@ -650,17 +650,37 @@ def safe_full_replan_apply(data: SafeFullReplanApply):
         raise HTTPException(409, {"code": code, "message": message}) from exc
 
 
-@router.post("/full-replan/authoritative")
+@router.post("/full-replan/authoritative", status_code=202)
 def authoritative_full_replan(horizon_days: int = Query(7, ge=1, le=31)):
-    """Reprogramación TOTAL autoritativa ("Reprogramar Ahora").
+    """Queue the TOTAL authoritative replan and return immediately.
 
-    Borra la programación pendiente, reasigna los vídeos pendientes y los que
-    están calentando, fuerza su publicidad en YouTube y regenera el plan
-    (longs + shorts). Idempotente y diseñada para que el operador la pulse
-    cuando detecte que algo se ha descuadrado.
+    The work runs in a background thread inside the API process so it keeps
+    sharing ``_REPLAN_LOCK`` with the automatic planning loops. The response
+    carries the persistent run id/status; clients must not wait for the final
+    result in this request.
     """
-    from api.services.planning_service import authoritative_replan
-    return authoritative_replan(db=get_db(), horizon_days=horizon_days)
+    from api.services.authoritative_replan_service import (
+        get_authoritative_replan_coordinator,
+    )
+    return get_authoritative_replan_coordinator().start(
+        db=get_db(), horizon_days=horizon_days,
+    )
+
+
+@router.get("/full-replan/authoritative/status")
+def authoritative_full_replan_status(
+    run_id: Optional[str] = Query(None),
+):
+    """Return the latest (or the requested) authoritative replan run."""
+    from api.services.authoritative_replan_service import (
+        get_authoritative_replan_coordinator,
+    )
+    state = get_authoritative_replan_coordinator().snapshot(
+        db=get_db(), run_id=run_id,
+    )
+    if state.get("status") == "not_found":
+        raise HTTPException(404, state.get("error") or "Replan run not found")
+    return state
 
 
 @router.post("/full-replan")
