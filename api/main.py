@@ -512,7 +512,11 @@ async def lifespan(app: FastAPI):
         )
 
     schedule_task = _supervised_loop("schedule_checker", _schedule_checker_loop)
-    
+
+    # Consumidor de la cola de generación: loop supervisado propio para que un
+    # cuelgue del scheduler no deje los jobs 'queued' sin despachar.
+    queue_consumer_task = _supervised_loop("queue_consumer", _queue_consumer_loop)
+
     # Launch health monitor checker in background
     health_monitor_task = _supervised_loop("health_monitor", _health_monitor_loop)
     
@@ -814,6 +818,45 @@ async def _queue_consumer():
         
     except Exception as e:
         logger.error("Queue consumer error: %s", e)
+
+
+async def _queue_consumer_loop(startup_delay: float = 10.0, interval: float = 60.0):
+    """Loop supervisado propio para drenar `generation_jobs.status='queued'`.
+
+    Antes el consumidor se invocaba desde dentro de `_schedule_checker_loop`.
+    Si el cuerpo del scheduler se colgaba en un `await` que nunca resolvía
+    (incidente 2026-10-26: heartbeat de `queue_consumer` congelado ~20 h
+    mientras el keepalive mantenía vivo el de `schedule_checker`), la cola de
+    generación quedaba muda aunque el resto del sistema siguiera planificando.
+    Al ser un loop supervisado independiente, su heartbeat y su watchdog no
+    dependen de que el scheduler complete una iteración.
+    """
+    import logging
+    logger = logging.getLogger("autotube.queue")
+
+    await asyncio.sleep(startup_delay)  # deja estabilizar el event loop
+    logger.info("Queue consumer loop started (interval: %.0fs)", interval)
+
+    while True:
+        try:
+            from api.services.lifecycle_monitor import touch_task_heartbeat
+            touch_task_heartbeat("queue_consumer")
+            await _queue_consumer()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — un fallo no debe matar el loop
+            logger.error("Queue consumer loop error: %s", exc)
+        await asyncio.sleep(interval)
+
+
+def _scheduler_iteration_stalled(stalled_for_sec: float, ceiling_sec: float) -> bool:
+    """True si el cuerpo del scheduler lleva demasiado sin completar iteración.
+
+    El keepalive del scheduler solo debe enmascarar operaciones largas, no un
+    loop realmente colgado. Se usa desde `_heartbeat_keepalive`: superado el
+    techo, deja de latir para que el task_watchdog reinicie la API.
+    """
+    return ceiling_sec > 0 and stalled_for_sec > ceiling_sec
 
 
 async def _publish_verify_loop():
@@ -1903,11 +1946,33 @@ async def _schedule_checker_loop():
     # la API a mitad de faena (incidente 2026-10-24 08:43). Este task corre en
     # el MISMO event loop: si el loop se bloquea de verdad (llamada síncrona),
     # tampoco late y el watchdog sigue detectándolo.
+    #
+    # FIX (2026-10-27): el keepalive enmascaraba también un `await` colgado
+    # (no bloqueo síncrono). Ahora solo late mientras el cuerpo haya iniciado
+    # una iteración dentro de SCHEDULER_STALL_CEILING_SEC; superado ese techo
+    # deja de latir y el task_watchdog reinicia la API.
+    import os as _os_stall
+    try:
+        _stall_ceiling = float(
+            _os_stall.getenv("SCHEDULER_STALL_CEILING_SEC", "7200")
+        )
+    except ValueError:
+        _stall_ceiling = 7200.0
+    _loop_progress = {"last_iteration": time.monotonic()}
+
     async def _heartbeat_keepalive(task_name: str, interval: float = 60.0):
         from api.services.lifecycle_monitor import touch_task_heartbeat
         try:
             while True:
                 await asyncio.sleep(interval)
+                _stalled_for = time.monotonic() - _loop_progress["last_iteration"]
+                if _scheduler_iteration_stalled(_stalled_for, _stall_ceiling):
+                    logger.error(
+                        "Schedule checker body stalled for %.0fs (> %.0fs) — "
+                        "withholding heartbeat so the watchdog restarts the API",
+                        _stalled_for, _stall_ceiling,
+                    )
+                    continue
                 touch_task_heartbeat(task_name)
         except asyncio.CancelledError:
             pass
@@ -1923,6 +1988,9 @@ async def _schedule_checker_loop():
         try:
             from api.services.lifecycle_monitor import touch_task_heartbeat as _tth
             _tth("schedule_checker")
+            # Marca de progreso: si una iteración no llega ni a empezar de
+            # nuevo dentro del techo, el keepalive deja de enmascararlo.
+            _loop_progress["last_iteration"] = time.monotonic()
             if first_run:
                 first_run = False
                 sleep_sec = 0  # immediate first run
@@ -2012,10 +2080,13 @@ async def _schedule_checker_loop():
                     except Exception as exc:
                         logger.debug("Never-dry check: %s", exc)
 
-                await _queue_consumer()
-
+                # ── La cola `generation_jobs` la drena su propio loop
+                #    supervisado (`_queue_consumer_loop`). Antes se llamaba
+                #    aquí: un cuelgue del scheduler dejaba la cola muda aunque
+                #    siguiera planificando (incidente 2026-10-26).
+                #
                 # ── FIX (stabilize-scheduler): refresca el heartbeat tras el
-                # dispatch/queue (pueden tardar) antes de la siguiente fase.
+                # dispatch (puede tardar) antes de la siguiente fase.
                 _tth("schedule_checker")
 
                 # ════════════════════════════════════════════════════════════
