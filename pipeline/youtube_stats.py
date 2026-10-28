@@ -1949,6 +1949,12 @@ class YouTubeStatsFetcher:
                             max_reports_per_job=int(
                                 getattr(_cfg, "REACH_REPORTS_MAX_PER_JOB", 0) or 0
                             ),
+                            # Tope GLOBAL por canal/pasada: un backlog de 3 jobs
+                            # (hasta 270 informes) ya no monopoliza la
+                            # recolección. El resto se drena en la siguiente.
+                            max_reports_per_run=int(
+                                getattr(_cfg, "REACH_REPORTS_MAX_PER_RUN", 12) or 0
+                            ),
                             deadline=deadline,
                         )
                     else:

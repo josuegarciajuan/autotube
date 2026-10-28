@@ -174,6 +174,12 @@ REACH_REPORTS_ENABLED = True
 # Informes a procesar por job en cada pasada. 0 = backfill completo (tope duro
 # interno de 90) para bajar de una vez los 30 días históricos del job nuevo.
 REACH_REPORTS_MAX_PER_JOB = 0
+# Tope GLOBAL de informes por canal y pasada (suma de los 3 jobs). Acota el
+# tiempo de la fase reach: con un backlog de 90×3 informes y ~2 s/informe, sin
+# este tope la recolección de stats podía tardar horas. Los informes son
+# diarios, así que 12/pasada van muy por delante de la generación; el backlog
+# histórico se drena en pasadas sucesivas. 0 = sin tope extra.
+REACH_REPORTS_MAX_PER_RUN = 12
 
 # ═══════════════════════════════════════════════════════════════════
 # TEST MODE

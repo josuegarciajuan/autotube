@@ -7404,6 +7404,81 @@ class ExtendedDatabase(Database):
             )
             conn.commit()
 
+    def upsert_video_reach_daily_batch(self, rows: list[dict]) -> int:
+        """Upsert de muchas filas del embudo en UNA transacción.
+
+        El sync de reach reports escribía una conexión (y 8 PRAGMAs) por fila:
+        un informe de 200 filas = 200 conexiones/commits contra SQLite, lo que
+        con los render workers en paralelo dominaba el tiempo de la fase (30-60
+        min por canal). Aquí se conserva la semántica exacta del upsert
+        individual (COALESCE: los campos no aportados no pisan los existentes).
+
+        Cada dict admite las mismas claves que ``upsert_video_reach_daily``.
+        Devuelve el número de filas procesadas.
+        """
+        if not rows:
+            return 0
+        params = []
+        for r in rows:
+            params.append((
+                r["channel_id"], r["yt_video_id"],
+                normalize_reach_date(r["date"]),
+                r.get("impressions"), r.get("impressions_ctr"),
+                r.get("retention_pct"), r.get("watch_minutes"),
+                r.get("subs_gained"), r.get("subs_lost"),
+                r.get("engaged_views"), r.get("views"),
+                r.get("traffic_source"), r.get("source", "reporting_api"),
+                # bloque del ON CONFLICT (mismos valores → COALESCE)
+                r.get("impressions"), r.get("impressions_ctr"),
+                r.get("retention_pct"), r.get("watch_minutes"),
+                r.get("subs_gained"), r.get("subs_lost"),
+                r.get("engaged_views"), r.get("views"),
+                r.get("traffic_source"), r.get("source", "reporting_api"),
+            ))
+        with self._connect() as conn:
+            conn.executemany(
+                """INSERT INTO video_reach_daily
+                     (channel_id, yt_video_id, date, impressions, impressions_ctr,
+                      retention_pct, watch_minutes, subs_gained, subs_lost,
+                      engaged_views, views, traffic_source, source, fetched_at)
+                   VALUES (?, ?, ?, COALESCE(?,0), COALESCE(?,0), COALESCE(?,0),
+                           COALESCE(?,0), COALESCE(?,0), COALESCE(?,0), COALESCE(?,0),
+                           COALESCE(?,0), ?, ?, CURRENT_TIMESTAMP)
+                   ON CONFLICT(channel_id, yt_video_id, date) DO UPDATE SET
+                     impressions = COALESCE(?, video_reach_daily.impressions),
+                     impressions_ctr = COALESCE(?, video_reach_daily.impressions_ctr),
+                     retention_pct = COALESCE(?, video_reach_daily.retention_pct),
+                     watch_minutes = COALESCE(?, video_reach_daily.watch_minutes),
+                     subs_gained = COALESCE(?, video_reach_daily.subs_gained),
+                     subs_lost = COALESCE(?, video_reach_daily.subs_lost),
+                     engaged_views = COALESCE(?, video_reach_daily.engaged_views),
+                     views = COALESCE(?, video_reach_daily.views),
+                     traffic_source = COALESCE(?, video_reach_daily.traffic_source),
+                     source = ?,
+                     fetched_at = CURRENT_TIMESTAMP""",
+                params,
+            )
+            conn.commit()
+        return len(params)
+
+    def get_seen_reach_report_ids(self, job_id: Optional[str] = None) -> set[str]:
+        """IDs de informes ya descargados (en una sola consulta).
+
+        Sustituye a N llamadas a ``reach_report_seen`` durante el sync (~300
+        conexiones por canal). Si se pasa ``job_id``, acota a ese job.
+        """
+        with self._connect() as conn:
+            if job_id:
+                rows = conn.execute(
+                    "SELECT report_id FROM reach_reports_seen WHERE job_id = ?",
+                    (job_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT report_id FROM reach_reports_seen"
+                ).fetchall()
+        return {r[0] for r in rows if r and r[0]}
+
     def reach_report_seen(self, report_id: str) -> bool:
         """True si el reporte bulk ya se descargó (evita reprocesarlo)."""
         with self._connect() as conn:
@@ -7549,6 +7624,41 @@ class ExtendedDatabase(Database):
                  float(avg_view_duration_pct or 0)),
             )
             conn.commit()
+
+    def upsert_video_reach_traffic_daily_batch(self, rows: list[dict]) -> int:
+        """Upsert de muchas filas de tráfico en UNA transacción (ver batch reach).
+
+        Cada dict admite las mismas claves que
+        ``upsert_video_reach_traffic_daily`` (se ignoran las filas sin
+        ``traffic_source``). Devuelve el número de filas procesadas.
+        """
+        params = [
+            (
+                r["channel_id"], r["yt_video_id"],
+                normalize_reach_date(r["date"]), r["traffic_source"],
+                int(r.get("views") or 0), float(r.get("watch_minutes") or 0),
+                float(r.get("avg_view_duration_pct") or 0),
+            )
+            for r in rows
+            if r.get("traffic_source")
+        ]
+        if not params:
+            return 0
+        with self._connect() as conn:
+            conn.executemany(
+                """INSERT INTO video_reach_traffic_daily
+                     (channel_id, yt_video_id, date, traffic_source, views,
+                      watch_minutes, avg_view_duration_pct, fetched_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                   ON CONFLICT(channel_id, yt_video_id, date, traffic_source)
+                   DO UPDATE SET views=excluded.views,
+                                 watch_minutes=excluded.watch_minutes,
+                                 avg_view_duration_pct=excluded.avg_view_duration_pct,
+                                 fetched_at=CURRENT_TIMESTAMP""",
+                params,
+            )
+            conn.commit()
+        return len(params)
 
     def get_channel_traffic_sources(self, channel_id: int, days: int = 30) -> list[dict]:
         """Vistas por fuente de tráfico del canal en la ventana (ISO dates)."""

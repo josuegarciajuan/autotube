@@ -438,6 +438,7 @@ class ReachReportClient:
     # ── Sync ───────────────────────────────────────────────────
 
     def sync(self, db, *, max_reports_per_job: int = 10,
+             max_reports_per_run: int = 0,
              ignore_seen: bool = False, deadline: float = None) -> dict:
         """Sincroniza reach + basic: crea jobs y procesa reportes nuevos.
 
@@ -446,6 +447,12 @@ class ReachReportClient:
                 pasada. 0 (o negativo) = backfill completo (tope duro
                 ``_MAX_REPORTS_HARD_CAP``), útil para bajar de una vez los 30 días
                 históricos que el Reporting API genera al crear un job nuevo.
+            max_reports_per_run: tope GLOBAL de informes por canal y pasada
+                (0 = sin tope extra). Evita que un backlog de varios jobs (3
+                tipos × 90) monopolice la recolección de stats: con el botón
+                manual se procesa una porción acotada y el resto baja en la
+                siguiente pasada. Los informes son diarios, así que 12/pasada
+                van muy por delante de la generación.
             ignore_seen: reprocesa informes ya vistos (reproceso histórico F2).
                 Es idempotente porque los upserts son deterministas; sirve para
                 corregir filas escritas por la agregación antigua (segmentos que
@@ -507,6 +514,10 @@ class ReachReportClient:
             if max_reports_per_job and max_reports_per_job > 0
             else _MAX_REPORTS_HARD_CAP
         )
+        # 0 = sin tope global extra (compatibilidad); el llamador de stats pasa
+        # un valor acotado por canal/pasada.
+        cap_run = int(max_reports_per_run) if max_reports_per_run and max_reports_per_run > 0 else 0
+        processed_total = 0
 
         for rid, job_id in jobs.items():
             # Deadline cooperativo ENTRE jobs (operación segura)
@@ -526,6 +537,18 @@ class ReachReportClient:
                 summary["errors"] += 1
                 continue
 
+            # IDs ya procesados en UNA consulta (antes: una conexión por informe).
+            # `None` = fallback al método individual (stubs de test/legacy).
+            seen: set[str] | None = None
+            if not ignore_seen:
+                _get_seen = getattr(db, "get_seen_reach_report_ids", None)
+                if _get_seen:
+                    try:
+                        seen = set(_get_seen(job_id))
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("[%s] seen ids query falló: %s", self.slug, exc)
+                        seen = None
+
             summary["reports_available"] += len(reports)
             processed = 0
             for rep in reports:
@@ -540,12 +563,18 @@ class ReachReportClient:
                     summary["deadline_exceeded"] = True
                     break
                 report_id = rep.get("id", "")
-                if not report_id or (not ignore_seen and db.reach_report_seen(report_id)):
+                if not report_id:
                     continue
+                if not ignore_seen:
+                    if seen is not None:
+                        if report_id in seen:
+                            continue
+                    elif db.reach_report_seen(report_id):
+                        continue
                 # Informe nuevo no descargado: cuenta como pendiente aunque el
                 # tope de esta pasada impida bajarlo (se bajará en la siguiente).
                 summary["reports_pending"] += 1
-                if processed >= cap:
+                if processed >= cap or (cap_run and processed_total >= cap_run):
                     continue
                 url = rep.get("downloadUrl")
                 if not url:
@@ -559,52 +588,106 @@ class ReachReportClient:
 
                 if rid == REPORT_TYPE_REACH:
                     rows = self.parse_reach(csv_text)
-                    for r in rows:
-                        db.upsert_video_reach_daily(
-                            channel_id, r["yt_video_id"], r["date"],
-                            impressions=r["impressions"],
-                            impressions_ctr=r["impressions_ctr"],
-                            source="reporting_reach",
-                        )
+                    payload = [{
+                        "channel_id": channel_id,
+                        "yt_video_id": r["yt_video_id"], "date": r["date"],
+                        "impressions": r["impressions"],
+                        "impressions_ctr": r["impressions_ctr"],
+                        "source": "reporting_reach",
+                    } for r in rows]
+                    _batch = getattr(db, "upsert_video_reach_daily_batch", None)
+                    if _batch:
+                        _batch(payload)
+                    else:  # fallback legacy (1 conexión/fila)
+                        for r in payload:
+                            db.upsert_video_reach_daily(
+                                channel_id, r["yt_video_id"], r["date"],
+                                impressions=r["impressions"],
+                                impressions_ctr=r["impressions_ctr"],
+                                source="reporting_reach",
+                            )
                     summary["reach_rows"] += len(rows)
                 elif rid == REPORT_TYPE_BASIC:
                     rows = self.parse_basic(csv_text)
-                    for r in rows:
-                        db.upsert_video_reach_daily(
-                            channel_id, r["yt_video_id"], r["date"],
-                            retention_pct=r["retention_pct"],
-                            watch_minutes=r["watch_minutes"],
-                            views=r["views"],
-                            subs_gained=r["subs_gained"],
-                            subs_lost=r["subs_lost"],
-                            engaged_views=r["engaged_views"],
-                            source="reporting_basic",
-                        )
+                    payload = [{
+                        "channel_id": channel_id,
+                        "yt_video_id": r["yt_video_id"], "date": r["date"],
+                        "retention_pct": r["retention_pct"],
+                        "watch_minutes": r["watch_minutes"],
+                        "views": r["views"],
+                        "subs_gained": r["subs_gained"],
+                        "subs_lost": r["subs_lost"],
+                        "engaged_views": r["engaged_views"],
+                        "source": "reporting_basic",
+                    } for r in rows]
+                    _batch = getattr(db, "upsert_video_reach_daily_batch", None)
+                    if _batch:
+                        _batch(payload)
+                    else:
+                        for r in payload:
+                            db.upsert_video_reach_daily(
+                                channel_id, r["yt_video_id"], r["date"],
+                                retention_pct=r["retention_pct"],
+                                watch_minutes=r["watch_minutes"],
+                                views=r["views"],
+                                subs_gained=r["subs_gained"],
+                                subs_lost=r["subs_lost"],
+                                engaged_views=r["engaged_views"],
+                                source="reporting_basic",
+                            )
                     summary["basic_rows"] += len(rows)
                 elif rid == REPORT_TYPE_TRAFFIC:
                     rows = self.parse_traffic(csv_text)
-                    _upsert_traffic = getattr(db, "upsert_video_reach_traffic_daily", None)
-                    if _upsert_traffic:
-                        for r in rows:
-                            _upsert_traffic(
-                                channel_id, r["yt_video_id"], r["date"],
-                                r["traffic_source"],
-                                views=r["views"],
-                                watch_minutes=r["watch_minutes"],
-                                avg_view_duration_pct=r["avg_view_duration_pct"],
-                            )
+                    payload = [{
+                        "channel_id": channel_id,
+                        "yt_video_id": r["yt_video_id"], "date": r["date"],
+                        "traffic_source": r["traffic_source"],
+                        "views": r["views"],
+                        "watch_minutes": r["watch_minutes"],
+                        "avg_view_duration_pct": r["avg_view_duration_pct"],
+                    } for r in rows]
+                    _batch_traffic = getattr(
+                        db, "upsert_video_reach_traffic_daily_batch", None
+                    )
+                    if _batch_traffic:
+                        _batch_traffic(payload)
+                    else:
+                        _upsert_traffic = getattr(
+                            db, "upsert_video_reach_traffic_daily", None
+                        )
+                        if _upsert_traffic:
+                            for r in payload:
+                                _upsert_traffic(
+                                    channel_id, r["yt_video_id"], r["date"],
+                                    r["traffic_source"],
+                                    views=r["views"],
+                                    watch_minutes=r["watch_minutes"],
+                                    avg_view_duration_pct=r["avg_view_duration_pct"],
+                                )
                     summary["traffic_rows"] += len(rows)
                 else:
                     rows = []
 
                 db.mark_reach_report_seen(report_id, job_id, rid)
+                if seen is not None:
+                    seen.add(report_id)
                 summary["reports_downloaded"] += 1
                 summary["reports_pending"] = max(0, summary["reports_pending"] - 1)
                 processed += 1
+                processed_total += 1
                 logger.info(
                     "[%s] reach report %s (%s) procesado: %d filas",
                     self.slug, report_id, rid, len(rows),
                 )
+
+        logger.info(
+            "[%s] reach sync: %d informes procesados (%d reach / %d basic / "
+            "%d traffic filas), pendientes=%d, deadline=%s",
+            self.slug, summary["reports_downloaded"], summary["reach_rows"],
+            summary["basic_rows"], summary["traffic_rows"],
+            summary["reports_pending"],
+            bool(summary.get("deadline_exceeded")),
+        )
 
         # Jobs creados pero el API aún no publica informes (hasta 48 h). Distinto
         # de "deshabilitada" y de "ya recolectado".

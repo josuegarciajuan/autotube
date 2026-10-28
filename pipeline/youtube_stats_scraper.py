@@ -153,36 +153,47 @@ class YouTubeStatsScraper:
                 "is_mock": True,
             }
 
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            futures = {ex.submit(self._scrape_one_video, vid): vid
-                       for vid in unique_ids}
-            done_ids: set[str] = set()
-            try:
-                # as_completed acota la ESPERA total (no el hilo: los sockets ya
-                # tienen su propio timeout; un straggler muere por socket_timeout)
-                wait_s = None
-                if deadline is not None:
-                    wait_s = max(1, int(deadline - time.time()))
-                for fut in as_completed(futures, timeout=wait_s):
-                    vid = futures[fut]
-                    done_ids.add(vid)
-                    try:
-                        result[vid] = fut.result()
-                    except Exception as exc:
-                        logger.debug("[%s] scrape error for %s: %s",
-                                     self.slug, vid, exc)
-                        result[vid] = _unavailable(vid)
-            except _FuturesTimeout:
-                logger.warning(
-                    "[%s] scrape batch: deadline superado (%d/%d completados) "
-                    "— resto marcado no disponible",
-                    self.slug, len(done_ids), len(unique_ids),
-                )
-                for fut, vid in futures.items():
-                    if vid not in done_ids:
-                        fut.cancel()  # cancela los aún no arrancados
-                        result[vid] = _unavailable(vid)
-                result["_deadline_exceeded"] = True
+        # Executor explícito (NO `with`): el context manager llama a
+        # `shutdown(wait=True)` y el `__exit__` esperaba a TODOS los trabajos
+        # ya lanzados, anulando el deadline (un informe lento podía retener la
+        # recolección minutos u horas). Con `wait=False` se retorna en cuanto
+        # vence el deadline; los stragglers terminan acotados por
+        # `socket_timeout` (nunca bloquean al llamador).
+        ex = ThreadPoolExecutor(max_workers=workers,
+                                thread_name_prefix="stats-scrape")
+        futures = {ex.submit(self._scrape_one_video, vid): vid
+                   for vid in unique_ids}
+        done_ids: set[str] = set()
+        try:
+            # as_completed acota la ESPERA total (no el hilo: los sockets ya
+            # tienen su propio timeout; un straggler muere por socket_timeout)
+            wait_s = None
+            if deadline is not None:
+                wait_s = max(1, int(deadline - time.time()))
+            for fut in as_completed(futures, timeout=wait_s):
+                vid = futures[fut]
+                done_ids.add(vid)
+                try:
+                    result[vid] = fut.result()
+                except Exception as exc:
+                    logger.debug("[%s] scrape error for %s: %s",
+                                 self.slug, vid, exc)
+                    result[vid] = _unavailable(vid)
+        except _FuturesTimeout:
+            logger.warning(
+                "[%s] scrape batch: deadline superado (%d/%d completados) "
+                "— resto marcado no disponible",
+                self.slug, len(done_ids), len(unique_ids),
+            )
+            for fut, vid in futures.items():
+                if vid not in done_ids:
+                    fut.cancel()  # cancela los aún no arrancados
+                    result[vid] = _unavailable(vid)
+            result["_deadline_exceeded"] = True
+        finally:
+            for fut in futures:
+                fut.cancel()
+            ex.shutdown(wait=False, cancel_futures=True)
         return result
 
     # ── Channel stats ────────────────────────────────────────
