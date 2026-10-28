@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import mimetypes
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, BackgroundTasks
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, RedirectResponse, Response
@@ -3830,10 +3830,10 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
     """Collect YouTube stats for all active channels (o uno solo).
 
     SYNC function on purpose: it performs blocking I/O (YouTube Data API,
-    Analytics API, yt-dlp scraping). Starlette's BackgroundTasks runs sync
-    functions in a thread pool, keeping the event loop free so the API keeps
-    responding while stats are being collected. If this were `async def`, the
-    blocking calls would freeze the entire API for the duration of the run.
+    Analytics API, yt-dlp scraping). Se ejecuta en un hilo daemon lanzado por
+    el endpoint, fuera del event loop, así la API sigue respondiendo mientras
+    se recolecta. Si fuera `async def`, las llamadas bloqueantes congelarían
+    toda la API durante el run.
 
     Args:
         deep: If True, also collects CTR, traffic sources, demographics,
@@ -4327,7 +4327,7 @@ def get_stats():
 
 
 @app.post("/api/stats/collect")
-async def trigger_stats_collection(background_tasks: BackgroundTasks, deep: bool = False, force: bool = False):
+async def trigger_stats_collection(deep: bool = False, force: bool = False):
     """Trigger on-demand YouTube stats collection for all active channels.
 
     Query params:
@@ -4346,6 +4346,14 @@ async def trigger_stats_collection(background_tasks: BackgroundTasks, deep: bool
     Fase cuota (ago 2026): la decisión de usar Data API es POR CANAL — cada
     canal consulta el breaker de SU proyecto GCP. Un proyecto agotado ya NO
     arrastra a los canales de la otra cuenta a modo scraping.
+
+    Hilo daemon (oct 2026): antes se usaba `BackgroundTasks`, que uvicorn
+    ESPERA al apagar ("Waiting for background tasks to complete"). Un run
+    largo bloqueaba el reinicio/upgrade del API —y el restart pedido por el
+    watchdog— durante decenas de minutos, dejando el panel en limbo. Un hilo
+    daemon conserva el mismo aislamiento (bloquea fuera del event loop) pero
+    muere con el proceso: un reinicio no se cuelga y `recover_on_startup`
+    marca el run interrumpido.
     """
     acquired, state = _stats_coordinator.try_acquire(deep=deep, force=force)
     if not acquired:
@@ -4357,9 +4365,13 @@ async def trigger_stats_collection(background_tasks: BackgroundTasks, deep: bool
             "state": state,
         }
     run_id = state.get("run_id")
-    background_tasks.add_task(
-        _collect_youtube_stats, deep=deep, force=force, run_id=run_id
-    )
+    import threading as _threading
+    _threading.Thread(
+        target=_collect_youtube_stats,
+        kwargs={"deep": deep, "force": force, "run_id": run_id},
+        name=f"stats-collector-{run_id}",
+        daemon=True,
+    ).start()
     return {
         "ok": True,
         "message": (

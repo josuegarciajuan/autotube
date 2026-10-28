@@ -254,3 +254,37 @@ def test_reach_sync_respeta_deadline_entre_informes():
     summary = c.sync(_FakeReachDB(), max_reports_per_job=10, deadline=deadline)
     assert summary.get("deadline_exceeded") is True
     assert n_downloads[0] < 20, "debe dejar el resto para la siguiente pasada"
+
+
+def test_scraper_deadline_no_espera_a_los_stragglers():
+    """Regresión oct 2026: el `with ThreadPoolExecutor` esperaba (shutdown
+    wait=True) a TODOS los trabajos ya lanzados, anulando el deadline. Un
+    vídeo lento podía retener la recolección mucho más allá del límite."""
+    s = sc.YouTubeStatsScraper("canal3", max_concurrency=1)
+
+    class SlowYDL:
+        def __init__(self, opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def extract_info(self, url, download=False):
+            time.sleep(3.0)
+            return {"view_count": 7, "like_count": 0, "comment_count": 0}
+
+    import yt_dlp
+    orig = yt_dlp.YoutubeDL
+    yt_dlp.YoutubeDL = SlowYDL
+    try:
+        t0 = time.time()
+        r = s.get_video_stats_batch(["A", "B", "C"], deadline=time.time() + 0.2)
+        dt = time.time() - t0
+        assert r.get("_deadline_exceeded") is True
+        assert all(v in r for v in ("A", "B", "C"))
+        assert dt < 2.0, f"debe retornar al vencer el deadline, tardó {dt:.1f}s"
+    finally:
+        yt_dlp.YoutubeDL = orig
