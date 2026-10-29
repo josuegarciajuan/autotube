@@ -562,6 +562,21 @@ VIEW_GAP_INTERVAL_HOURS = int(os.getenv("VIEW_GAP_INTERVAL_HOURS", "24"))
 LIFECYCLE_ENABLED = os.getenv("LIFECYCLE_ENABLED", "false").lower() == "true"
 LIFECYCLE_CHECK_INTERVAL_MIN = int(os.getenv("LIFECYCLE_CHECK_INTERVAL_MIN", "15"))
 
+# Lifecycle browser isolation (oct 2026). A hung Playwright launch in the
+# lifecycle executor used to block schedule_checker for up to 2h and force an
+# API restart. Run each channel's lifecycle pass in a killable subprocess with
+# a hard timeout. Set LIFECYCLE_SUBPROCESS_ENABLED=false for the legacy
+# in-process path (not recommended).
+LIFECYCLE_SUBPROCESS_ENABLED = (
+    os.getenv("LIFECYCLE_SUBPROCESS_ENABLED", "true").lower() == "true"
+)
+LIFECYCLE_ACTION_TIMEOUT_SEC = int(
+    os.getenv("LIFECYCLE_ACTION_TIMEOUT_SEC", "600")
+)
+BROWSER_LAUNCH_TIMEOUT_SEC = int(
+    os.getenv("BROWSER_LAUNCH_TIMEOUT_SEC", "120")
+)
+
 # ── First comment ──────────────────────────────────────────────
 # Disabled by default — requires commentThreads OAuth scope which most
 # channel tokens don't have, causing 403 errors on every attempt.

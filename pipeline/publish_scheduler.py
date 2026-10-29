@@ -1550,6 +1550,7 @@ def repack_channel_publish_times(
                      AND v.status IN ('uploaded_private','warming','scheduled',
                                       'awaiting_upload','ready')
                      AND v.publish_mode = 'scheduled'
+                     AND COALESCE(v.yt_visibility, '') != 'public'
                 """ + _order_sql,
                 (channel_id,),
             ).fetchall()

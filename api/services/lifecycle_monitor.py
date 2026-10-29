@@ -120,6 +120,7 @@ WARNING_ALERT_RETENTION_TYPES = (
     "short_dispatch_failed",
     "deploy_skipped",
     "packaging_invalid",
+    "ab_test_ctr_fetch_failed",
 )
 
 # ── Retención de alertas de observabilidad (error_*) ──────────
@@ -440,6 +441,7 @@ def check_all_health(db) -> dict:
     resolved += _auto_resolve_stale_warnings(db)
     resolved += _auto_resolve_orphan_alerts(db)
     resolved += _auto_resolve_stale_error_alerts(db)
+    resolved += _auto_resolve_condition_alerts(db)
 
     # ── Check 7: Platform auth/token failures (Facebook, Rumble) ──
     created += _check_platform_auth_errors(db)
@@ -627,6 +629,84 @@ def _auto_resolve_stale_error_alerts(db) -> int:
                 conn.commit()
     except Exception as exc:
         logger.warning("Stale error_* auto-resolve failed: %s", exc)
+    return resolved
+
+
+def _auto_resolve_condition_alerts(db) -> int:
+    """Close alerts whose triggering condition has demonstrably cleared.
+
+    These are event-style alerts with an entity: once the video is published,
+    requeued, or the channel produced a new video, the warning is historical.
+    """
+    resolved = 0
+    try:
+        with db._connect() as conn:
+            # publish_verify_exhausted: video now public (reconciler truth).
+            cur = conn.execute(
+                """UPDATE pipeline_alerts
+                   SET resolved=1, resolved_at=datetime('now'), acknowledged=1,
+                       message=COALESCE(message,'') ||
+                         ' [Auto-resuelto: vídeo confirmado público]'
+                   WHERE resolved=0 AND alert_type='publish_verify_exhausted'
+                     AND entity_type='video' AND entity_id IN (
+                       SELECT id FROM videos
+                       WHERE yt_visibility='public' OR status='published'
+                     )"""
+            )
+            resolved += cur.rowcount
+
+            # failed: video requeued or later completed; the failure alert served
+            # its purpose. Keep it for genuinely abandoned videos.
+            cur = conn.execute(
+                """UPDATE pipeline_alerts
+                   SET resolved=1, resolved_at=datetime('now'), acknowledged=1,
+                       message=COALESCE(message,'') ||
+                         ' [Auto-resuelto: vídeo reencolado/publicado]'
+                   WHERE resolved=0 AND alert_type='failed'
+                     AND entity_type='video' AND entity_id IN (
+                       SELECT id FROM videos
+                       WHERE status IN ('published','ready')
+                          OR progress_phase='queued_retry'
+                     )"""
+            )
+            resolved += cur.rowcount
+
+            # title_similarity_warning: video published; editorial warning is
+            # historical (a changed title cannot be detected reliably here).
+            cur = conn.execute(
+                """UPDATE pipeline_alerts
+                   SET resolved=1, resolved_at=datetime('now'), acknowledged=1,
+                       message=COALESCE(message,'') ||
+                         ' [Auto-resuelto: vídeo publicado]'
+                   WHERE resolved=0 AND alert_type='title_similarity_warning'
+                     AND entity_type='video' AND entity_id IN (
+                       SELECT id FROM videos WHERE status='published'
+                     )"""
+            )
+            resolved += cur.rowcount
+
+            # topic_off_niche_deferred: a later video was produced for the
+            # channel, so the starvation condition cleared.
+            cur = conn.execute(
+                """UPDATE pipeline_alerts AS a
+                   SET resolved=1, resolved_at=datetime('now'), acknowledged=1,
+                       message=COALESCE(a.message,'') ||
+                         ' [Auto-resuelto: canal volvió a generar]'
+                   WHERE a.resolved=0 AND a.alert_type='topic_off_niche_deferred'
+                     AND a.entity_type='system' AND a.entity_id IS NOT NULL
+                     AND EXISTS (
+                       SELECT 1 FROM videos v
+                       WHERE v.channel_id=a.entity_id
+                         AND v.created_at > a.created_at
+                         AND v.status IN ('generating','ready','awaiting_upload',
+                                          'uploaded_private','warming','scheduled','published')
+                     )"""
+            )
+            resolved += cur.rowcount
+            if resolved:
+                conn.commit()
+    except Exception as exc:
+        logger.warning("Condition auto-resolve failed: %s", exc)
     return resolved
 
 

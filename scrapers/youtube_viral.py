@@ -2154,6 +2154,36 @@ class YouTubeViralScraper(BaseScraper):
 
         return blocks
 
+    def _try_next_candidates(self, candidates: list[dict], db, skip_url: str,
+                             limit: int = 3) -> list[dict]:
+        """Try the next unused candidates when the top one cannot produce a script.
+
+        Previously a single candidate with FACTS_INSUFFICIENT / empty LLM output
+        aborted the whole viral pass. A bad candidate must not starve the channel.
+        """
+        tried = 0
+        for candidate in candidates:
+            url = candidate.get("url", "")
+            if not url or url == skip_url:
+                continue
+            if db:
+                try:
+                    if db.get_content_by_url(url, self.canal):
+                        continue
+                except Exception:
+                    pass
+            tried += 1
+            logger.info("[%s] Trying fallback viral candidate %d/%d: '%s'",
+                        self.canal, tried, limit, (candidate.get("title") or "")[:70])
+            item = self.process_candidate(candidate)
+            if item:
+                return [item]
+            if tried >= limit:
+                break
+        logger.warning("[%s] No usable viral candidate after %d fallback attempt(s)",
+                       self.canal, tried)
+        return []
+
     # ── Main scrape method ──────────────────────────────────────
 
     def scrape(self) -> list[dict]:
@@ -2230,9 +2260,10 @@ class YouTubeViralScraper(BaseScraper):
         logger.info("[%s] Step 3: Fetching transcript for %s...", self.canal, video_url[:80])
         transcript_en = self._fetch_transcript(top)
         if not transcript_en:
-            logger.error("[%s] Step 3 FAILED: no transcript available for %s — skipping candidate",
+            logger.error("[%s] Step 3 FAILED: no transcript available for %s — trying next candidate",
                          self.canal, video_id)
-            return items
+            fallback = self._try_next_candidates(candidates, db, video_url)
+            return fallback or items
         logger.info("[%s] Step 3+4 (transcript): done in %.1fs → %d words EN",
                     self.canal, time.time() - t3, len(transcript_en.split()))
 
@@ -2243,8 +2274,9 @@ class YouTubeViralScraper(BaseScraper):
             transcript_en, top["title"]
         )
         if not translated_script:
-            logger.error("[%s] Step 5 FAILED: Translation returned empty — ABORTING (cannot use raw EN content)", self.canal)
-            return items
+            logger.error("[%s] Step 5 FAILED: Translation returned empty — trying next candidate", self.canal)
+            fallback = self._try_next_candidates(candidates, db, video_url)
+            return fallback or items
         else:
             logger.info("[%s] Step 5 (translate): done in %.1fs → %d words ES, title='%s'",
                         self.canal, time.time() - t5, len(translated_script.split()),
@@ -2257,10 +2289,11 @@ class YouTubeViralScraper(BaseScraper):
         adapted_script = self._adapt_duration(translated_script)
         if not adapted_script:
             logger.error("[%s] Step 6 FAILED: Cannot adapt %d-word script to [%d-%d]min target. "
-                          "Content gap too large — aborting scrape.",
+                          "Content gap too large — trying next candidate.",
                           self.canal, len(translated_script.split()),
                           self.target_duration_min, self.target_duration_max)
-            return items
+            fallback = self._try_next_candidates(candidates, db, video_url)
+            return fallback or items
         logger.info("[%s] Step 6 (adapt): done in %.1fs → %d words (~%.1f min)",
                     self.canal, time.time() - t6, len(adapted_script.split()),
                     duration_for_words(self.config, len(adapted_script.split())))

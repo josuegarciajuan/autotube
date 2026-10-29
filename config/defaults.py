@@ -86,6 +86,17 @@ TITLE_NICHE_FIT_MIN = 0.3
 NICHE_ANCHORS = []
 # F4 — coherencia editorial: preferir DIFERIR antes que publicar fuera de nicho.
 NICHE_GUARD_STRICT = False
+# Secondary scrapers that require a residential proxy. Direct access returns
+# 403 from this datacenter, so they stay disabled until the proxy is healthy.
+ATLAS_OBSCURA_ENABLED = False
+QUORA_ENABLED = False
+# "soft" allows a bounded share of adjacent/exploratory themes; "strict" is the
+# legacy binary guard. Adjacent topics are data-driven per channel.
+NICHE_GUARD_MODE = "strict"
+NICHE_STRETCH_MIN_SCORE = 0.20
+NICHE_STRETCH_ALLOWANCE_PCT = 0.15
+NICHE_ADJACENT_TOPICS = []
+NICHE_BLOCKED_TOPICS = []
 # F4 — series de contenido del canal: [{name, seed_queries, episodes}]
 CONTENT_SERIES = []
 

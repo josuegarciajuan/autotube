@@ -474,7 +474,11 @@ def _kill_orphaned_workers(logger) -> int:
                     _transient = any(
                         pat in _err
                         for pat in ("interrupted", "server restarted", "sigterm",
-                                    "worker died early", "worker_died")
+                                    "worker died early", "worker_died",
+                                    "dist_repair_exhausted", "local_fallback_deferred",
+                                    "alguna escena no reproducible",
+                                    "ensamblaje local devolvio vacio",
+                                    "fallo el ensamblaje")
                     )
                     _now_ts = _time.time()
                     _finished = None
@@ -490,7 +494,17 @@ def _kill_orphaned_workers(logger) -> int:
                         _finished is None
                         or (_now_ts - _finished) < _ORPHAN_TRANSIENT_GRACE_SEC
                     )
-                    _transient_recent = _transient and _recent
+                    # Cualquier job failed reciente merece una gracia corta para
+                    # que el worker ejecute su finally (reencolado/cleanup),
+                    # aunque el mensaje no esté en la lista de transitorios.
+                    _recent_failed = (
+                        str(_grow["status"] or "") == "failed"
+                        and (
+                            _finished is None
+                            or (_now_ts - _finished) < _ORPHAN_FAILED_GRACE_SEC
+                        )
+                    )
+                    _transient_recent = (_transient and _recent) or _recent_failed
             except Exception:
                 _transient_recent = False
 
@@ -715,6 +729,7 @@ VIDEO_MEMORY_GUARD_MB = settings.VIDEO_MEMORY_GUARD_MB
 # TRANSITORIA (SIGTERM / restart de la API). Evita la cascada de workers
 # muertos en cada reinicio del scheduler.
 _ORPHAN_TRANSIENT_GRACE_SEC = int(os.environ.get("ORPHAN_TRANSIENT_GRACE_SEC", "1800"))
+_ORPHAN_FAILED_GRACE_SEC = int(os.environ.get("ORPHAN_FAILED_GRACE_SEC", "120"))
 _PIPELINE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=4,
     thread_name_prefix="autotube-pipeline-",

@@ -19,8 +19,9 @@ a su hora original. Nunca se fuerza una publicación manual.
 
 import json
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
+from api.time_utils import parse_utc
 from pipeline.publish_scheduler import MAX_PUBLISH_AHEAD_SAFETY_HOURS
 
 logger = logging.getLogger("autotube.publish_repack")
@@ -268,9 +269,21 @@ def apply_publish_repack(
 
     # ── 2. Filtrar solo cambios reales ──
     changes = []
+    now_utc = datetime.now(timezone.utc)
     for item in plan:
         new = item["new_target"]
         old = item["old_target"]
+        # A past target means the video is already due / awaiting verification.
+        # Re-scheduling it produces YouTube 400 invalidPublishAt and loops every
+        # minute (video 2773, oct 2026). Let publish verification handle it.
+        if item.get("status") in ("uploaded_private", "warming", "scheduled"):
+            old_dt = parse_utc(old) if old else None
+            if old_dt is not None and old_dt <= now_utc:
+                logger.info(
+                    "[%s] repack: skip #%s — target %s ya pasó; lo resuelve publish_verify",
+                    slug, item.get("video_id"), old[:19],
+                )
+                continue
         # Normalizar comparación: old puede venir en formato naive local
         if old and _normalize_iso(old) == _normalize_iso(new):
             item["changed"] = False

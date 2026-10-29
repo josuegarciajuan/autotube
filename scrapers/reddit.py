@@ -1,10 +1,12 @@
 """Reddit scraper — multi-source with graceful degradation.
 
 Source priority per subreddit (first to yield >0 posts wins):
-  1. Reddit OAuth API (if REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET configured)
-  2. PullPush mirror        (api.pullpush.io, no auth, datacenter-friendly)
-  3. Arctic Shift mirror    (arctic-shift.photon-reddit.com, no auth)
-  4. Old Reddit .json       (unauthenticated, often blocked from datacenter IPs)
+  1. Arctic Shift mirror    (arctic-shift.photon-reddit.com, no auth)
+  2. PullPush mirror        (api.pullpush.io, no auth)
+  3. Old Reddit .json       (last resort; often rate-limited from datacenter IPs)
+
+No OAuth account is required or used. A 403 from one source only disables that
+source for the rest of the pass; it never aborts the remaining subreddits.
 """
 
 from __future__ import annotations
@@ -15,11 +17,6 @@ import time
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Callable
 
-from config.settings import (
-    REDDIT_CLIENT_ID,
-    REDDIT_CLIENT_SECRET,
-    REDDIT_USER_AGENT,
-)
 from scrapers.base import BaseScraper, register_scraper
 from scrapers.base import (PermanentBlock, AuthenticationError,
                             RateLimitError, APIUnavailable, ContentNotFound)
@@ -52,16 +49,10 @@ class RedditScraper(BaseScraper):
     PULLPUSH_URL: str = "https://api.pullpush.io/reddit/search/submission/"
     ARCTIC_SHIFT_URL: str = "https://arctic-shift.photon-reddit.com/api/posts/search"
 
-    # Official OAuth endpoint
-    OAUTH_BASE: str = "https://oauth.reddit.com"
-    OAUTH_TOKEN_URL: str = "https://www.reddit.com/api/v1/access_token"
-
-    # ── Global block detection ──────────────────────────────────
-    # When Reddit detects datacenter IPs, ALL subreddits return 403.
-    # Once we see a definitive 403 response, skip remaining subreddits
-    # to avoid wasting time (17+ subreddits × 4 sources × 3 retries).
-    _reddit_blocked: bool = False
-    _blocked_at_source: str = ""
+    # Per-source failure tracking. A 403/429 from one mirror must NOT abort
+    # the whole channel: other mirrors may still work. Only the failing source
+    # is disabled for the remainder of this pass.
+    _SOURCE_DEGRADE_AFTER = 3
 
     def __init__(
         self,
@@ -75,14 +66,8 @@ class RedditScraper(BaseScraper):
     ) -> None:
         super().__init__(rate_limit=rate_limit, max_retries=max_retries)
 
-        # ── Source chain construction ──────────────────────────
-        # Resolve OAuth credentials (from top-level config module)
-        self.reddit_client_id: str = REDDIT_CLIENT_ID or ""
-        self.reddit_client_secret: str = REDDIT_CLIENT_SECRET or ""
-        self.reddit_agent: str = REDDIT_USER_AGENT or self.USER_AGENT
-
-        self._reddit_token: str | None = None
-        self._reddit_token_expiry: float = 0.0
+        self._source_failures: dict[str, int] = {}
+        self._source_disabled: set[str] = set()
 
         # ── Subreddits, sort, time, limit ──────────────────────
         # Priority: constructor params > config object > module-level defaults
@@ -134,8 +119,6 @@ class RedditScraper(BaseScraper):
         # Build source chain (ordered by priority)
         self._sources: list[tuple[str, Callable[[str], list[dict]]]] = self._build_source_chain()
 
-        # Fail-fast: track consecutive subreddits with zero posts
-        # to detect global IP block early (3 consecutive = blocked).
         self._empty_subreddits: int = 0
 
         # PullPush-specific circuit breaker: skip after 3 consecutive failures
@@ -145,16 +128,12 @@ class RedditScraper(BaseScraper):
     # ── Source chain ─────────────────────────────────────────────
 
     def _build_source_chain(self) -> list[tuple[str, Callable[[str], list[dict]]]]:
-        """Return ordered (name, fetcher) pairs based on available credentials."""
-        chain: list[tuple[str, Callable[[str], list[dict]]]] = []
-
-        if self.reddit_client_id and self.reddit_client_secret:
-            chain.append(("oauth", self._fetch_oauth))
-
-        chain.append(("pullpush", self._fetch_pullpush))
-        chain.append(("arctic_shift", self._fetch_arctic_shift))
-        chain.append(("old_reddit", self._fetch_old_reddit))
-        return chain
+        """Return ordered (name, fetcher) pairs. No OAuth account required."""
+        return [
+            ("arctic_shift", self._fetch_arctic_shift),
+            ("pullpush", self._fetch_pullpush),
+            ("old_reddit", self._fetch_old_reddit),
+        ]
 
     # ── Main entry point ─────────────────────────────────────────
 
@@ -168,16 +147,6 @@ class RedditScraper(BaseScraper):
         seen_urls: set[str] = set()
 
         for subreddit in self.subreddits:
-            # ── Fail-fast: Reddit is blocking this IP ──────────
-            if self._reddit_blocked:
-                self.logger.warning(
-                    "Skipping remaining %d subreddits — Reddit is blocking this IP "
-                    "(detected via %s)",
-                    len(self.subreddits) - self.subreddits.index(subreddit),
-                    self._blocked_at_source,
-                )
-                break
-
             self.logger.info("Scraping r/%s (%s/%s, limit=%d)",
                              subreddit, self.sort, self.time_filter, self.limit)
 
@@ -228,105 +197,47 @@ class RedditScraper(BaseScraper):
     # ── Subreddit-level source cascade ───────────────────────────
 
     def _scrape_subreddit(self, subreddit: str) -> list[dict]:
-        """Try each available source until one yields posts for this subreddit."""
+        """Try each available source until one yields posts for this subreddit.
+
+        A 403/429 disables only that source; the next source and the next
+        subreddit are still attempted. This avoids the old failure mode where
+        one blocked mirror aborted all 17 subreddits.
+        """
         for source_name, source_fn in self._sources:
+            if source_name in self._source_disabled:
+                continue
             self.logger.debug("r/%s: trying source '%s'", subreddit, source_name)
             try:
                 posts = source_fn(subreddit)
                 if posts:
                     self.logger.info("r/%s: %d posts from '%s'",
                                      subreddit, len(posts), source_name)
-                    self._empty_subreddits = 0  # reset fail counter on success
-                    self._reddit_blocked = False
+                    self._empty_subreddits = 0
+                    self._source_failures[source_name] = 0
                     return posts
             except PermanentBlock as exc:
-                # 403 = IP blocked globally by Reddit. Stop immediately.
-                self._reddit_blocked = True
-                self._blocked_at_source = f"{source_name} returned 403 for r/{subreddit}"
+                self._source_disabled.add(source_name)
                 self.logger.warning(
-                    "🔒 Reddit global block — %s (via %s). Skipping remaining sources.",
-                    self._blocked_at_source, source_name,
+                    "r/%s: source '%s' blocked (%s) — disabling only this source",
+                    subreddit, source_name, exc,
                 )
-                break
+                continue
             except Exception as exc:
-                self.logger.warning("r/%s: source '%s' failed: %s",
-                                    subreddit, source_name, exc)
+                fails = self._source_failures.get(source_name, 0) + 1
+                self._source_failures[source_name] = fails
+                self.logger.warning("r/%s: source '%s' failed (%d/%d): %s",
+                                    subreddit, source_name, fails,
+                                    self._SOURCE_DEGRADE_AFTER, exc)
+                if fails >= self._SOURCE_DEGRADE_AFTER:
+                    self._source_disabled.add(source_name)
+                    self.logger.warning(
+                        "source '%s' degraded after %d failures — skipping for this pass",
+                        source_name, fails,
+                    )
 
         self.logger.warning("r/%s: ALL sources exhausted (0 posts)", subreddit)
         self._empty_subreddits += 1
-
-        # After 3 consecutive empty subreddits, assume global IP block
-        if self._empty_subreddits >= 3 and not self._reddit_blocked:
-            self._reddit_blocked = True
-            self._blocked_at_source = (
-                f"3 consecutive subreddits returned 0 posts across all sources "
-                f"(last: r/{subreddit})"
-            )
-            self.logger.warning(
-                "🔒 Reddit global block detected — %s. Skipping remaining subreddits.",
-                self._blocked_at_source,
-            )
-
         return []
-
-    # ── Source: Official Reddit OAuth API ────────────────────────
-
-    def _get_oauth_token(self) -> str | None:
-        """Obtain or reuse a Reddit OAuth app-only access token.
-
-        Uses 'client_credentials' grant (application-only, read-only access).
-        Token is cached and reused until ~1 minute before expiry.
-        """
-        if not self.reddit_client_id or not self.reddit_client_secret:
-            return None
-
-        now = time.time()
-        # Reuse token if it's still valid (with 60s safety margin)
-        if self._reddit_token and now < (self._reddit_token_expiry - 60):
-            return self._reddit_token
-
-        self.logger.info("Requesting new Reddit OAuth token...")
-        try:
-            import requests
-
-            resp = requests.post(
-                self.OAUTH_TOKEN_URL,
-                data={"grant_type": "client_credentials"},
-                auth=(self.reddit_client_id, self.reddit_client_secret),
-                headers={"User-Agent": self.reddit_agent},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            token_data = resp.json()
-
-            self._reddit_token = token_data.get("access_token")
-            expires_in = token_data.get("expires_in", 3600)
-            self._reddit_token_expiry = now + expires_in
-
-            self.logger.info("OAuth token obtained (expires in %ds)", expires_in)
-            return self._reddit_token
-        except Exception as exc:
-            self.logger.warning("OAuth token request failed: %s", exc)
-            return None
-
-    def _fetch_oauth(self, subreddit: str) -> list[dict]:
-        """Fetch posts via the official Reddit OAuth API."""
-        token = self._get_oauth_token()
-        if not token:
-            return []
-
-        url = (
-            f"{self.OAUTH_BASE}/r/{subreddit}/{self.sort}/.json"
-            f"?t={self.time_filter}&limit={self.limit}"
-        )
-        headers = {
-            "Authorization": f"bearer {token}",
-            "User-Agent": self.reddit_agent,
-        }
-        data = self._request(url, headers=headers)
-        if data is None:
-            return []
-        return self._extract_posts(data, subreddit)
 
     # ── Source: PullPush mirror ──────────────────────────────────
 
@@ -427,7 +338,7 @@ class RedditScraper(BaseScraper):
     def _extract_posts(data: dict, subreddit: str) -> list[dict]:
         """Parse Reddit JSON listing (data.children[].data) into post dicts.
 
-        Used by: OAuth source and Old Reddit fallback.
+        Used by: Old Reddit fallback.
         """
         posts: list[dict] = []
         children = data.get("data", {}).get("children", [])

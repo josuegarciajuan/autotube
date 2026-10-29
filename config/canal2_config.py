@@ -585,6 +585,11 @@ NICHE_ANCHORS = [
 ]
 # F4: preferir diferir antes que publicar fuera de nicho.
 NICHE_GUARD_STRICT = True
+NICHE_GUARD_MODE = "soft"
+NICHE_STRETCH_MIN_SCORE = 0.20
+NICHE_STRETCH_ALLOWANCE_PCT = 0.15
+NICHE_ADJACENT_TOPICS = ['enigmas', 'misterios sin resolver', 'parapsicologia', 'destino', 'casualidades historicas']
+NICHE_BLOCKED_TOPICS = []
 # F4: series de contenido (coherencia de audiencia + ocupación de búsquedas).
 CONTENT_SERIES = [
     {"name": "Sincronías documentadas",
