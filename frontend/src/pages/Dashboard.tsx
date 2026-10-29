@@ -204,13 +204,30 @@ export default function Dashboard() {
     return msg
   }
 
+  function summarizePartial(s: any): string {
+    const chans = s.channels || []
+    const truncated = chans.filter((c: any) => c.over_channel_deadline || c.partial)
+    if (!truncated.length) return ''
+    const detail = truncated
+      .map((c: any) => `${c.slug}${c.deadline_stage ? ` (${c.deadline_stage})` : ''}`)
+      .join(', ')
+    return ` · Parcial por tiempo en: ${detail}`
+  }
+
   function applyStatsStatus(s: any, showBanner = true) {
     setCollectStatsState(s)
     if (s.status === 'success') {
       const quota = hasQuotaWarning(s)
-      setCollectStatsError(quota)
+      const partial = s.result === 'partial'
+      // Un deadline de canal deja datos reales pero truncados: NO es un éxito
+      // pleno. Se muestra como advertencia para no leer cifras incompletas.
+      setCollectStatsError(quota || partial)
       if (showBanner) {
-        setCollectStatsMsg(`Recoleccion completada: ${summarize(s)}`)
+        setCollectStatsMsg(
+          partial
+            ? `Recolección parcial: ${summarize(s)}${summarizePartial(s)}`
+            : `Recoleccion completada: ${summarize(s)}`
+        )
       }
       setCollectStatsFinishedAt(s.finished_at ? new Date(s.finished_at * 1000).toLocaleTimeString('es-ES', { timeZone: API_TIME_ZONE }) : null)
     } else if (s.status === 'error') {
@@ -228,11 +245,26 @@ export default function Dashboard() {
   // Reintento de polling: los fallos transitorios de red NO abandonan la
   // recolección (antes un solo catch dejaba el botón libre mientras el run
   // seguía vivo → riesgo de duplicados). Backoff creciente acotado (~5 min de
-  // tolerancia); pasado el límite, soltamos el polling sin marcar error.
+  // tolerancia); pasado el límite se avisa explícitamente de que el estado no
+  // se pudo consultar (el run puede seguir vivo en el servidor).
   const STATS_POLL_MAX_FAILURES = 15
   const pollFailuresRef = useRef(0)
+  // Timer único + bandera de loop: evita dos pollings concurrentes (montaje +
+  // click) y permite cancelar al desmontar. Antes los setTimeout quedaban
+  // vivos tras unmount y podían duplicar tráfico/estado.
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pollingRef = useRef(false)
 
-  async function pollStatsStatus() {
+  function clearPollTimer() {
+    if (pollTimerRef.current != null) {
+      clearTimeout(pollTimerRef.current)
+      pollTimerRef.current = null
+    }
+  }
+
+  function pollStatsStatus() {
+    if (pollingRef.current) return
+    pollingRef.current = true
     const poll = async () => {
       try {
         const s = await api.getStatsCollectStatus()
@@ -240,8 +272,9 @@ export default function Dashboard() {
         applyStatsStatus(s)
         if (s.status === 'running') {
           // Sigue mientras haya run (incluido stalled: es diagnóstico)
-          setTimeout(poll, 2000)
+          pollTimerRef.current = setTimeout(poll, 2000)
         } else {
+          pollingRef.current = false
           setCollectingStats(false)
           // Force-invalidate React Query cache so refetch fetches fresh data from the API
           queryClient.invalidateQueries({ queryKey: ['dashboard'] })
@@ -251,13 +284,20 @@ export default function Dashboard() {
         pollFailuresRef.current += 1
         if (pollFailuresRef.current <= STATS_POLL_MAX_FAILURES) {
           const delay = Math.min(2000 * pollFailuresRef.current, 30000)
-          setTimeout(poll, delay)
+          pollTimerRef.current = setTimeout(poll, delay)
         } else {
+          pollingRef.current = false
           setCollectingStats(false)
+          // El run puede seguir vivo: no afirmar que terminó.
+          setCollectStatsError(true)
+          setCollectStatsMsg(
+            'No se pudo consultar el estado de la recolección (red). ' +
+            'El proceso puede seguir en curso en el servidor; recarga el panel para verlo.'
+          )
         }
       }
     }
-    setTimeout(poll, 2000)
+    pollTimerRef.current = setTimeout(poll, 2000)
   }
 
   useEffect(() => {
@@ -277,7 +317,11 @@ export default function Dashboard() {
       } catch { /* ignore */ }
     }
     loadStatus()
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+      clearPollTimer()
+      pollingRef.current = false
+    }
   }, [])
 
   function formatTimeAgo(ts: number): string {

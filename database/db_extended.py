@@ -6527,7 +6527,7 @@ class ExtendedDatabase(Database):
                 if not data:
                     continue
                 subg = int(float(data.get("subscribersGained", 0)))
-                conn.execute(
+                cursor = conn.execute(
                     """UPDATE short_stats
                        SET estimated_minutes_watched = ?,
                            average_view_duration = ?,
@@ -6544,7 +6544,10 @@ class ExtendedDatabase(Database):
                         yt_id,
                     ),
                 )
-                count += conn.total_changes
+                # `conn.total_changes` es acumulativo por conexión: sumarlo en
+                # cada iteración inflaba el contador. Solo cuenta esta fila.
+                if cursor.rowcount > 0:
+                    count += cursor.rowcount
             conn.commit()
         return count
 
@@ -6616,7 +6619,7 @@ class ExtendedDatabase(Database):
                 """SELECT estimated_minutes_watched, subscribers
                    FROM channel_stats_history
                    WHERE channel_id = ?
-                   ORDER BY fetched_at DESC LIMIT 1""",
+                   ORDER BY fetched_at DESC, id DESC LIMIT 1""",
                 (channel_id,),
             ).fetchone()
 
@@ -6655,9 +6658,13 @@ class ExtendedDatabase(Database):
             d["watch_hours"] = round(d["estimated_minutes_watched"] / 60.0, 2)
             d["cumulative_hours"] = round(cumulative_hours, 1)
 
-        # Daily average from the last 30 days of daily data
+        # Daily average from the LAST 30 CALENDAR DAYS (the docstring said 30
+        # but the code averaged the whole retained history, distorting the
+        # projection to 4,000 h). Include zero days present in the table so a
+        # drop in watch time is reflected instead of filtered away.
         daily_avg_hours = 0.0
-        recent_daily = [d for d in daily_data if d["estimated_minutes_watched"] > 0]
+        cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+        recent_daily = [d for d in daily_data if str(d.get("date") or "") >= cutoff]
         if recent_daily:
             daily_avg_hours = round(
                 sum(d["estimated_minutes_watched"] for d in recent_daily)
@@ -6687,6 +6694,9 @@ class ExtendedDatabase(Database):
             "remaining_hours": remaining_hours,
             "daily_avg_hours": daily_avg_hours,
             "estimated_days_to_4000h": estimated_days,
+            # Analytics publica con 48-72 h de retraso: la UI puede explicar
+            # "datos diarios hasta X" sin confundirlo con un fallo.
+            "daily_latest_date": daily_data[-1]["date"] if daily_data else None,
             "daily_breakdown": daily_data,
             "top_videos_by_watchtime": video_data[:10],
         }

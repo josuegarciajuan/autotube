@@ -718,12 +718,17 @@ def get_channel_marathon_analytics(channel_id: int):
                 (channel_id,),
             ).fetchone()
 
-            # Marathon watch hours (from latest stats snapshot per video)
+            # Marathon watch hours from the LATEST snapshot per video.
+            # Antes el JOIN sumaba TODOS los snapshots históricos y el
+            # watch-time se inflaba en cada recolección.
             watch = conn.execute(
                 """SELECT COALESCE(SUM(vsh.estimated_minutes_watched), 0) as total_min,
-                          COUNT(DISTINCT vsh.video_id) as videos_with_stats
+                          COUNT(vsh.video_id) as videos_with_stats
                    FROM videos v
-                   LEFT JOIN video_stats_history vsh ON vsh.video_id = v.id
+                   LEFT JOIN video_stats_history vsh ON vsh.id = (
+                       SELECT MAX(vsh2.id) FROM video_stats_history vsh2
+                       WHERE vsh2.video_id = v.id
+                   )
                    WHERE v.channel_id = ? AND v.is_marathon = 1 AND v.yt_video_id IS NOT NULL""",
                 (channel_id,),
             ).fetchone()

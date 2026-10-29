@@ -3965,6 +3965,8 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
             slug = ch["slug"]
             token_path = TOKENS_DIR / f"{slug}.pickle"
             channel_started = _time_module.time()
+            from datetime import datetime as _dt_utc
+            channel_started_str = _dt_utc.utcnow().strftime("%Y-%m-%d %H:%M:%S")
             coord.heartbeat(
                 phase="channel", channel_slug=slug,
                 channel_deadline_at=channel_started + STATS_CHANNEL_MAX_DURATION_S,
@@ -3990,6 +3992,7 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
                         ch["id"], ch_status, deep=deep,
                         use_data_api=channel_use_data_api,
                         result={"reason": "no token"},
+                        started_at=channel_started_str,
                     )
                 except Exception:
                     pass
@@ -4047,6 +4050,7 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
                     db.record_stats_collection_run(
                         ch["id"], ch_status, deep=deep,
                         use_data_api=channel_use_data_api, result=result,
+                        started_at=channel_started_str,
                     )
                 except Exception:
                     pass
@@ -4087,6 +4091,12 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
                         result.get("deadline_exceeded")
                         or (_time_module.time() - channel_started > STATS_CHANNEL_MAX_DURATION_S)
                     ),
+                    # Un canal puede terminar con datos reales pero truncados
+                    # por deadline: NO es un fallo, pero tampoco cobertura
+                    # completa. El resultado global debe ser `partial`.
+                    "partial": bool(result.get("deadline_exceeded")),
+                    "deadline_stage": result.get("deadline_stage"),
+                    "daily_watchtime_latest_date": result.get("daily_watchtime_latest_date"),
                 })
 
                 # Calculate and store estimated revenue for this channel
@@ -4156,6 +4166,7 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
                         ch["id"], "failed", deep=deep,
                         use_data_api=channel_use_data_api,
                         result={"error": str(exc)},
+                        started_at=channel_started_str,
                     )
                 except Exception:
                     pass
@@ -4176,9 +4187,14 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
             c.get("status") in ("requires_authorization", "public_only", "quota_limited")
             for c in chans
         )
+        # Deadline POR CANAL: el hilo termina sin excepción, pero el canal se
+        # truncó. Debe reflejarse como cobertura parcial, nunca como éxito.
+        any_over_deadline = any(
+            bool(c.get("over_channel_deadline") or c.get("partial")) for c in chans
+        )
         if any_failed:
             global_result = "error"
-        elif any_missing or deadline_hit:
+        elif any_missing or deadline_hit or any_over_deadline:
             global_result = "partial"
         else:
             global_result = "success"
@@ -4234,7 +4250,7 @@ def _collect_youtube_stats(deep: bool = False, force: bool = False, use_data_api
             reach=reach_summary,
             scrape_mode=any_scrape_mode,
             error=final_error,
-            deadline_hit=deadline_hit,
+            deadline_hit=deadline_hit or any_over_deadline,
         )
     except Exception as exc:
         logger.error("Stats collector error: %s", exc)

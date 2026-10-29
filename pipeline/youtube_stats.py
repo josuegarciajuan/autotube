@@ -526,27 +526,41 @@ class YouTubeStatsFetcher:
         try:
             start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
             end_date = datetime.now().strftime("%Y-%m-%d")
-            resp = (
-                self._analytics_service.reports()
-                .query(
-                    ids="channel==MINE",
-                    startDate=start_date,
-                    endDate=end_date,
-                    metrics="estimatedMinutesWatched,subscribersGained",
-                    dimensions="day",
-                    maxResults=min(days, 200),
+            # La API devuelve como máximo 200 filas por página. Antes se pedía
+            # `maxResults=min(days, 200)` sin paginar: para 365 días faltaban
+            # ~165 días y el desglose YPP quedaba incompleto.
+            page_size = 200
+            start_index = 1
+            by_date: dict[str, dict] = {}
+            while True:
+                resp = (
+                    self._analytics_service.reports()
+                    .query(
+                        ids="channel==MINE",
+                        startDate=start_date,
+                        endDate=end_date,
+                        metrics="estimatedMinutesWatched,subscribersGained",
+                        dimensions="day",
+                        sort="day",
+                        maxResults=page_size,
+                        startIndex=start_index,
+                    )
+                    .execute(num_retries=GOOGLE_EXECUTE_RETRIES)
                 )
-                .execute(num_retries=GOOGLE_EXECUTE_RETRIES)
-            )
-            rows = resp.get("rows", [])
-            result = []
-            for row in rows:
-                result.append({
-                    "date": row[0],  # YYYY-MM-DD
-                    "estimatedMinutesWatched": float(row[1]) if row[1] else 0.0,
-                    "subscribersGained": int(row[2]) if row[2] else 0,
-                })
-            logger.debug("Daily analytics: %d days returned for %s", len(rows), self.slug)
+                rows = resp.get("rows", []) or []
+                for row in rows:
+                    # Dedup por fecha: el upsert es idempotente, pero así una
+                    # página repetida no infla el resultado.
+                    by_date[str(row[0])] = {
+                        "date": row[0],  # YYYY-MM-DD
+                        "estimatedMinutesWatched": float(row[1]) if row[1] else 0.0,
+                        "subscribersGained": int(row[2]) if row[2] else 0,
+                    }
+                if len(rows) < page_size:
+                    break
+                start_index += page_size
+            result = [by_date[d] for d in sorted(by_date)]
+            logger.debug("Daily analytics: %d days returned for %s", len(result), self.slug)
             return result
         except Exception as exc:
             logger.warning("Daily analytics API failed for %s: %s", self.slug, exc)
@@ -1161,27 +1175,37 @@ class YouTubeStatsFetcher:
 
     # ── Batch collection ───────────────────────────────────────
 
-    def _collect_and_store_via_egress(self, db, _egress) -> dict:
+    def _collect_and_store_via_egress(self, db, _egress, deep: bool = False,
+                                      deadline: float = None) -> dict:
         """Recolecta stats de un canal gestionado vía el agente (IP residencial).
 
-        El agente hace el fetch (videos + canal + watch-time) y devuelve el
-        payload; aquí se guarda en la DB del server. Solo se usa para canales
-        con egress configurado (no afecta a los canales locales).
+        El agente hace el fetch (long-forms + shorts + canal + Analytics) y
+        devuelve el payload; aquí se guarda en la DB del server con las MISMAS
+        tablas que el camino local. Solo se usa para canales con egress.
+
+        v2 (oct 2026): antes solo insertaba vistas/likes/comentarios de
+        long-forms y usaba `viewsEstimatedMinutes` (métrica inválida) para el
+        watch-time de canal. Ahora persiste shorts, Analytics por contenido y
+        la serie diaria.
         """
-        import sqlite3 as _sqlite
-        from config.settings import DATABASE_PATH
-        video_ids = []
-        rows = []
+        video_rows = []
+        short_rows = []
         channel_id = None
         try:
             with db._connect() as conn:
-                rows = conn.execute(
+                video_rows = conn.execute(
                     "SELECT id, yt_video_id FROM videos "
                     "WHERE channel_id=(SELECT id FROM channels WHERE slug=?) "
                     "AND yt_video_id IS NOT NULL AND yt_video_id != ''",
                     (self.slug,),
                 ).fetchall()
-                video_ids = [r["yt_video_id"] for r in rows]
+                short_rows = conn.execute(
+                    "SELECT s.id, s.youtube_id, COALESCE(s.type,'clip') AS short_type "
+                    "FROM shorts s WHERE s.channel_id=(SELECT id FROM channels WHERE slug=?) "
+                    "AND s.status='published' AND s.youtube_id IS NOT NULL "
+                    "AND s.youtube_id != ''",
+                    (self.slug,),
+                ).fetchall()
                 ch_row = conn.execute(
                     "SELECT id FROM channels WHERE slug=?", (self.slug,)
                 ).fetchone()
@@ -1190,55 +1214,135 @@ class YouTubeStatsFetcher:
             logger.warning("[%s] stats egress: no se pudo leer vídeos: %s", self.slug, exc)
             channel_id = None
 
-        data = _egress.api_call("collect_stats", {"video_ids": video_ids})
+        video_ids = [r["yt_video_id"] for r in (video_rows or [])]
+        short_ids = [r["youtube_id"] for r in (short_rows or [])]
+        data = _egress.api_call("collect_stats", {
+            "video_ids": video_ids,
+            "short_ids": short_ids,
+            "days": 365,
+            "deep": bool(deep),
+        })
         if not data.get("ok"):
             raise RuntimeError(data.get("error", "collect_stats falló"))
         payload = data.get("result", {})
+        analytics = payload.get("analytics") or {}
+        public_videos = payload.get("videos") or {}
+        public_shorts = payload.get("shorts") or {}
 
-        now = datetime.now().isoformat()
+        def _merge_analytics(public: dict, yt_id: str) -> dict:
+            a = analytics.get(yt_id) or {}
+            if not public and not a:
+                return {}
+            return {
+                "viewCount": int(
+                    (public or {}).get("views")
+                    if (public or {}).get("views") is not None
+                    else a.get("analyticsViews", 0)
+                ),
+                "likeCount": int(
+                    (public or {}).get("likes")
+                    if (public or {}).get("likes") is not None
+                    else a.get("likes", 0)
+                ),
+                "commentCount": int(
+                    (public or {}).get("comments")
+                    if (public or {}).get("comments") is not None
+                    else a.get("comments", 0)
+                ),
+                "estimatedMinutesWatched": float(
+                    a.get("estimatedMinutesWatched", 0) or 0
+                ),
+                "averageViewDuration": float(
+                    a.get("averageViewDuration", 0) or 0
+                ),
+                "subscribersGained": int(
+                    float(a.get("subscribersGained", 0) or 0)
+                ),
+                "averageViewPercentage": float(
+                    a.get("averageViewPercentage", 0) or 0
+                ),
+                "analytics_window_days": 365,
+            }
+
         updated = 0
-        vids = payload.get("videos", {})
-        for r in (rows or []):
-            vid = r["id"]
+        for r in (video_rows or []):
             yt = r["yt_video_id"]
-            s = vids.get(yt)
-            if not s:
+            stats = _merge_analytics(public_videos.get(yt) or {}, yt)
+            if not stats:
                 continue
             try:
-                with db._connect() as conn:
-                    conn.execute(
-                        "INSERT INTO video_stats_history "
-                        "(video_id, yt_video_id, views, likes, comments, fetched_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
-                        (vid, yt, int(s.get("views", 0)), int(s.get("likes", 0)),
-                         int(s.get("comments", 0)), now),
-                    )
-                    conn.commit()
+                db.insert_video_stats(r["id"], yt, stats)
                 updated += 1
             except Exception as exc:  # noqa: BLE001
                 logger.debug("[%s] stats egress insert video failed: %s", self.slug, exc)
 
-        ch_updated = False
-        ch = payload.get("channel", {})
-        if ch and channel_id:
+        shorts_updated = 0
+        for r in (short_rows or []):
+            yt = r["youtube_id"]
+            stats = _merge_analytics(public_shorts.get(yt) or {}, yt)
+            if not stats:
+                continue
             try:
-                with db._connect() as conn:
-                    conn.execute(
-                        "INSERT INTO channel_stats_history "
-                        "(channel_id, subscribers, total_views, video_count, "
-                        " estimated_minutes_watched, fetched_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
-                        (channel_id, int(ch.get("subscribers", 0)),
-                         int(ch.get("total_views", 0)), int(ch.get("video_count", 0)),
-                         int(payload.get("watch_time_min", 0) or 0), now),
-                    )
-                    conn.commit()
+                db.insert_short_stats(
+                    r["id"], yt, stats, short_type=r["short_type"]
+                )
+                shorts_updated += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[%s] stats egress insert short failed: %s", self.slug, exc)
+
+        ch_updated = False
+        ch = payload.get("channel") or {}
+        watch_min = payload.get("watch_time_min")
+        if channel_id and (ch or watch_min is not None):
+            try:
+                snapshot: dict = {}
+                if ch:
+                    snapshot.update({
+                        "subscriberCount": int(ch.get("subscribers", 0) or 0),
+                        "viewCount": int(ch.get("total_views", 0) or 0),
+                        "videoCount": int(ch.get("video_count", 0) or 0),
+                    })
+                else:
+                    prev = self._latest_channel_snapshot(db, channel_id)
+                    if prev:
+                        snapshot.update({
+                            "subscriberCount": int(prev.get("subscribers") or 0),
+                            "viewCount": int(prev.get("total_views") or 0),
+                            "videoCount": int(prev.get("video_count") or 0),
+                        })
+                if watch_min is not None:
+                    snapshot["estimatedMinutesWatched"] = float(watch_min or 0)
+                db.insert_channel_stats(channel_id, snapshot)
                 ch_updated = True
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[%s] stats egress insert channel failed: %s", self.slug, exc)
 
-        return {"videos_updated": updated, "shorts_updated": 0,
-                "channel_updated": ch_updated, "via_egress": True}
+        daily = payload.get("daily") or []
+        daily_days = 0
+        if channel_id and daily:
+            try:
+                daily_days = db.upsert_daily_watchtime(channel_id, daily)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[%s] stats egress daily watchtime failed: %s", self.slug, exc)
+
+        errors = payload.get("errors") or {}
+        return {
+            "videos_updated": updated,
+            "shorts_updated": shorts_updated,
+            "channel_updated": ch_updated,
+            "analytics_updated": len(analytics),
+            "daily_watchtime_days": daily_days,
+            "daily_watchtime_latest_date": max(
+                (d["date"] for d in daily), default=None
+            ),
+            "authenticated": True,
+            "analytics_available": bool(analytics),
+            "via_egress": True,
+            # Errores de suboperaciones (p. ej. Analytics) NO convierten el
+            # canal en `failed` si se guardaron datos reales; se reportan para
+            # diagnóstico y la cobertura se clasifica por lo almacenado.
+            "errors": errors,
+        }
 
     def collect_and_store(
         self,
@@ -1277,7 +1381,9 @@ class YouTubeStatsFetcher:
         _egress = _ecf(self.slug)
         if _egress is not None:
             try:
-                return self._collect_and_store_via_egress(db, _egress)
+                return self._collect_and_store_via_egress(
+                    db, _egress, deep=deep, deadline=deadline
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[%s] stats via egress failed: %s", self.slug, exc)
                 return {"videos_updated": 0, "shorts_updated": 0,
@@ -1367,6 +1473,7 @@ class YouTubeStatsFetcher:
                     )
                 deadline_exceeded = True
                 result["deadline_exceeded"] = True
+                result.setdefault("deadline_stage", stage)
                 return False
             return True
 
@@ -1402,34 +1509,58 @@ class YouTubeStatsFetcher:
                     # so the scrape fallback path runs below.
                     quota_exhausted = True
                     result["quota_exhausted"] = True
-                # Scrape fallback: public subscribers + carry-forward totals
+                # Scrape fallback: public subscribers + carry-forward totals.
+                # IMPORTANTE: el scrape de canal puede fallar (bot-check, sin
+                # URL, canal nuevo con 0 subs). Eso NO debe impedir persistir el
+                # watch-time que la Analytics API sí devolvió.
+                scraped_channel = {}
                 if scraper:
-                    scraped_channel = scraper.get_channel_stats(channel)
-                    subs = int(scraped_channel.get("subscriberCount", 0) or 0)
-                    if subs > 0:
-                        carry_views, carry_videos = self._latest_channel_totals(
-                            db, channel["id"]
-                        )
-                        scraped_channel["viewCount"] = str(carry_views)
-                        scraped_channel["videoCount"] = str(carry_videos)
-                        if channel_analytics:
-                            scraped_channel.update(channel_analytics)
-                        db.insert_channel_stats(channel["id"], scraped_channel)
-                        result["channel_updated"] = True
-                        result["channel_stats"] = scraped_channel
-                        result["channel_scraped"] = True
-                        logger.info(
-                            "Channel stats scraped for %s: subs=%s "
-                            "(totals carried forward)",
-                            self.slug, subs,
-                        )
-                    else:
+                    try:
+                        scraped_channel = scraper.get_channel_stats(channel) or {}
+                    except Exception as exc:  # noqa: BLE001
                         logger.warning(
-                            "No channel stats at all for %s (Data API + scrape empty)",
-                            self.slug,
+                            "[%s] channel scrape failed: %s", self.slug, exc
                         )
+                        scraped_channel = {}
+                subs = int(scraped_channel.get("subscriberCount", 0) or 0)
+                prev = self._latest_channel_snapshot(db, channel["id"])
+                has_prev = bool(prev)
+                if channel_analytics or subs > 0 or has_prev:
+                    carry_views, carry_videos = self._latest_channel_totals(
+                        db, channel["id"]
+                    )
+                    snapshot = {
+                        "viewCount": str(carry_views),
+                        "videoCount": str(carry_videos),
+                    }
+                    if subs > 0:
+                        snapshot["subscriberCount"] = str(subs)
+                    elif prev and prev.get("subscribers") is not None:
+                        # Carry forward; nunca convertir un contador conocido
+                        # en un 0 falso por un scrape fallido.
+                        snapshot["subscriberCount"] = str(
+                            int(prev.get("subscribers") or 0)
+                        )
+                    if scraped_channel.get("title"):
+                        snapshot["title"] = scraped_channel["title"]
+                    if channel_analytics:
+                        snapshot.update(channel_analytics)
+                    db.insert_channel_stats(channel["id"], snapshot)
+                    result["channel_updated"] = True
+                    result["channel_stats"] = snapshot
+                    result["channel_scraped"] = bool(subs > 0)
+                    if not channel_analytics:
+                        result["public_only"] = True
+                    logger.info(
+                        "Channel stats fallback for %s: subs=%s analytics=%s "
+                        "(totals carried forward)",
+                        self.slug, subs > 0, bool(channel_analytics),
+                    )
                 else:
-                    logger.warning("No channel stats at all for %s", self.slug)
+                    logger.warning(
+                        "No channel stats at all for %s (Data API + scrape empty)",
+                        self.slug,
+                    )
 
         # ── Gather all video/short IDs ──
         videos = db.get_videos(channel_id=channel["id"] if channel else None, limit=10000)
@@ -1460,10 +1591,14 @@ class YouTubeStatsFetcher:
             if batch_result.get("_quota_exhausted"):
                 quota_exhausted = True
                 result["quota_exhausted"] = True
-            elif batch_result.get("_deadline_exceeded"):
-                deadline_exceeded = True
-                result["deadline_exceeded"] = True
             else:
+                # El deadline puede vencer ENTRE lotes: los lotes ya recibidos
+                # son datos reales y deben persistirse. Antes se descartaban
+                # todos por el flag `_deadline_exceeded`.
+                if batch_result.get("_deadline_exceeded"):
+                    deadline_exceeded = True
+                    result["deadline_exceeded"] = True
+                    result.setdefault("deadline_stage", "data_api_videos")
                 for yt_id, stats in batch_result.items():
                     if yt_id.startswith("_"):  # skip meta keys
                         continue
@@ -1485,10 +1620,13 @@ class YouTubeStatsFetcher:
             if batch_result.get("_quota_exhausted"):
                 quota_exhausted = True
                 result["quota_exhausted"] = True
-            elif batch_result.get("_deadline_exceeded"):
-                deadline_exceeded = True
-                result["deadline_exceeded"] = True
             else:
+                # Mismo criterio que long-forms: conservar lotes completados
+                # aunque el deadline venza antes del último.
+                if batch_result.get("_deadline_exceeded"):
+                    deadline_exceeded = True
+                    result["deadline_exceeded"] = True
+                    result.setdefault("deadline_stage", "data_api_shorts")
                 short_map = {s["youtube_id"]: s for s in shorts if s.get("youtube_id")}
                 for yt_id, stats in batch_result.items():
                     if yt_id.startswith("_"):
@@ -1546,6 +1684,7 @@ class YouTubeStatsFetcher:
                 )
                 if scraped_video_stats.get("_deadline_exceeded"):
                     result["deadline_exceeded"] = True
+                    result.setdefault("deadline_stage", "scrape_fallback")
             try:
                 eligible_s = db.get_scrape_eligible_short_ids(
                     channel["id"] if channel else None,
@@ -1572,13 +1711,19 @@ class YouTubeStatsFetcher:
                 )
                 if scraped_short_stats.get("_deadline_exceeded"):
                     result["deadline_exceeded"] = True
+                    result.setdefault("deadline_stage", "scrape_fallback")
 
-        # ── Bulk video analytics (Analytics API — separate quota, always works) ──
-        if (video_yt_ids and self._analytics_service
+        # ── Bulk analytics (Analytics API — separate quota, always works) ──
+        # Long-forms Y shorts comparten el mismo pool de Analytics. Antes solo
+        # se consultaban los IDs de long-form y luego se intentaba actualizar
+        # shorts con ese resultado: sus métricas de watch-time/duración/subs
+        # quedaban siempre a cero. La unión deduplicada cubre ambos tipos.
+        analytics_ids = list(dict.fromkeys(video_yt_ids + short_yt_ids))
+        if (analytics_ids and self._analytics_service
                 and _stage("bulk_analytics")):
             try:
                 bulk_analytics = self.get_all_videos_analytics(
-                    video_yt_ids, deadline=deadline
+                    analytics_ids, deadline=deadline
                 )
                 if bulk_analytics:
                     video_id_map = {
@@ -1883,6 +2028,7 @@ class YouTubeStatsFetcher:
                                     "— resto omitido", self.slug, _stored, len(_curve_videos),
                                 )
                                 result["deadline_exceeded"] = True
+                                result.setdefault("deadline_stage", "retention_curves")
                                 break
                             yt_id = v.get("yt_video_id")
                             try:
@@ -1927,7 +2073,16 @@ class YouTubeStatsFetcher:
                 daily = self.get_channel_daily_analytics(days=365)
                 if daily:
                     db.upsert_daily_watchtime(channel["id"], daily)
-                    logger.info("Daily watchtime stored for %s: %d days", self.slug, len(daily))
+                    # YouTube Analytics publica con 48-72 h de retraso: la UI
+                    # debe mostrar hasta qué día hay datos, sin tratarlo como
+                    # un fallo de recolección.
+                    latest_day = max(d["date"] for d in daily)
+                    result["daily_watchtime_latest_date"] = latest_day
+                    result["daily_watchtime_days"] = len(daily)
+                    logger.info(
+                        "Daily watchtime stored for %s: %d days (until %s)",
+                        self.slug, len(daily), latest_day,
+                    )
             except Exception as exc:
                 logger.error("Daily watchtime storage failed for %s: %s", self.slug, exc)
 
@@ -2012,6 +2167,22 @@ class YouTubeStatsFetcher:
     # ── Channel carry-forward helper ──────────────────────────
 
     @staticmethod
+    def _latest_channel_snapshot(db, channel_id: int) -> dict | None:
+        """Latest channel snapshot (for carry-forward on failed scrape)."""
+        try:
+            with db._connect() as conn:
+                row = conn.execute(
+                    "SELECT subscribers, total_views, video_count "
+                    "FROM channel_stats_history "
+                    "WHERE channel_id = ? ORDER BY fetched_at DESC, id DESC LIMIT 1",
+                    (channel_id,),
+                ).fetchone()
+            return dict(row) if row else None
+        except Exception as exc:
+            logger.debug("_latest_channel_snapshot failed: %s", exc)
+            return None
+
+    @staticmethod
     def _latest_channel_totals(db, channel_id: int) -> tuple[int, int]:
         """Return the most recent (total_views, video_count) for a channel.
 
@@ -2023,7 +2194,7 @@ class YouTubeStatsFetcher:
             with db._connect() as conn:
                 row = conn.execute(
                     "SELECT total_views, video_count FROM channel_stats_history "
-                    "WHERE channel_id = ? ORDER BY fetched_at DESC LIMIT 1",
+                    "WHERE channel_id = ? ORDER BY fetched_at DESC, id DESC LIMIT 1",
                     (channel_id,),
                 ).fetchone()
             if row:

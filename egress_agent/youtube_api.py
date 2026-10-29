@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
@@ -303,32 +304,99 @@ def update_channel_metadata(cfg: AgentConfig, description: str = None,
 
 
 # ── collect_stats (fetch crudo, sin DB) ────────────────────────
-def collect_stats(cfg: AgentConfig, video_ids: list = None) -> dict:
-    """Recolecta stats crudas desde la IP del agente (videos + canal + watch-time).
+def _analytics_rows(asvc, ids: list, days: int, errors: dict) -> dict:
+    """Analytics por contenido (long-forms y shorts) en lotes de 200.
+
+    Usa la MISMA ventana y métricas que el camino local
+    (`pipeline/youtube_stats.py::get_all_videos_analytics`) para que el
+    resultado de la flota sea funcionalmente equivalente.
+    """
+    out: dict = {}
+    if not ids:
+        return out
+    start_date = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+    end_date = datetime.utcnow().strftime("%Y-%m-%d")
+    metrics = (
+        "estimatedMinutesWatched,averageViewDuration,subscribersGained,"
+        "averageViewPercentage,views,likes,comments"
+    )
+    for i in range(0, len(ids), 200):
+        batch = ids[i:i + 200]
+        try:
+            resp = asvc.reports().query(
+                ids="channel==MINE",
+                startDate=start_date,
+                endDate=end_date,
+                metrics=metrics,
+                dimensions="video",
+                filters="video==" + ",".join(batch),
+                maxResults=200,
+            ).execute()
+            for row in resp.get("rows", []) or []:
+                out[row[0]] = {
+                    "estimatedMinutesWatched": float(row[1] or 0),
+                    "averageViewDuration": float(row[2] or 0),
+                    "subscribersGained": int(float(row[3] or 0)),
+                    "averageViewPercentage": float(row[4] or 0),
+                    "analyticsViews": int(float(row[5] or 0)),
+                    "likes": int(float(row[6] or 0)),
+                    "comments": int(float(row[7] or 0)),
+                }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("collect_stats analytics batch failed: %s", exc)
+            errors["analytics"] = str(exc)[:300]
+    return out
+
+
+def collect_stats(cfg: AgentConfig, video_ids: list = None,
+                  short_ids: list = None, days: int = 365,
+                  deep: bool = False) -> dict:
+    """Recolecta stats crudas desde la IP del agente (videos + shorts + canal).
 
     NO escribe en ninguna DB: devuelve el payload para que el server principal
     lo almacene en su DB. Cubre el 'Recolectar stats' de un canal gestionado.
+
+    v2 (oct 2026): incluye shorts y métricas Analytics por contenido + serie
+    diaria, con la misma ventana (365d) que el camino local. Antes pedía la
+    métrica inválida `viewsEstimatedMinutes` (400) y no cubría shorts.
     """
     svc = _service(cfg)
-    result = {"videos": {}, "channel": {}, "watch_time_min": None}
-    if video_ids:
-        for i in range(0, len(video_ids), 50):
-            batch = video_ids[i:i + 50]
+    result = {
+        "version": 2,
+        "videos": {},
+        "shorts": {},
+        "channel": {},
+        "watch_time_min": None,
+        "analytics": {},
+        "daily": [],
+        "errors": {},
+    }
+
+    def _fetch_public(ids: list, target: dict, label: str) -> None:
+        for i in range(0, len(ids), 50):
+            batch = ids[i:i + 50]
             try:
                 resp = svc.videos().list(part="statistics,contentDetails",
                                          id=",".join(batch)).execute()
             except Exception as exc:  # noqa: BLE001
-                logger.warning("collect_stats videos batch failed: %s", exc)
+                logger.warning("collect_stats %s batch failed: %s", label, exc)
+                result["errors"][label] = str(exc)[:300]
                 continue
             for it in resp.get("items", []):
                 st = it.get("statistics", {})
                 cd = it.get("contentDetails", {})
-                result["videos"][it["id"]] = {
+                target[it["id"]] = {
                     "views": int(st.get("viewCount", 0) or 0),
                     "likes": int(st.get("likeCount", 0) or 0),
                     "comments": int(st.get("commentCount", 0) or 0),
                     "duration_sec": _iso_duration_to_sec(cd.get("duration", "")),
                 }
+
+    video_ids = [v for v in (video_ids or []) if v]
+    short_ids = [s for s in (short_ids or []) if s]
+    _fetch_public(video_ids, result["videos"], "videos")
+    _fetch_public(short_ids, result["shorts"], "shorts")
+
     try:
         cresp = svc.channels().list(part="statistics,snippet", mine=True).execute()
         c = cresp["items"][0]
@@ -341,15 +409,58 @@ def collect_stats(cfg: AgentConfig, video_ids: list = None) -> dict:
         }
     except Exception as exc:  # noqa: BLE001
         logger.warning("collect_stats channel failed: %s", exc)
+        result["errors"]["channel"] = str(exc)[:300]
+
     try:
         asvc = _service(cfg, "youtubeAnalytics", "v2")
-        r = asvc.reports().query(ids="channel==MINE", startDate="2020-01-01",
-                                 endDate="today", metrics="viewsEstimatedMinutes").execute()
-        rows = r.get("rows", [])
+        # Watch-time acumulado de canal en la MISMA ventana móvil que local.
+        start_date = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+        end_date = datetime.utcnow().strftime("%Y-%m-%d")
+        r = asvc.reports().query(
+            ids="channel==MINE",
+            startDate=start_date,
+            endDate=end_date,
+            metrics="estimatedMinutesWatched",
+        ).execute()
+        rows = r.get("rows", []) or []
         if rows:
-            result["watch_time_min"] = rows[0][0]
+            result["watch_time_min"] = float(rows[0][0] or 0)
+
+        # Serie diaria (paginada: 200 filas por página).
+        start_index = 1
+        by_date: dict = {}
+        while True:
+            dr = asvc.reports().query(
+                ids="channel==MINE",
+                startDate=start_date,
+                endDate=end_date,
+                metrics="estimatedMinutesWatched,subscribersGained",
+                dimensions="day",
+                sort="day",
+                maxResults=200,
+                startIndex=start_index,
+            ).execute()
+            drows = dr.get("rows", []) or []
+            for row in drows:
+                by_date[str(row[0])] = {
+                    "date": row[0],
+                    "estimatedMinutesWatched": float(row[1] or 0),
+                    "subscribersGained": int(float(row[2] or 0)),
+                }
+            if len(drows) < 200:
+                break
+            start_index += 200
+        result["daily"] = [by_date[d] for d in sorted(by_date)]
+
+        # Analytics por contenido: long-forms + shorts en el mismo pool.
+        analytics_ids = list(dict.fromkeys(video_ids + short_ids))
+        result["analytics"] = _analytics_rows(
+            asvc, analytics_ids, days, result["errors"]
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("collect_stats analytics failed: %s", exc)
+        result["errors"]["analytics"] = str(exc)[:300]
+
     return {"ok": True, "result": result}
 
 
