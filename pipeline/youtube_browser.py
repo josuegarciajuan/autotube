@@ -547,6 +547,13 @@ class YouTubeBrowser:
                     launch_kwargs["user_agent"] = fp["user_agent"]
                 if self.proxy:
                     launch_kwargs["proxy"] = self.proxy
+                try:
+                    from config.settings import BROWSER_LAUNCH_TIMEOUT_SEC
+                    launch_kwargs["timeout"] = max(
+                        30, int(BROWSER_LAUNCH_TIMEOUT_SEC)
+                    ) * 1000
+                except Exception:
+                    pass
                 self._context = self._playwright.chromium.launch_persistent_context(
                     **launch_kwargs
                 )

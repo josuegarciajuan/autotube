@@ -56,6 +56,62 @@ def _get_lifecycle_executor():
         )
     return _lifecycle_executor
 
+
+def _run_lifecycle_subprocess(slug: str, timeout_sec: int) -> dict:
+    """Run one channel's lifecycle pass in a killable subprocess.
+
+    The sync Playwright API is thread-bound and a hung driver cannot be
+    cancelled from another thread. A subprocess gives us a hard kill switch:
+    the scheduler never waits on a dead browser again.
+    """
+    import json
+    import os
+    import signal
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    script = root / "scripts" / "run_lifecycle_actions.py"
+    cmd = [sys.executable, str(script), "--slug", slug]
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True,
+    )
+    try:
+        out, err = proc.communicate(timeout=max(30, int(timeout_sec)))
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        try:
+            out, err = proc.communicate(timeout=10)
+        except Exception:
+            out, err = "", ""
+        raise TimeoutError(
+            f"lifecycle action for {slug} exceeded {timeout_sec}s — killed"
+        )
+    if err.strip() and proc.returncode != 0:
+        logging.getLogger("autotube.lifecycle").warning(
+            "Lifecycle [%s] stderr: %s", slug, err.strip()[-1200:]
+        )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"lifecycle subprocess for {slug} exited {proc.returncode}: "
+            f"{err.strip()[-800:]}"
+        )
+    lines = [ln for ln in (out or "").strip().splitlines() if ln.strip()]
+    if not lines:
+        return {"processed": 0, "succeeded": 0, "failed": 0}
+    try:
+        return json.loads(lines[-1])
+    except Exception as exc:
+        raise RuntimeError(f"invalid lifecycle subprocess output: {exc}") from exc
+
 # ── Lifespan ─────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -3699,19 +3755,31 @@ async def _process_lifecycle_actions():
         
         grand_total = {"processed": 0, "succeeded": 0, "failed": 0}
         
+        from config.settings import (
+            LIFECYCLE_SUBPROCESS_ENABLED, LIFECYCLE_ACTION_TIMEOUT_SEC,
+        )
+
         for ch in channels:
             slug = ch.get("slug")
             if not slug:
                 continue
             try:
-                mgr = VideoLifecycleManager(slug)
-                # sync Playwright inside an async function raises
-                # "Playwright Sync API inside the asyncio loop" (action #307).
-                # Run it in the dedicated thread; never on the event loop.
-                loop = asyncio.get_running_loop()
-                result = await loop.run_in_executor(
-                    _get_lifecycle_executor(), mgr.process_due_actions,
-                )
+                if LIFECYCLE_SUBPROCESS_ENABLED:
+                    # Aislamiento duro: si Playwright/Chromium se cuelga, se
+                    # mata el grupo de procesos y el scheduler sigue vivo.
+                    result = await asyncio.to_thread(
+                        _run_lifecycle_subprocess, slug,
+                        LIFECYCLE_ACTION_TIMEOUT_SEC,
+                    )
+                else:
+                    mgr = VideoLifecycleManager(slug)
+                    # sync Playwright inside an async function raises
+                    # "Playwright Sync API inside the asyncio loop" (action #307).
+                    # Run it in the dedicated thread; never on the event loop.
+                    loop = asyncio.get_running_loop()
+                    result = await loop.run_in_executor(
+                        _get_lifecycle_executor(), mgr.process_due_actions,
+                    )
                 grand_total["processed"] += result.get("processed", 0)
                 grand_total["succeeded"] += result.get("succeeded", 0)
                 grand_total["failed"] += result.get("failed", 0)
