@@ -41,7 +41,7 @@ class WikipediaScraper(BaseScraper):
         random_count: int = 5,
         category_limit: int = 2,
         config: SimpleNamespace | None = None,
-        rate_limit: float = 5.0,
+        rate_limit: float = 8.0,
         max_retries: int = 3,
     ) -> None:
         super().__init__(rate_limit=rate_limit, max_retries=max_retries)
