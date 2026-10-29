@@ -182,8 +182,24 @@ def _verify_published_status_bg(video_id: int, channel_slug: str, yt_video_id: s
         # ── Free wall scrape (RSS) ──
         public_ids = {}
         try:
-            from pipeline.youtube_wall_scraper import fetch_channel_public_video_ids
-            public_ids = fetch_channel_public_video_ids(channel_id)
+            from pipeline.youtube_wall_scraper import (
+                fetch_channel_public_video_ids, FeedUnavailable,
+            )
+            public_ids = fetch_channel_public_video_ids(
+                channel_id, raise_on_http_error=True
+            )
+        except FeedUnavailable as exc:
+            # Feed down is not evidence that the video is private. Reintentar
+            # sin consumir el presupuesto de 3 intentos (el 404/500 duró días
+            # en oct 2026 y agotó verificaciones de vídeos que sí eran públicos).
+            vlog.warning(
+                "[%s] RSS feed DOWN for #%d: %s — retry in %dmin (no retry consumed)",
+                channel_slug, video_id, str(exc)[:200], _PUBLISH_RETRY_MINUTES,
+            )
+            _schedule_publish_retry(
+                video_id, _PUBLISH_RETRY_MINUTES, count_attempt=False
+            )
+            return
         except Exception as exc:
             vlog.warning("[%s] Wall-scrape exception for #%d: %s — retry in %dmin",
                          channel_slug, video_id, str(exc)[:200], _PUBLISH_RETRY_MINUTES)
@@ -334,7 +350,8 @@ def _raise_publish_not_detected_alert(video_id: int, channel_slug: str,
                    channel_slug, video_id, str(e)[:200])
 
 
-def _schedule_publish_retry(video_id: int, delay_minutes: int):
+def _schedule_publish_retry(video_id: int, delay_minutes: int,
+                            count_attempt: bool = True):
     """Schedule a retry verification in `delay_minutes` minutes.
 
     Anti-bucle (antiban, ago 2026): comportamiento humano — máximo
@@ -344,7 +361,7 @@ def _schedule_publish_retry(video_id: int, delay_minutes: int):
     consultar YouTube. El vídeo queda marcado para revisión del operador.
     """
     db = ExtendedDatabase()
-    if _get_retry_count(video_id) >= _PUBLISH_VERIFY_MAX_RETRIES:
+    if count_attempt and _get_retry_count(video_id) >= _PUBLISH_VERIFY_MAX_RETRIES:
         vlog = logger.getChild("publish_verify")
         video = db.get_video(video_id)
         yt_video_id = (video or {}).get("yt_video_id") or ""
@@ -424,8 +441,10 @@ def _schedule_publish_retry(video_id: int, delay_minutes: int):
     retry_at = datetime.now(_dt_timezone.utc) + timedelta(minutes=delay_minutes)
     with db._connect() as conn:
         conn.execute(
-            "UPDATE videos SET published_retry_at = ?, published_retry_count = COALESCE(published_retry_count, 0) + 1 WHERE id = ?",
-            (retry_at.isoformat(), video_id),
+            "UPDATE videos SET published_retry_at = ?, "
+            "published_retry_count = COALESCE(published_retry_count, 0) + ? "
+            "WHERE id = ?",
+            (retry_at.isoformat(), 1 if count_attempt else 0, video_id),
         )
         conn.commit()
 
@@ -1482,6 +1501,9 @@ def migrate_v2(db_path: str = None):
 
     # ── v72: P01 — identidad de escena final + provenance de selección de media ──
     _migrate_v72(conn, logger)
+
+    # ── v73: soft niche — score/decisión por vídeo (exploración acotada) ──
+    _migrate_v73(conn, logger)
 
     conn.commit()
     conn.close()
@@ -13217,6 +13239,29 @@ def _migrate_v70(conn, logger):
 
     conn.commit()
     logger.info("Migration v70: franja-first duplicate index ready")
+
+
+def _migrate_v73(conn, logger):
+    """Idempotent v73: soft-niche score/decision stored per video."""
+    cols = (
+        ("niche_fit_score", "REAL"),
+        ("niche_stretch", "INTEGER DEFAULT 0"),
+        ("niche_decision", "TEXT DEFAULT ''"),
+    )
+    try:
+        existing = {row[1] for row in conn.execute("PRAGMA table_info('videos')")}
+        for name, typ in cols:
+            if name in existing:
+                continue
+            try:
+                conn.execute(f"ALTER TABLE videos ADD COLUMN {name} {typ}")
+                logger.info("Migration v73: videos.%s added", name)
+            except sqlite3.OperationalError as exc:
+                logger.debug("Migration v73 videos.%s: %s", name, exc)
+    except sqlite3.OperationalError as exc:
+        logger.debug("Migration v73: videos not present yet (%s)", exc)
+    conn.commit()
+    logger.info("Migration v73: soft-niche metadata ready")
 
 
 def _migrate_v72(conn, logger):

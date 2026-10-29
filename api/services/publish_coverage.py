@@ -55,6 +55,7 @@ def _channel_pending(db, channel_id: int) -> list[dict]:
                      AND v.publish_mode = 'scheduled'
                      AND v.status IN ('uploaded_private','warming','scheduled',
                                       'awaiting_upload','ready')
+                     AND COALESCE(v.yt_visibility, '') != 'public'
                    ORDER BY COALESCE(v.uploaded_at, v.scheduled_upload_at, v.created_at)
                 """, (channel_id,),
             ).fetchall()

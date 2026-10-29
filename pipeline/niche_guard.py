@@ -63,6 +63,32 @@ def _channel_vocabulary(cfg) -> set[str]:
     return vocab
 
 
+def _adjacent_terms(cfg) -> set[str]:
+    out: set[str] = set()
+    for value in (getattr(cfg, "NICHE_ADJACENT_TOPICS", []) or []):
+        out.update(_significant(str(value)))
+    return out
+
+
+def _blocked_terms(cfg) -> set[str]:
+    out: set[str] = set()
+    for value in (getattr(cfg, "NICHE_BLOCKED_TOPICS", []) or []):
+        out.update(_significant(str(value)))
+    return out
+
+
+def _token_matches(anchor: str, token: str) -> bool:
+    """Prefix/fuzzy match so cerebro≈cerebral, sincron≈sincronía."""
+    if not anchor or not token:
+        return False
+    if anchor == token or token.startswith(anchor) or anchor.startswith(token):
+        return True
+    # Conservative common-prefix match for inflections (>=5 chars).
+    if len(anchor) >= 5 and len(token) >= 5:
+        return anchor[:5] == token[:5]
+    return False
+
+
 def is_guard_enabled(cfg) -> bool:
     if not bool(getattr(cfg, "NICHE_GUARD_ENABLED", True)):
         return False
@@ -77,10 +103,25 @@ def niche_fit_score(text: str, cfg) -> float:
     tokens = set(_significant(text or ""))
     if not tokens:
         return NEUTRAL_FIT
+    blocked = _blocked_terms(cfg)
+    if blocked and any(_token_matches(b, t) for b in blocked for t in tokens):
+        return 0.0
     anchors = _anchors(cfg)
-    anchor_hits = {a for a in anchors if a in tokens or a in norm}
+    anchor_hits = {
+        a for a in anchors
+        if a in tokens or a in norm or any(_token_matches(a, t) for t in tokens)
+    }
     if anchor_hits:
         return min(1.0, 0.6 + 0.1 * min(len(anchor_hits) - 1, 4))
+    adjacent = _adjacent_terms(cfg)
+    adjacent_hits = {
+        a for a in adjacent
+        if a in tokens or a in norm or any(_token_matches(a, t) for t in tokens)
+    }
+    if adjacent_hits:
+        # Adjacent themes must land in the stretch band (below the core
+        # on-niche threshold, above the exploration floor).
+        return min(0.28, 0.22 + 0.02 * min(len(adjacent_hits), 3))
     vocab = _channel_vocabulary(cfg)
     if vocab:
         overlap = len(tokens & vocab) / max(1, min(len(tokens), 6))
@@ -89,16 +130,29 @@ def niche_fit_score(text: str, cfg) -> float:
     return 0.0
 
 
+def niche_decision(text: str, cfg) -> tuple[str, float]:
+    """Return (decision, score) where decision is on_niche|stretch|off_niche."""
+    score = niche_fit_score(text, cfg)
+    on_threshold = float(getattr(cfg, "TITLE_NICHE_FIT_MIN", 0.3) or 0.3)
+    stretch_threshold = float(getattr(cfg, "NICHE_STRETCH_MIN_SCORE", 0.20) or 0.20)
+    is_soft = str(getattr(cfg, "NICHE_GUARD_MODE", "strict") or "strict").lower() == "soft"
+    if score >= on_threshold:
+        return "on_niche", score
+    if is_soft and score >= stretch_threshold:
+        return "stretch", score
+    return "off_niche", score
+
+
 def is_on_niche(text: str, cfg) -> bool:
-    """True unless the text clearly lacks any niche anchor/vocabulary."""
+    """True unless the text clearly lacks any niche anchor/vocabulary.
+
+    In soft mode, adjacent themes above ``NICHE_STRETCH_MIN_SCORE`` are also
+    kept here; the caller enforces the weekly exploration quota.
+    """
     if not is_guard_enabled(cfg):
         return True
-    threshold = float(getattr(cfg, "TITLE_NICHE_FIT_MIN", 0.3) or 0.3)
-    try:
-        return niche_fit_score(text, cfg) >= threshold
-    except Exception as exc:  # noqa: BLE001 — fail-open
-        logger.debug("niche fit error (fail-open): %s", exc)
-        return True
+    decision, _ = niche_decision(text, cfg)
+    return decision in ("on_niche", "stretch")
 
 
 def filter_on_niche(items: list, text_getter, cfg,

@@ -95,6 +95,10 @@ class PipelineOrchestrator:
         # recolectados al inicio de la generación del guion.
         self._demand_candidates: list = []
         self._last_ranking: list = []  # Fase 4: desglose del último ranking
+        # Soft niche guard state (persisted by the worker).
+        self._niche_score: float = 0.0
+        self._niche_stretch: bool = False
+        self._niche_decision: str = ""
 
         # Load config via bridge (DB-aware) or fall back to Python module
         if canal not in CHANNEL_CONFIGS:
@@ -151,20 +155,25 @@ class PipelineOrchestrator:
             }
             # ── Secondary scrapers (fallback when primaries yield too little) ──
             self._secondary_scrapers = {}
-            try:
-                from scrapers.atlas_obscura import AtlasObscuraScraper
-                self._secondary_scrapers["atlas_obscura"] = AtlasObscuraScraper(
-                    config=self.config,
-                )
-                logger.debug("[%s] Atlas Obscura scraper available as fallback", self.canal)
-            except Exception as e:
-                logger.debug("[%s] Atlas Obscura scraper unavailable: %s", self.canal, e)
-            try:
-                from scrapers.quora import QuoraScraper
-                self._secondary_scrapers["quora"] = QuoraScraper(config=self.config)
-                logger.debug("[%s] Quora scraper available as fallback", self.canal)
-            except Exception as e:
-                logger.debug("[%s] Quora scraper unavailable: %s", self.canal, e)
+            # Atlas/Quora lack a working residential proxy (direct 403) and are
+            # deliberately disabled by default. Enable per channel only after
+            # the egress proxy is healthy.
+            if bool(getattr(self.config, "ATLAS_OBSCURA_ENABLED", False)):
+                try:
+                    from scrapers.atlas_obscura import AtlasObscuraScraper
+                    self._secondary_scrapers["atlas_obscura"] = AtlasObscuraScraper(
+                        config=self.config,
+                    )
+                    logger.debug("[%s] Atlas Obscura scraper available as fallback", self.canal)
+                except Exception as e:
+                    logger.debug("[%s] Atlas Obscura scraper unavailable: %s", self.canal, e)
+            if bool(getattr(self.config, "QUORA_ENABLED", False)):
+                try:
+                    from scrapers.quora import QuoraScraper
+                    self._secondary_scrapers["quora"] = QuoraScraper(config=self.config)
+                    logger.debug("[%s] Quora scraper available as fallback", self.canal)
+                except Exception as e:
+                    logger.debug("[%s] Quora scraper unavailable: %s", self.canal, e)
             # Add viral scraper if enabled for this channel
             if getattr(self.config, "VIRAL_ENABLED", False):
                 try:
@@ -1019,12 +1028,47 @@ class PipelineOrchestrator:
         except Exception as exc:  # noqa: BLE001
             logger.debug("[%s] niche-defer alert failed: %s", self.canal, exc)
 
-    def _defer_if_off_niche(self, result) -> bool:
-        """F4: en modo estricto, difiere un guion cuyo tema no encaja en el nicho.
+    def _niche_exploration_allowed(self) -> bool:
+        """True if this channel still has soft-niche exploration quota this week."""
+        try:
+            pct = float(getattr(self.config, "NICHE_STRETCH_ALLOWANCE_PCT", 0.15) or 0.0)
+            if pct <= 0:
+                return False
+            channel_id = self._get_channel_id()
+            if not channel_id:
+                return False
+            with self.db._connect() as conn:
+                row = conn.execute(
+                    """SELECT COUNT(*) AS total,
+                              SUM(COALESCE(niche_stretch, 0)) AS stretch
+                       FROM videos
+                       WHERE channel_id = ?
+                         AND created_at >= datetime('now', '-7 days')
+                         AND status IN ('generating','ready','awaiting_upload',
+                                        'uploaded_private','warming','scheduled',
+                                        'published','validation_failed')""",
+                    (channel_id,),
+                ).fetchone()
+            total = int((row["total"] if row else 0) or 0)
+            used = int((row["stretch"] if row else 0) or 0)
+            allowed = max(1, int(total * pct))
+            if used < allowed:
+                return True
+            logger.info(
+                "[%s] niche stretch quota exhausted (%d/%d in 7d) — deferring adjacent theme",
+                self.canal, used, allowed,
+            )
+            return False
+        except Exception as exc:  # noqa: BLE001 — fail-open to avoid starvation
+            logger.debug("[%s] niche quota check failed (fail-open): %s", self.canal, exc)
+            return True
 
-        Se aplica a TODAS las rutas (original/viral/maratón): el guard previo de
-        candidatos solo cubría la ruta normal, por eso aparecían temas ajenos.
-        Fail-open: cualquier error de scoring no bloquea.
+    def _defer_if_off_niche(self, result) -> bool:
+        """Difiere un guion fuera de nicho; en modo soft permite adyacentes.
+
+        - ``on_niche``: se publica.
+        - ``stretch`` y queda cupo semanal: se publica marcado como exploración.
+        - ``off_niche`` o sin cupo: se difiere (no se publica random).
         """
         if not result or self.db is None:
             return False
@@ -1036,14 +1080,29 @@ class PipelineOrchestrator:
         if not title:
             return False
         try:
-            from pipeline.niche_guard import is_on_niche
-            if is_on_niche(str(title), self.config):
-                return False
-        except Exception:  # noqa: BLE001
+            from pipeline.niche_guard import is_on_niche, niche_decision
+            # Keep the legacy hook for callers/tests that monkeypatch
+            # is_on_niche; soft mode only refines an already-allowed theme.
+            if not is_on_niche(str(title), self.config):
+                decision, score = "off_niche", 0.0
+            else:
+                decision, score = niche_decision(str(title), self.config)
+        except Exception:  # noqa: BLE001 — fail-open
+            return False
+        self._niche_score = float(score or 0.0)
+        self._niche_decision = decision
+        if decision == "on_niche":
+            return False
+        if decision == "stretch" and self._niche_exploration_allowed():
+            self._niche_stretch = True
+            logger.info(
+                "[%s] niche stretch allowed (score=%.2f): '%s'",
+                self.canal, score, str(title)[:90],
+            )
             return False
         logger.warning(
-            "[%s] Tema fuera de nicho (estricto) — guion diferido: '%s'",
-            self.canal, str(title)[:90])
+            "[%s] Tema fuera de nicho (%s, score=%.2f) — guion diferido: '%s'",
+            self.canal, decision, score, str(title)[:90])
         self._emit_niche_defer_alert("tema fuera de nicho")
         self._script_deferred = True
         return True
@@ -2300,6 +2359,7 @@ class PipelineOrchestrator:
             }
 
         except Exception as e:
+            self._last_video_error = str(e)
             logger.error(f"[{self.canal}] Video assembly failed: {e}")
             _safe_log_error(self.db, self.canal, "video", str(e))
             return None

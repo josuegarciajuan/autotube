@@ -28,6 +28,10 @@ logger = logging.getLogger("autotube.wall_scraper")
 # Namespace used by the YouTube RSS schema.
 YT_NS = "http://www.youtube.com/xml/schemas/2015"
 
+class FeedUnavailable(RuntimeError):
+    """The channel RSS feed could not be fetched (HTTP/network failure)."""
+
+
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
@@ -51,7 +55,7 @@ def _parse_published_utc(raw: Optional[str]) -> Optional[str]:
 
 
 def fetch_channel_public_video_ids(
-    channel_id: str, timeout: int = 30
+    channel_id: str, timeout: int = 30, raise_on_http_error: bool = False
 ) -> Dict[str, str]:
     """Fetch the channel's recent public uploads from its RSS feed.
 
@@ -63,6 +67,10 @@ def fetch_channel_public_video_ids(
         Mapping of {yt_video_id: published_iso_utc} for the public uploads
         currently listed in the feed (most recent ~15). Empty dict on any
         failure (network, parse, empty feed) — callers decide how to react.
+
+        ``raise_on_http_error=True`` raises :class:`FeedUnavailable` for
+        HTTP/network failures. Publish verification uses it to distinguish
+        "feed down" (do not consume retries) from "video not in the feed".
     """
     if not channel_id:
         logger.warning("wall_scraper: empty channel_id — cannot scrape")
@@ -80,12 +88,22 @@ def fetch_channel_public_video_ids(
                 "wall_scraper: RSS HTTP %d for channel %s",
                 resp.status_code, channel_id,
             )
+            if raise_on_http_error:
+                raise FeedUnavailable(
+                    f"RSS HTTP {resp.status_code} for channel {channel_id}"
+                )
             return {}
+    except FeedUnavailable:
+        raise
     except Exception as exc:
         logger.warning(
             "wall_scraper: RSS fetch error for channel %s: %s",
             channel_id, str(exc)[:200],
         )
+        if raise_on_http_error:
+            raise FeedUnavailable(
+                f"RSS fetch error for channel {channel_id}: {exc}"
+            ) from exc
         return {}
 
     try:
