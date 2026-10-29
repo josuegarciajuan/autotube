@@ -728,7 +728,12 @@ class DistributedOrchestrator(PipelineOrchestrator):
             "memMb": int(os.environ.get("AUTOTUBE_DIST_MEM_MB", "2048") or 2048),
             "requiresTags": tags,
         }
-        _render_timeout = float(os.environ.get("AUTOTUBE_DIST_TIMEOUT_SEC", "1800") or 1800) + 120
+        _render_base = float(os.environ.get("AUTOTUBE_DIST_TIMEOUT_SEC", "1800") or 1800) + 120
+        # Timeout adaptativo: 211 escenas a 2 hilos no caben en 32 min. Dar
+        # margen por escena evita cancelar una flota que iba a terminar, sin
+        # convertirlo en un timeout infinito.
+        _render_adaptive = 600.0 + 12.0 * len(scenes_params)
+        _render_timeout = min(3600.0, max(_render_base, _render_adaptive))
         # Cota dura del MOTOR (deadlineSec): evita que una unidad nunca
         # planificada bloquee la ejecución. maxAttempts=3 → ×3 + margen.
         _render_deadline_env = _env_int("AUTOTUBE_DIST_RENDER_DEADLINE_SEC", 0)
@@ -823,6 +828,15 @@ class DistributedOrchestrator(PipelineOrchestrator):
         orig = ve._concat_body_batched
 
         def _wrapped(segment_paths, block_ranges, output_path, batch_size=25):
+            # Batch más pequeño = push más corto por SSH. El timeout de subida
+            # del executor es fijo (10 min) y un batch de 25 segmentos podía
+            # superarlo en redes lentas, agotando las rondas de reparación.
+            try:
+                _env_bs = int(os.environ.get("AUTOTUBE_DIST_CONCAT_BATCH_SIZE", "15") or 15)
+                if _env_bs > 0:
+                    batch_size = max(1, min(25, _env_bs))
+            except (TypeError, ValueError):
+                batch_size = 15
             dist_exc = None
             try:
                 if self._dist_concat_body_batched(

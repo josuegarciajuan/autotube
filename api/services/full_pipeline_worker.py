@@ -913,6 +913,7 @@ _TRANSIENT_ERROR_PATTERNS = (
     "timeout", "memory guard", "broken pipe", "brokenpipe",
     "orphaned: process lost", "abortado: memoria", "ram insuficiente",
     "dist_repair_exhausted", "local_fallback_deferred",
+    "alguna escena no reproducible", "ensamblaje local devolvio vacio",
     "interrupted", "server restarted", "sigterm",
 )
 
@@ -960,6 +961,23 @@ def _maybe_requeue_transient(db, job_id: int, video_id: int,
     except Exception as exc:  # noqa: BLE001 — nunca romper el finally
         logger.warning("No se pudo reencolar el job #%d: %s", job_id, exc)
         return False
+
+
+def _persist_niche_metadata(db, video_id: int, orch) -> None:
+    """Persist the soft-niche decision/score for later performance review."""
+    try:
+        score = float(getattr(orch, "_niche_score", 0.0) or 0.0)
+        stretch = 1 if getattr(orch, "_niche_stretch", False) else 0
+        decision = str(getattr(orch, "_niche_decision", "") or "")[:32]
+        with db._connect() as conn:
+            conn.execute(
+                "UPDATE videos SET niche_fit_score=?, niche_stretch=?, "
+                "niche_decision=? WHERE id=?",
+                (score, stretch, decision, video_id),
+            )
+            conn.commit()
+    except Exception as exc:  # noqa: BLE001 — metadata never blocks generation
+        logger.debug("Could not persist niche metadata for video %s: %s", video_id, exc)
 
 
 def _required_resume_idx(start_idx: int, *, has_audio: bool, has_media: bool,
@@ -1460,6 +1478,7 @@ def run_job(
         )[:60] if script else ""
         logger.info("Script: '%s' (%d words)", titulo,
                     len(script.get("guion", "").split()) if script else 0)
+        _persist_niche_metadata(db, video_id, orch)
 
         # ═══════════════════════════════════════════════════════
         # Phase 1.5: Pre-validation (early gate)
@@ -1673,9 +1692,11 @@ def run_job(
                 except ImportError:
                     pass
                 diag_str = ", ".join(diag) if diag else ""
+                real_error = str(getattr(orch, "_last_video_error", "") or "").strip()
+                detail = f" [{real_error[:300]}]" if real_error else ""
                 error_msg = (
-                    f"Fallo el ensamblaje del video. "
-                    f"({diag_str})" if diag_str else "Fallo el ensamblaje del video"
+                    f"Fallo el ensamblaje del video{detail}. "
+                    f"({diag_str})" if diag_str else f"Fallo el ensamblaje del video{detail}"
                 )
                 logger.error(error_msg)
                 db.update_job(job_id, status="failed", error_msg=error_msg[:500])
@@ -1683,6 +1704,9 @@ def run_job(
                                 error_message=error_msg[:500])
                 log_phase_error(db, entity_type='video', entity_id=video_id, phase='video',
                                 error=error_msg, channel_id=channel_id)
+                # Requeue immediately (instead of waiting for the finally block:
+                # the orphan cleaner may kill this worker while it finalizes).
+                _maybe_requeue_transient(db, job_id, video_id, error_msg)
                 return False
             
             db.update_video(video_id, progress=75, progress_phase="video", status="ready")
