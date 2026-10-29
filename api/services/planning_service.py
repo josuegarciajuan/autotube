@@ -3261,6 +3261,10 @@ def smart_replan(db=None) -> dict:
             channels_adjusted.append(slug)
         
         # ── 2c. Detect config change vs tomorrow's slots ──
+        # Cooldown por canal+día: si el horizonte no puede materializar el
+        # objetivo (p. ej. bonus de rotación sin contenido/capacidad), repetir
+        # el replan completo cada 30 min solo genera churn. Se reintenta una vez
+        # al día; el gate de 24h sigue cubriendo cambios reales de configuración.
         if not horizon_replanned:
             tomorrow_str = (_date.today() + _td(days=1)).isoformat()
             with db._connect() as conn:
@@ -3269,20 +3273,34 @@ def smart_replan(db=None) -> dict:
                     (ch_id, tomorrow_str),
                 ).fetchone()
                 tcnt = tomorrow_cnt["cnt"] if tomorrow_cnt else 0
-            if tcnt > 0 and tcnt != _resolve_generation_per_day({**cfg, "channel_id": ch_id}, tomorrow_str, db=db):
+            target_vpd = _resolve_generation_per_day({**cfg, "channel_id": ch_id}, tomorrow_str, db=db)
+            cooldown_key = f"config_replan_{ch_id}_{tomorrow_str}"
+            try:
+                already_replanned = bool(db.get_system_state(cooldown_key))
+            except Exception:
+                already_replanned = False
+            if tcnt > 0 and tcnt != target_vpd and not already_replanned:
                 logger.warning(
                     "Config mismatch for %s: tomorrow has %d slots but resolved_vpd=%d. "
-                    "Triggering horizon replan.",
-                    slug, tcnt, _resolve_generation_per_day({**cfg, "channel_id": ch_id}, tomorrow_str, db=db),
+                    "Triggering horizon replan (once per day).",
+                    slug, tcnt, target_vpd,
                 )
-                if not horizon_replanned:
-                    result = compute_and_store_horizon(horizon_days=7, db=db, force_replan=True)
-                    horizon_replanned = True
-                    logger.info(
-                        "Config-change replan complete: %d slots",
-                        result.get("total_slots", 0),
-                    )
-        
+                result = compute_and_store_horizon(horizon_days=7, db=db, force_replan=True)
+                horizon_replanned = True
+                try:
+                    db.set_system_state(cooldown_key, _date.today().isoformat())
+                except Exception:
+                    pass
+                logger.info(
+                    "Config-change replan complete: %d slots",
+                    result.get("total_slots", 0),
+                )
+            elif tcnt > 0 and tcnt != target_vpd and already_replanned:
+                logger.info(
+                    "Config mismatch for %s: tomorrow=%d, target=%d — replan ya intentado hoy, no se repite",
+                    slug, tcnt, target_vpd,
+                )
+
         # ── 2d. Cancel stale slots — only for today/past dates.
         #     Future-date slots with old scheduled_at are pre-generated
         #     buffer slots and should NOT be cancelled.
@@ -3300,24 +3318,28 @@ def smart_replan(db=None) -> dict:
             cancelled_total += stale_cnt
     
     # ── 3. Overcapacity check ──
+    # Comparar peras con peras: pending de los próximos 2 días contra la
+    # capacidad de 2 días. Antes se comparaba TODO el horizonte (7-8 días)
+    # contra 2 días y el aviso salía siempre (69 vs 16), ocultando el dato real.
     daily_capacity = 8  # with pipelining
-    max_realistic = daily_capacity * 2  # 2 days worth
-    
-    # Refresh count if replan happened
-    if not horizon_replanned:
-        with db._connect() as conn:
-            row = conn.execute(
-                "SELECT COUNT(*) as cnt FROM planned_slots WHERE status='pending'"
-            ).fetchone()
-            total_pending = row["cnt"] if row else 0
-    
-    if total_pending > max_realistic:
+    max_realistic = daily_capacity * 2
+
+    with db._connect() as conn:
+        row = conn.execute(
+            """SELECT COUNT(*) as cnt FROM planned_slots
+               WHERE status='pending'
+                 AND date_key BETWEEN date('now','localtime')
+                                  AND date('now','localtime','+2 days')"""
+        ).fetchone()
+        pending_2d = row["cnt"] if row else 0
+
+    if pending_2d > max_realistic:
         logger.warning(
-            "Smart replan: overcapacity — %d pending slots vs ~%d realistic (2 days).",
-            total_pending, max_realistic,
+            "Smart replan: overcapacity — %d pending slots in next 2 days vs ~%d realistic.",
+            pending_2d, max_realistic,
         )
         overcapacity_warn = True
-    
+
     return {
         "cancelled_count": cancelled_total,
         "horiz_replan": horizon_replanned,
