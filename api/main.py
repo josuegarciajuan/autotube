@@ -3745,11 +3745,16 @@ async def _process_lifecycle_actions():
         channels = db.get_channels(active_only=True)
         
         # ── Pre-count: how many pending actions exist across all channels? ──
+        due_counts: dict = {}
         try:
             all_due = db.get_due_lifecycle_actions()
             total_pending = len(all_due)
             # Count go_public actions specifically
             go_public_pending = sum(1 for a in all_due if a.get("action_type") == "go_public")
+            for action in all_due:
+                cid = action.get("channel_id")
+                if cid is not None:
+                    due_counts[cid] = due_counts.get(cid, 0) + 1
         except Exception:
             total_pending, go_public_pending = 0, 0
         
@@ -3762,6 +3767,10 @@ async def _process_lifecycle_actions():
         for ch in channels:
             slug = ch.get("slug")
             if not slug:
+                continue
+            # Avoid launching a subprocess when this channel has no due
+            # actions. If the pre-count failed, process all (fail-open).
+            if due_counts and ch.get("id") not in due_counts:
                 continue
             try:
                 if LIFECYCLE_SUBPROCESS_ENABLED:
