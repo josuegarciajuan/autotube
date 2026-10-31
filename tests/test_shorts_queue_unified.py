@@ -31,6 +31,19 @@ from api.services import shorts_scheduler as ss
 from pipeline import shorts_cross_promote as scp
 
 
+@pytest.fixture(autouse=True)
+def _accept_fake_render(monkeypatch):
+    """These tests use byte-stub MP4s: bypass the real ffprobe duration gate.
+
+    The gate itself is covered in tests/test_short_render_validation.py.
+    """
+    from pipeline import shorts_media
+    monkeypatch.setattr(
+        shorts_media, "validate_short_render",
+        lambda *a, **k: {"duration_sec": 42.0, "width": 1080, "height": 1920},
+    )
+
+
 def test_only_native_short_type_is_allowed():
     """Clips and legacy standalone rows cannot enter the upload pipeline."""
     assert ss.short_type_allowed("native") is True
@@ -85,6 +98,7 @@ def _db(tmp_path):
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 channel_id INTEGER, type TEXT DEFAULT 'native',
                 title TEXT, status TEXT DEFAULT 'pending',
+                duration REAL,
                 file_path TEXT DEFAULT '', published_at TIMESTAMP,
                 youtube_id TEXT, youtube_url TEXT, hook_text TEXT,
                 topic TEXT, has_subscribe_cta INTEGER DEFAULT 1,

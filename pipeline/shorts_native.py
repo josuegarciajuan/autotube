@@ -497,7 +497,9 @@ NADA MAS fuera del JSON."""
         narration duration instead of a uniform split — enabling sub-scene
         splitting for ~10s visual variety.
         """
-        from pipeline.shorts_media import render_short_hybrid
+        from pipeline.shorts_media import (
+            render_short_hybrid, DEFAULT_SHORT_MAX_DURATION_SEC,
+        )
         from config.settings import OUTPUT_DIR
 
         output_dir = OUTPUT_DIR / "videos" / "shorts"
@@ -543,6 +545,10 @@ NADA MAS fuera del JSON."""
                 audio_duration=audio_duration,
                 bg_color_hex=bg_color,
                 scene_ranges=render_ranges,
+                max_duration_sec=getattr(
+                    self.config, "SHORTS_MAX_DURATION_SEC",
+                    DEFAULT_SHORT_MAX_DURATION_SEC,
+                ),
             )
             return output_path
         except Exception as e:

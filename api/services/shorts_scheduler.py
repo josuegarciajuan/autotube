@@ -5695,6 +5695,15 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
         # Add 'duracion_sec' for fetch_short_assets_exhaustive compatibility
         for sr in scene_ranges:
             sr["duracion_sec"] = sr.get("duration", 5.0)
+        # Guard against timestamps whose units do not match the real audio:
+        # if the ranges sum to far more than the TTS audio, discard them and
+        # let the renderer use its uniform split (root cause of 900-2400 s
+        # "shorts" detected in oct 2026).
+        from pipeline.shorts_media import sanitize_short_scene_ranges
+        scene_ranges = sanitize_short_scene_ranges(
+            scene_ranges, tts_result.get("duration_sec", 0),
+            max_duration_sec=getattr(ch_config, "SHORTS_MAX_DURATION_SEC", 58.0),
+        )
     except Exception as e:
         logger.warning(
             "[%s] Scene range computation failed — falling back to raw blocks: %s",
@@ -5709,6 +5718,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
         fetch_short_assets_exhaustive, render_short_hybrid,
         has_sufficient_visual_assets,
         flush_short_asset_history,
+        validate_short_render,
     )
     theme_kw = script.get("theme_keywords_en", [])
 
@@ -5783,6 +5793,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
         return str(c).lstrip("#").replace("#", "")
     bg_color = _to_hex(color_palette.get("text_shadow", (10, 10, 26)))
 
+    _short_max_duration = getattr(ch_config, "SHORTS_MAX_DURATION_SEC", 58.0)
     try:
         def _shorts_render_progress(pct: int, phase: str, msg: str):
             _update_short_job_progress(job_id, pct, phase)
@@ -5795,6 +5806,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
             srt_path=srt_path if srt_path.exists() else None,
             scene_ranges=render_ranges,
             progress_cb=_shorts_render_progress,
+            max_duration_sec=_short_max_duration,
         )
     except Exception as e:
         # Anti-strike: NUNCA subir un render degradado a fondo sólido. Si el
@@ -5810,6 +5822,20 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     if not video_path.exists():
         logger.error("Render produced no output file for %s", channel_slug)
         _native_fail(slot_id, job_id, "render no produjo archivo de salida")
+        return None
+
+    # ── Measured duration for the DB + explicit re-check (oct 2026) ──
+    # The renderer already validates, but we need the measured audio duration
+    # to persist `shorts.duration` (it was always NULL, hiding long artifacts).
+    try:
+        render_meta = validate_short_render(
+            video_path, max_duration_sec=_short_max_duration,
+        )
+    except Exception as e:
+        logger.error(
+            "[%s] Render rejected by duration/format gate: %s", channel_slug, e,
+        )
+        _native_fail(slot_id, job_id, f"render inválido: {str(e)[:200]}")
         return None
 
     _update_short_job_progress(job_id, 75, "render")
@@ -5833,10 +5859,11 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
             cursor = conn.execute(
                 """INSERT INTO shorts
                    (channel_id, type, title, hook_title, hook_text, topic,
-                    status, file_path, has_subscribe_cta)
-                   VALUES (?, 'native', ?, ?, ?, ?, 'generated', ?, ?)""",
+                    duration, status, file_path, has_subscribe_cta)
+                   VALUES (?, 'native', ?, ?, ?, ?, ?, 'generated', ?, ?)""",
                 (channel_id, title, title[:60], hook_text, topic,
-                 str(video_path), int(has_subscribe_cta)),
+                 render_meta["duration_sec"], str(video_path),
+                 int(has_subscribe_cta)),
             )
             short_id = cursor.lastrowid
             conn.commit()
@@ -5992,16 +6019,17 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
     cursor = conn.execute(
         """INSERT INTO shorts
-           (channel_id, type, title, hook_title, hook_text, topic,
+           (channel_id, type, title, hook_title, hook_text, topic, duration,
             status, file_path, youtube_id, youtube_url, published_at,
             publish_at, yt_visibility, yt_checked_at, yt_checked_source,
             actual_published_at, has_subscribe_cta,
             longform_linked, longform_linked_at)
-           VALUES (?, 'native', ?, ?, ?, ?, ?, ?, ?, ?,
+           VALUES (?, 'native', ?, ?, ?, ?, ?, ?, ?, ?, ?,
                    datetime('now'), ?, ?, datetime('now','localtime'), 'upload',
                     ?, CASE WHEN ? IS NULL THEN datetime('now') ELSE NULL END,
                    1, datetime('now','localtime'))""",
         (channel_id, title, title[:60], hook_text, topic,
+         render_meta["duration_sec"],
          canonical_status, str(video_path), yt_id, result.get("url", ""),
          sched_iso,
           'scheduled' if sched_iso else 'public',
@@ -6169,6 +6197,45 @@ def _upload_queued_short(short_record: dict, db=None, force_immediate: bool = Fa
         return False
 
     ch_config = get_channel_config(slug)
+
+    # ── Gate de duración/formato antes de subir (oct 2026) ──
+    # Cubre renders creados antes de este fix (p. ej. 1080x1920 con 991 s de
+    # vídeo y 42 s de audio) y cualquier ruta futura que omita la validación
+    # post-render. Un archivo inválido NUNCA llega a YouTube: se marca failed.
+    try:
+        from pipeline.shorts_media import validate_short_render
+        _render_meta = validate_short_render(
+            file_path,
+            max_duration_sec=getattr(ch_config, "SHORTS_MAX_DURATION_SEC", 58.0),
+        )
+    except Exception as exc:
+        _reason = f"render inválido rechazado antes de subir: {str(exc)[:250]}"
+        logger.error("[%s] Queued short #%d %s", slug, short_id, _reason)
+        try:
+            with db._connect() as conn:
+                conn.execute(
+                    "UPDATE shorts SET status='failed', error_message=? WHERE id=?",
+                    (_reason, short_id),
+                )
+                conn.commit()
+        except Exception as db_exc:
+            logger.warning("[%s] No se pudo marcar short #%d como failed: %s",
+                           slug, short_id, db_exc)
+        try:
+            from api.services.lifecycle_monitor import create_alert
+            create_alert(
+                db,
+                entity_type="short", entity_id=short_id, channel_id=channel_id,
+                alert_type="short_render_invalid",
+                severity="critical",
+                title="Short con render inválido bloqueado antes de subir",
+                message=_reason,
+                metadata={"short_id": short_id, "file_path": file_path},
+            )
+        except Exception as alert_exc:
+            logger.warning("[%s] Alerta de render inválido falló: %s", slug, alert_exc)
+        return False
+
     hashtags = getattr(ch_config, "SHORTS_HASHTAGS", ["#Shorts"])
     source_video_id = short_record.get("source_video_id")
 
@@ -6329,6 +6396,7 @@ def _upload_queued_short(short_record: dict, db=None, force_immediate: bool = Fa
                 yt_vis = 'scheduled' if sched_iso else 'public'
                 conn.execute(
                     """UPDATE shorts SET status=?, youtube_id=?, youtube_url=?,
+                       duration=?,
                        published_at=COALESCE(published_at, datetime('now')),
                         publish_at=?,
                         yt_visibility=?,
@@ -6341,6 +6409,7 @@ def _upload_queued_short(short_record: dict, db=None, force_immediate: bool = Fa
                                                  ELSE longform_linked_at END
                        WHERE id=?""",
                      (canonical_status, yt_id, result.get("url", ""),
+                      _render_meta["duration_sec"],
                       sched_iso, yt_vis,
                      sched_iso,
                      short_type, short_type, short_id),

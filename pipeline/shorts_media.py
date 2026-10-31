@@ -13,6 +13,7 @@ endpoint (api/routers/shorts.py), and the standalone NativeShortsPipeline.
 """
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -1171,6 +1172,224 @@ def has_sufficient_visual_assets(asset_items, min_ratio: float = 0.5) -> bool:
     return positions > 0 and valid > 0 and (valid / positions) >= float(min_ratio)
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Render validation (anti long-form duration leak)
+# ═══════════════════════════════════════════════════════════════════════════
+# Oct 2026 incident: four vertical renders (1080x1920) came out with a video
+# stream of 991-1657 s while their audio was 36-42 s. The old renderer only
+# checked that ffmpeg produced a file, so those artifacts entered the queue
+# with `shorts.duration` NULL and could have been uploaded as "shorts" with a
+# long-form duration. This helper is the single gate: it verifies resolution,
+# duration budget and video/audio coherence with ffprobe.
+
+DEFAULT_SHORT_MAX_DURATION_SEC = 58.0
+try:
+    DEFAULT_SHORT_DURATION_SLACK_SEC = max(
+        0.5, float(os.getenv("SHORTS_DURATION_SLACK_SEC", "3.0"))
+    )
+except (TypeError, ValueError):
+    DEFAULT_SHORT_DURATION_SLACK_SEC = 3.0
+
+
+class ShortRenderValidationError(RuntimeError):
+    """Raised when a rendered short is not a valid, coherent 9:16 short.
+
+    ``reason`` is short and operator-facing; ``meta`` carries the ffprobe
+    measurements so callers can log/alert without re-probing the file.
+    """
+
+    def __init__(self, reason: str, *, path=None, meta: dict | None = None):
+        super().__init__(reason)
+        self.reason = reason
+        self.path = str(path) if path is not None else None
+        self.meta = dict(meta or {})
+
+
+def _probe_short_media(path) -> dict:
+    """Return stream metadata for *path* using ffprobe (no state, no cache)."""
+    p = Path(path)
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries",
+                "stream=codec_type,width,height,duration:format=duration",
+                "-of", "json", str(p),
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ShortRenderValidationError(
+            f"ffprobe could not inspect the render: {exc}", path=p,
+        ) from exc
+    if result.returncode != 0:
+        detail = (result.stderr or "").strip()[-300:]
+        raise ShortRenderValidationError(
+            f"ffprobe failed (exit {result.returncode}): {detail}", path=p,
+        )
+    try:
+        data = json.loads(result.stdout or "{}")
+    except ValueError as exc:
+        raise ShortRenderValidationError(
+            f"ffprobe returned invalid JSON: {exc}", path=p,
+        ) from exc
+
+    streams = data.get("streams") or []
+    video = next((s for s in streams if s.get("codec_type") == "video"), None)
+    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    container_duration = _as_float((data.get("format") or {}).get("duration"))
+
+    def _stream_duration(stream) -> float | None:
+        if not stream:
+            return None
+        return _as_float(stream.get("duration")) or container_duration
+
+    return {
+        "path": str(p),
+        "exists": p.exists(),
+        "bytes": p.stat().st_size if p.exists() else 0,
+        "has_video": video is not None,
+        "has_audio": audio is not None,
+        "width": int(video.get("width") or 0) if video else 0,
+        "height": int(video.get("height") or 0) if video else 0,
+        "video_duration": _stream_duration(video),
+        "audio_duration": _stream_duration(audio),
+        "container_duration": container_duration,
+    }
+
+
+def _as_float(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_short_max_duration(max_duration_sec: float | None) -> float:
+    if max_duration_sec is not None:
+        return float(max_duration_sec)
+    try:
+        from config.settings import SHORTS_MAX_DURATION_SEC
+        return float(SHORTS_MAX_DURATION_SEC)
+    except (ImportError, AttributeError, TypeError, ValueError):
+        return DEFAULT_SHORT_MAX_DURATION_SEC
+
+
+def sanitize_short_scene_ranges(
+    scene_ranges: list[dict] | None,
+    audio_duration: float | None,
+    *,
+    max_duration_sec: float | None = None,
+) -> list[dict] | None:
+    """Return *scene_ranges* only when they are coherent with the audio.
+
+    A TTS/timestamp unit mismatch can produce ranges whose durations sum to
+    hundreds/thousands of seconds for a 40 s short (oct 2026). Building the
+    visual timeline from them is what produced 900-2400 s videos. When the
+    ranges are inconsistent we return ``None`` so the renderer uses its
+    uniform split anchored on the real audio duration.
+    """
+    if not scene_ranges:
+        return None
+    try:
+        total = sum(float(r.get("duration", 0) or 0) for r in scene_ranges)
+    except (TypeError, ValueError):
+        return None
+    if total <= 0:
+        return None
+
+    audio = float(audio_duration or 0.0)
+    max_dur = _resolve_short_max_duration(max_duration_sec)
+    # Allowed ceiling = audio + generous slack, never above the channel budget.
+    ceiling = min(audio * 1.5 + 5.0 if audio > 0 else max_dur, max_dur + 5.0)
+    if total > ceiling:
+        logger.error(
+            "Rejecting incoherent short scene_ranges: %.1fs for %.1fs of audio "
+            "(%d ranges) — falling back to uniform split",
+            total, audio, len(scene_ranges),
+        )
+        return None
+    return scene_ranges
+
+
+def validate_short_render(
+    path,
+    *,
+    max_duration_sec: float | None = None,
+    expected_size: tuple[int, int] | None = (1080, 1920),
+    slack_sec: float | None = None,
+) -> dict:
+    """Validate a rendered short and return its measured metadata.
+
+    Raises ``ShortRenderValidationError`` when the file is missing/empty, has
+    no video or audio stream, is not the expected 9:16 size, exceeds the
+    channel's ``SHORTS_MAX_DURATION_SEC`` budget, or its video and audio
+    durations diverge by more than ``slack_sec`` (the oct 2026 incident).
+    """
+    p = Path(path)
+    if not p.exists() or p.stat().st_size <= 0:
+        raise ShortRenderValidationError(
+            f"short render missing or empty: {p}", path=p, meta={"bytes": 0},
+        )
+
+    max_duration_sec = _resolve_short_max_duration(max_duration_sec)
+    slack = (
+        DEFAULT_SHORT_DURATION_SLACK_SEC if slack_sec is None else float(slack_sec)
+    )
+
+    meta = _probe_short_media(p)
+    if not meta["has_video"]:
+        raise ShortRenderValidationError(
+            "short render has no video stream", path=p, meta=meta,
+        )
+    if not meta["has_audio"]:
+        raise ShortRenderValidationError(
+            "short render has no audio stream", path=p, meta=meta,
+        )
+
+    width, height = meta["width"], meta["height"]
+    if expected_size is not None:
+        exp_w, exp_h = expected_size
+        if (width, height) != (int(exp_w), int(exp_h)):
+            raise ShortRenderValidationError(
+                f"short render resolution {width}x{height} "
+                f"(expected {int(exp_w)}x{int(exp_h)})",
+                path=p, meta=meta,
+            )
+
+    video_dur = meta["video_duration"]
+    audio_dur = meta["audio_duration"]
+    container_dur = meta["container_duration"]
+    if video_dur is None or audio_dur is None:
+        raise ShortRenderValidationError(
+            "short render duration could not be measured "
+            f"(video={video_dur}, audio={audio_dur})",
+            path=p, meta=meta,
+        )
+
+    longest = max(video_dur, audio_dur, container_dur or 0.0)
+    if longest > max_duration_sec + slack:
+        raise ShortRenderValidationError(
+            f"short render duration {longest:.1f}s exceeds "
+            f"{max_duration_sec:.1f}s (video {video_dur:.1f}s, "
+            f"audio {audio_dur:.1f}s)",
+            path=p, meta=meta,
+        )
+
+    if abs(video_dur - audio_dur) > slack:
+        raise ShortRenderValidationError(
+            "short render video/audio duration mismatch "
+            f"(video {video_dur:.1f}s vs audio {audio_dur:.1f}s, "
+            f"slack {slack:.1f}s)",
+            path=p, meta=meta,
+        )
+
+    meta["duration_sec"] = round(audio_dur, 3)
+    meta["max_duration_sec"] = max_duration_sec
+    meta["slack_sec"] = slack
+    return meta
+
+
 def render_short_hybrid(
     asset_items: list[dict[str, Any] | None],
     audio_path: Path,
@@ -1181,6 +1400,7 @@ def render_short_hybrid(
     srt_path: Path | None = None,
     scene_ranges: list[dict] | None = None,
     progress_cb: callable = None,
+    max_duration_sec: float | None = None,
 ) -> Path:
     """FFmpeg hybrid render: mix video clips and Ken Burns still images.
 
@@ -1217,6 +1437,9 @@ def render_short_hybrid(
                       VideoEditor._compute_block_ranges) with "duration" key.
                       When provided and length matches valid assets, each
                       asset's visual duration matches its narration duration.
+        max_duration_sec: Channel's ``SHORTS_MAX_DURATION_SEC`` budget. The
+                      finished file is probed and rejected when its video or
+                      audio exceeds it (or when both durations diverge).
 
     Returns:
         The output Path on success.
@@ -1316,6 +1539,20 @@ def render_short_hybrid(
             "FFmpeg uniform scene durations: %d assets, each %.1fs, offsets=%s",
             n_assets, segment_dur,
             [f"{o:.1f}s" for o in per_xfade_offset],
+        )
+
+    # ── Fail fast: the planned visual timeline must fit a short ──
+    # Oct 2026: bad ``scene_ranges`` produced 900-2400 s visual timelines with
+    # 36-42 s of audio. Rejecting before ffmpeg avoids a 20-40 min wasted
+    # render (the post-render probe alone would catch it too).
+    _max_dur = _resolve_short_max_duration(max_duration_sec)
+    _planned_timeline = sum(per_seg_dur) - fade * max(n_assets - 1, 0)
+    if _planned_timeline > _max_dur + DEFAULT_SHORT_DURATION_SLACK_SEC:
+        raise ShortRenderValidationError(
+            f"short render planned timeline {_planned_timeline:.1f}s exceeds "
+            f"{_max_dur:.1f}s (audio {audio_duration:.1f}s, "
+            f"{n_assets} scenes, ranges={[round(float(s.get('duration', 0)), 1) for s in (scene_ranges or [])][:8]})",
+            path=output_path,
         )
 
     # ── Build inputs: valid assets use their file; None/invalid → solid-bg ──
@@ -1447,8 +1684,19 @@ def render_short_hybrid(
     if progress_cb is not None:
         progress_cb(72, "render", "Short renderizado, verificando output...")
 
-    logger.info("Hybrid short rendered: %s (%.1f MB)",
-                output_path, output_path.stat().st_size / 1024 / 1024)
+    # ── Gate: the file must be a real 9:16 short, not a long-form timeline ──
+    # A failed ffmpeg return code is not enough: oct 2026 produced 1080x1920
+    # files whose video stream lasted 991-1657 s while the audio was 36-42 s.
+    # Treat that as a failed render so the slot retries instead of publishing.
+    meta = validate_short_render(
+        output_path, max_duration_sec=max_duration_sec,
+    )
+    logger.info(
+        "Hybrid short rendered: %s (%.1f MB, %dx%d, video %.1fs, audio %.1fs)",
+        output_path, output_path.stat().st_size / 1024 / 1024,
+        meta["width"], meta["height"],
+        meta["video_duration"], meta["audio_duration"],
+    )
     return output_path
 
 
