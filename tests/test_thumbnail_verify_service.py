@@ -43,15 +43,17 @@ class _Conn:
 
 
 class _FakeDB:
-    def __init__(self, rows):
+    def __init__(self, rows, update_result=True):
         self._rows = rows
         self.updates = []
+        self.update_result = update_result
 
     def _connect(self):
         return _Conn(self._rows)
 
     def update_video(self, video_id, **kwargs):
         self.updates.append((video_id, kwargs))
+        return self.update_result
 
 
 class _FakeUploader:
@@ -123,3 +125,14 @@ def test_cycle_skips_when_served_unavailable(tmp_path, monkeypatch):
         asyncio.run(tvs.run_thumbnail_verification_cycle(db))
     # Cannot fetch → no verification write, no re-upload.
     assert db.updates == []
+
+
+def test_cycle_does_not_report_success_when_db_update_rejected(tmp_path, monkeypatch, caplog):
+    """A rejected persist must not be announced as verified/repaired."""
+    db = _FakeDB([_row(tmp_path)], update_result=False)
+    with _patched(monkeypatch, served=object(), match_result=True, uploader_cls=_FakeUploader):
+        with caplog.at_level("INFO", logger="autotube.thumbnail_verify"):
+            asyncio.run(tvs.run_thumbnail_verification_cycle(db))
+    assert db.updates  # attempted
+    assert "✅ Thumbnail verified" not in caplog.text
+    assert "could not persist thumbnail_verified" in caplog.text

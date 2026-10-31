@@ -1201,6 +1201,7 @@ class YouTubeUploader:
                     publish_at,
                 )
 
+            _egress_thumbnail_applied = None
             if _egress_client is not None:
                 # ── Subida delegada al agente egress (IP aislada), 2 pasos ──
                 # 1) /stage: el server transfiere el mp4(+thumb) al VPS y guarda
@@ -1220,7 +1221,7 @@ class YouTubeUploader:
                     "embeddable": body["status"].get("embeddable", True),
                     "public_stats_viewable": body["status"].get("publicStatsViewable", True),
                 }
-                _thumb = str(thumbnail_path) if thumbnail_path and Path(thumbnail_path).exists() else None
+                _thumb = str(thumbnail_path) if thumbnail_path and Path(thumbnail_path).is_file() else None
                 self._update_egress_transfer_state(video_path, "transferring")
                 logger.info("[%s] etapa 1/2: transfiriendo vídeo al VPS (%s)", self.channel_slug, _egress_client.base_url)
                 _stage = _egress_client.stage(str(video_path), ref=str(original_video_path),
@@ -1236,6 +1237,7 @@ class YouTubeUploader:
                 agent_res = _egress_client.upload(_staged_path, _meta)
                 if not agent_res.get("ok"):
                     raise RuntimeError(agent_res.get("error", "subida vía agente falló"))
+                _egress_thumbnail_applied = agent_res.get("thumbnail_applied")
                 self._update_egress_transfer_state(video_path, "done")
                 # ── v64: borrar el staged remoto tras subida correcta (fail-open) ──
                 try:
@@ -1334,13 +1336,21 @@ class YouTubeUploader:
                 "reason": "Añadir a playlist manualmente en YouTube Studio o vía playlistItems().insert().",
                 "ready": False,
             })
+            if _egress_agent_uploaded and _egress_thumbnail_applied is False:
+                warnings.append({
+                    "type": "thumbnail",
+                    "field": "thumbnail",
+                    "reason": "Thumbnail rejected by egress agent",
+                    "ready": False,
+                    "retry_needed": True,
+                })
             # ── Custom thumbnail: set + confirm ──────────────────
             # `thumbnails().set()` can return 200 while YouTube keeps its auto
             # frame, so we confirm the served image matches before declaring OK.
             # `thumbnail_applied`: True / False, or None when not determined
             # (private video, still indexing, or no thumbnail attempted).
-            thumbnail_applied = None
-            if thumbnail_path and Path(thumbnail_path).exists() and not _egress_agent_uploaded:
+            thumbnail_applied = _egress_thumbnail_applied
+            if thumbnail_path and Path(thumbnail_path).is_file() and not _egress_agent_uploaded:
                 _tpath = Path(thumbnail_path)
                 confirmed = False
                 known_failure = False
@@ -1758,6 +1768,15 @@ class YouTubeUploader:
                 )
             else:
                 logger.warning("Thumbnail upload failed for %s: %s", video_id, exc)
+            return False
+        except Exception as exc:  # noqa: BLE001
+            # Non-HTTP failures (filesystem, media library, malformed image)
+            # happen AFTER videos.insert succeeded. Never let them escape and
+            # lose the YouTube video id, which caused duplicate re-uploads.
+            logger.warning(
+                "Thumbnail upload raised unexpected error for %s: %s",
+                video_id, exc,
+            )
             return False
 
     def _verify_thumbnail_applied(

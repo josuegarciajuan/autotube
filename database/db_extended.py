@@ -4493,6 +4493,11 @@ class ExtendedDatabase(Database):
                     "video_path", "thumbnail_path", "audio_path", "duracion_seg",
                     "script_id", "channel_id", "canal", "checkpoint_data", "timing_data",
                     "source_url", "source_mode",
+                    # ── Custom thumbnail verification (v64) ──
+                    # Without this key the verifier's update was silently
+                    # dropped and every cycle re-set the same thumbnail,
+                    # burning quota (50 units per call).
+                    "thumbnail_verified",
                     # ── Scheduled publishing ──
                     "publish_mode", "target_public_at", "published_at",
                     "peak_source", "auto_playlist_id", "auto_playlist_name",
@@ -4532,6 +4537,7 @@ class ExtendedDatabase(Database):
                 kwargs = {k: v for k, v in kwargs.items() if k != "status"}
         
         fields, values = [], []
+        ignored = []
         for k, v in kwargs.items():
             if k in allowed and v is not None:
                 fields.append(f"{k} = ?")
@@ -4539,8 +4545,20 @@ class ExtendedDatabase(Database):
                     values.append(json.dumps(v, ensure_ascii=False))
                 else:
                     values.append(v)
+            elif v is not None:
+                ignored.append(k)
         if not fields:
+            if ignored:
+                logger.warning(
+                    "update_video(%s) ignored: no updatable columns in %s",
+                    video_id, sorted(ignored),
+                )
             return False
+        if ignored:
+            logger.debug(
+                "update_video(%s) ignored non-updatable columns: %s",
+                video_id, sorted(ignored),
+            )
         values.append(video_id)
         with self._connect() as conn:
             conn.execute(f"UPDATE videos SET {', '.join(fields)} WHERE id = ?", values)
