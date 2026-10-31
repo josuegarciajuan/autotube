@@ -1141,6 +1141,7 @@ RESPONDE SOLO CON EL JSON. NADA MÁS."""
             bg_color_hex=bg_color,
             srt_path=srt_path if srt_path.exists() else None,
             scene_ranges=render_ranges,
+            max_duration_sec=getattr(ch_config, "SHORTS_MAX_DURATION_SEC", 58.0),
         )
     except Exception as e:
         logger.warning("Hybrid render failed, falling back to solid bg: %s", e)
@@ -1152,6 +1153,7 @@ RESPONDE SOLO CON EL JSON. NADA MÁS."""
                 audio_duration=audio_duration,
                 bg_color_hex=bg_color,
                 srt_path=srt_path if srt_path.exists() else None,
+                max_duration_sec=getattr(ch_config, "SHORTS_MAX_DURATION_SEC", 58.0),
             )
         except Exception as e2:
             raise RuntimeError(f"Solid-bg fallback render also failed: {e2}")

@@ -46,6 +46,7 @@ def render_short_dist(
     crossfade_dur: float = 1.0,
     bg_color_hex: str = "0a0a1a",
     timeout: float = 2400.0,
+    max_duration_sec: float | None = None,
 ) -> Path:
     """Renderiza el short en la flota y devuelve el Path del mp4. Lanza ante fallo."""
     staging = Path(tempfile.mkdtemp(prefix="short-render-", dir=_staging_root()))
@@ -85,6 +86,7 @@ def render_short_dist(
         "scene_ranges": scene_ranges or None,
         "crossfade_dur": crossfade_dur,
         "bg_color_hex": bg_color_hex,
+        "max_duration_sec": max_duration_sec,
         "output": "out/render.mp4",
     }
     import json
@@ -118,4 +120,10 @@ def render_short_dist(
         raise RuntimeError(f"artefacto ausente: {src}")
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, output_path)
+    # The worker validates too, but an older image on a node may not: verify the
+    # artifact copied back to the house before it reaches the short queue.
+    from pipeline.shorts_media import validate_short_render
+    validate_short_render(
+        output_path, max_duration_sec=max_duration_sec,
+    )
     return Path(output_path)

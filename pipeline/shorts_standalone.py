@@ -124,10 +124,14 @@ Responde SOLO con un JSON array de {count} objetos."""
     return _fallback_topics_from_niche(ch_config, count=count)
 
 
-def _render_shorts_dist_aware(assets, audio_path, output_path, audio_duration, srt_path, scene_ranges):
+def _render_shorts_dist_aware(assets, audio_path, output_path, audio_duration,
+                              srt_path, scene_ranges, max_duration_sec=None):
     """Renderiza el short en la flota si `AUTOTUBE_DIST_SHORTS` está activo; si no
     (o si la ejecución distribuida falla), usa el render local. Fail-open: nunca
     deja el short sin renderizar por culpa de la flota.
+
+    ``max_duration_sec`` is the channel's short budget; the finished file is
+    validated in both paths (local renderer + distributed client copy).
     """
     try:
         from pipeline_dist import short_render_client as _src
@@ -135,6 +139,7 @@ def _render_shorts_dist_aware(assets, audio_path, output_path, audio_duration, s
             return _src.render_short_dist(
                 asset_items=assets, audio_path=audio_path, output_path=output_path,
                 audio_duration=audio_duration, srt_path=srt_path, scene_ranges=scene_ranges,
+                max_duration_sec=max_duration_sec,
             )
     except Exception as exc:  # noqa: BLE001 — fallback local explícito
         logger.warning("[standalone] render distribuido falló (%s) — fallback local", exc)
@@ -142,6 +147,7 @@ def _render_shorts_dist_aware(assets, audio_path, output_path, audio_duration, s
     render_short_hybrid(
         asset_items=assets, audio_path=audio_path, output_path=output_path,
         audio_duration=audio_duration, srt_path=srt_path, scene_ranges=scene_ranges,
+        max_duration_sec=max_duration_sec,
     )
     return output_path
 
@@ -296,6 +302,13 @@ def run_standalone_short(
                 scene_ranges = editor._compute_block_ranges(bloques, ts)
                 for sr in scene_ranges:
                     sr["duracion_sec"] = sr.get("duration", 5.0)
+                from pipeline.shorts_media import sanitize_short_scene_ranges
+                scene_ranges = sanitize_short_scene_ranges(
+                    scene_ranges, tts_result.get("duration_sec", 0),
+                    max_duration_sec=getattr(
+                        pipeline.config, "SHORTS_MAX_DURATION_SEC", 58.0,
+                    ),
+                )
         except Exception as e:
             logger.warning("[standalone] scene_ranges compute failed (will use uniform): %s", e)
             scene_ranges = None
@@ -305,8 +318,18 @@ def run_standalone_short(
         if not has_sufficient_visual_assets(assets, 0.5):
             raise RuntimeError("degraded render rejected: insufficient visual assets")
         render_path = output_dir / "render.mp4"
+        _max_duration = getattr(
+            pipeline.config, "SHORTS_MAX_DURATION_SEC", 58.0,
+        )
         _render_shorts_dist_aware(
             assets, audio_path, render_path, audio_duration, srt_path, scene_ranges,
+            max_duration_sec=_max_duration,
+        )
+        # Defensive re-check + measured duration for the DB (a distributed
+        # worker running an older image could still return a bad artifact).
+        from pipeline.shorts_media import validate_short_render
+        render_meta = validate_short_render(
+            render_path, max_duration_sec=_max_duration,
         )
 
         # ── Cola unificada (ago 2026): generate_only → status='generated' ──
@@ -332,9 +355,10 @@ def run_standalone_short(
                 cur = _conn_so.execute(
                     """INSERT INTO shorts
                        (channel_id, type, title, hook_title, hook_text, topic,
-                        status, file_path)
-                       VALUES (?, 'native', ?, ?, ?, ?, 'generated', ?)""",
-                    (channel_id, _title, _title[:60], _hook, _topic, str(_final)),
+                        duration, status, file_path)
+                       VALUES (?, 'native', ?, ?, ?, ?, ?, 'generated', ?)""",
+                    (channel_id, _title, _title[:60], _hook, _topic,
+                     render_meta["duration_sec"], str(_final)),
                 )
                 _short_id_so = cur.lastrowid
                 _conn_so.commit()

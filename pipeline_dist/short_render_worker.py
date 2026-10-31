@@ -91,6 +91,7 @@ def main() -> int:
             crossfade_dur=float(spec.get("crossfade_dur", 1.0) or 1.0),
             srt_path=srt,
             scene_ranges=spec.get("scene_ranges") or None,
+            max_duration_sec=spec.get("max_duration_sec"),
         )
 
         if not output.exists() or output.stat().st_size <= 0:
