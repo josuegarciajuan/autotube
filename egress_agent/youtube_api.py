@@ -119,11 +119,25 @@ def upload_video(cfg: AgentConfig, video_path: str, meta: dict) -> dict:
         return {"ok": False, "error": "YouTube no devolvió video_id"}
 
     result = {"ok": True, "video_id": video_id,
-              "url": f"https://www.youtube.com/watch?v={video_id}", "warnings": []}
+              "url": f"https://www.youtube.com/watch?v={video_id}", "warnings": [],
+              "thumbnail_applied": None}
 
     thumb = meta.get("thumbnail_path")
-    if thumb and Path(thumb).exists():
-        if not _set_thumbnail(svc, video_id, thumb):
+    if thumb:
+        if not Path(thumb).is_file():
+            result["thumbnail_applied"] = False
+            result["warnings"].append({
+                "type": "thumbnail", "field": "thumbnail",
+                "reason": f"Thumbnail no existe o no es un archivo: {thumb}",
+                "ready": False,
+            })
+        elif _set_thumbnail(svc, video_id, thumb):
+            # The API accepted it, but we do not verify the served image here.
+            # Leave it unknown so the 0-quota verifier confirms it later instead
+            # of marking unverified artwork as verified.
+            result["thumbnail_applied"] = None
+        else:
+            result["thumbnail_applied"] = False
             result["warnings"].append({"type": "thumbnail", "field": "thumbnail",
                                        "reason": "Thumbnail upload failed", "ready": False})
     return result

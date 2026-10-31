@@ -71,3 +71,17 @@ def test_mark_uploaded_sets_explicit_one(tmp_path):
     db.mark_video_uploaded(1, "abc123", "https://y/abc123", status="uploaded",
                            thumbnail_verified=1)
     assert db.get_video(1)["thumbnail_verified"] == 1
+
+
+def test_update_video_persists_thumbnail_verified(tmp_path):
+    """Regression: the column was missing from update_video's allow-list, so
+    the verifier's writes were silently dropped and it re-set thumbnails forever."""
+    db = _db(tmp_path, verified=0)
+    assert db.update_video(1, thumbnail_verified=1) is True
+    assert db.get_video(1)["thumbnail_verified"] == 1
+
+
+def test_update_video_rejects_unknown_columns(tmp_path):
+    db = _db(tmp_path, verified=0)
+    assert db.update_video(1, definitely_not_a_column=1) is False
+    assert db.get_video(1)["thumbnail_verified"] == 0

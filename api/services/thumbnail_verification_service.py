@@ -42,6 +42,27 @@ def track_quota_exceeded_for_cycle(channel_slug: str) -> bool:
     return False
 
 
+def _persist_verified(db, video_id: int) -> bool:
+    """Persist a confirmed verification and report whether it was written.
+
+    ``ExtendedDatabase.update_video`` filters unknown columns, so a missing
+    allow-list entry used to make this a silent no-op. Never announce success
+    unless the row was actually updated.
+    """
+    try:
+        ok = db.update_video(video_id, thumbnail_verified=1)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Thumbnail verify: DB update failed for #%d: %s", video_id, exc)
+        return False
+    if ok is False:
+        logger.error(
+            "Thumbnail verify: could not persist thumbnail_verified for video #%d "
+            "— update_video rejected the column", video_id,
+        )
+        return False
+    return True
+
+
 async def run_thumbnail_verification_cycle(db=None):
     """Check recent uploaded videos for missing YT thumbnails and retry.
 
@@ -146,8 +167,8 @@ async def run_thumbnail_verification_cycle(db=None):
 
         if any(thumbnails_match(cand, yt_video_id, served_image=served) is True
                for cand in candidates):
-            db.update_video(video_id, thumbnail_verified=1)
-            logger.info("[%s] ✅ Thumbnail verified for video #%d (%s)", canal, video_id, yt_video_id)
+            if _persist_verified(db, video_id):
+                logger.info("[%s] ✅ Thumbnail verified for video #%d (%s)", canal, video_id, yt_video_id)
             continue
 
         # ── Mismatch: re-upload the active thumbnail and confirm ────
@@ -171,9 +192,9 @@ async def run_thumbnail_verification_cycle(db=None):
                 continue
 
             if uploader._verify_thumbnail_applied(yt_video_id, active_path, attempts=2, delay=20) is True:
-                db.update_video(video_id, thumbnail_verified=1)
-                recovered += 1
-                logger.info("[%s] ✅ Thumbnail repaired for video #%d (%s)", canal, video_id, yt_video_id)
+                if _persist_verified(db, video_id):
+                    recovered += 1
+                    logger.info("[%s] ✅ Thumbnail repaired for video #%d (%s)", canal, video_id, yt_video_id)
             else:
                 logger.warning(
                     "[%s] ❌ Thumbnail accepted but not confirmed for video #%d — retry next cycle",

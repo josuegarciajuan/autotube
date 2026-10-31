@@ -613,7 +613,7 @@ def retry_thumbnail_upload(video_id: int):
     if not tp:
         raise HTTPException(400, "No thumbnail_path in database — regenerate first")
 
-    if not Path(tp).exists():
+    if not Path(tp).is_file():
         raise HTTPException(400, f"Thumbnail file not found: {tp}")
 
     yt_id = v.get("yt_video_id")
@@ -632,11 +632,31 @@ def retry_thumbnail_upload(video_id: int):
 
         service = uploader._get_service()
         success = uploader._set_thumbnail(service, yt_id, Path(tp))
-        if success:
-            db.update_video(video_id, thumbnail_verified=1)
-            return {"message": "Thumbnail uploaded and verified successfully"}
-        else:
+        if not success:
             raise HTTPException(500, "Thumbnail upload failed — check server logs")
+
+        # `thumbnails.set` returning 200 does NOT prove YouTube serves our
+        # image. Only persist `thumbnail_verified=1` after the perceptual
+        # comparison confirms it (0 API quota).
+        check = uploader._verify_thumbnail_applied(yt_id, Path(tp), attempts=2, delay=20)
+        if check is True:
+            if db.update_video(video_id, thumbnail_verified=1) is False:
+                raise HTTPException(500, "Thumbnail applied but verification state could not be persisted")
+            return {
+                "message": "Thumbnail uploaded and verified successfully",
+                "thumbnail_applied": True,
+            }
+        if check is False:
+            raise HTTPException(
+                502,
+                "Thumbnail accepted by YouTube but the served image does not match yet — retry later",
+            )
+        return {
+            "message": "Thumbnail uploaded; YouTube has not indexed it yet — verification pending",
+            "thumbnail_applied": None,
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"Thumbnail upload error: {e}")
 
