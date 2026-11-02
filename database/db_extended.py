@@ -4957,6 +4957,88 @@ class ExtendedDatabase(Database):
             conn.commit()
         return True
 
+    # Tables that reference videos.id without a guaranteed FK cascade. The
+    # connection does not enable PRAGMA foreign_keys, so dependants must be
+    # removed explicitly to avoid orphan rows.
+    _VIDEO_DEPENDANT_TABLES = (
+        "video_scenes", "generation_jobs", "video_stats_history",
+        "video_analytics_detailed", "video_playlists", "video_lifecycle_actions",
+        "video_asset_history", "script_generation_attempts",
+        "upload_health_checks", "video_ab_tests", "recovery_checkpoints",
+        "editorial_reviews", "video_review_tasks", "media_selection_decisions",
+        "planned_slots", "content_schedules", "comment_log",
+    )
+
+    def list_dead_video_ids(self, channel_id: Optional[int] = None,
+                            older_than_days: int = 7,
+                            statuses: tuple = ("error",)) -> list[int]:
+        """Ids of never-uploaded videos in the given statuses older than X days."""
+        statuses = tuple(statuses or ("error",))
+        placeholders = ",".join("?" * len(statuses))
+        q = (
+            f"SELECT id FROM videos WHERE status IN ({placeholders}) "
+            "AND (yt_video_id IS NULL OR yt_video_id = '') "
+            "AND COALESCE(updated_at, created_at) < datetime('now', ?)"
+        )
+        params: list = list(statuses) + [f"-{int(older_than_days)} days"]
+        if channel_id is not None:
+            q += " AND channel_id = ?"
+            params.append(channel_id)
+        with self._connect() as conn:
+            return [r["id"] for r in conn.execute(q, tuple(params)).fetchall()]
+
+    def delete_dead_video_cascade(self, video_id: int) -> dict:
+        """Delete a never-uploaded video row and every row referencing it.
+
+        Media files are NOT touched here (the caller purges them first via
+        ``pipeline.media_retention``). Uploaded rows are refused: YouTube is the
+        source of truth and must never disappear from the panel.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT yt_video_id FROM videos WHERE id = ?", (video_id,)
+            ).fetchone()
+            if not row:
+                return {"deleted": False, "reason": "not_found"}
+            if (row["yt_video_id"] or "").strip():
+                return {"deleted": False, "reason": "uploaded"}
+
+            counts: dict = {}
+            job_ids = [r[0] for r in conn.execute(
+                "SELECT id FROM generation_jobs WHERE video_id = ?", (video_id,)
+            ).fetchall()]
+            for table in self._VIDEO_DEPENDANT_TABLES:
+                try:
+                    cur = conn.execute(
+                        f"DELETE FROM {table} WHERE video_id = ?", (video_id,)
+                    )
+                    counts[table] = cur.rowcount
+                except Exception:
+                    # Table may not exist in older schemas: ignore, the videos
+                    # row deletion below is the authoritative action.
+                    continue
+            # Never delete a short that merely pointed at this source video.
+            for table, col in (("shorts", "source_video_id"),
+                               ("shorts_planned_slots", "source_video_id")):
+                try:
+                    conn.execute(
+                        f"UPDATE {table} SET {col} = NULL WHERE {col} = ?",
+                        (video_id,),
+                    )
+                except Exception:
+                    continue
+            for job_id in job_ids:
+                try:
+                    conn.execute(
+                        "DELETE FROM media_file_locks WHERE job_id = ?", (job_id,)
+                    )
+                except Exception:
+                    continue
+            cur = conn.execute("DELETE FROM videos WHERE id = ?", (video_id,))
+            counts["videos"] = cur.rowcount
+            conn.commit()
+        return {"deleted": bool(counts.get("videos")), "counts": counts}
+
     def cleanup_error_videos(self, channel_id: int, older_than_days: int = 7) -> int:
         """Delete videos with status='error' older than X days.
         
