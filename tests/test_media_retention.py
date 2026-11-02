@@ -127,6 +127,21 @@ class FakeDB:
         )
         self._conn.commit()
 
+    def delete_dead_video_cascade(self, video_id):
+        row = self._connect().execute(
+            "SELECT yt_video_id FROM videos WHERE id=?", (video_id,)
+        ).fetchone()
+        if not row:
+            return {"deleted": False, "reason": "not_found"}
+        if (row["yt_video_id"] or "").strip():
+            return {"deleted": False, "reason": "uploaded"}
+        self._connect().execute("DELETE FROM video_scenes WHERE video_id=?", (video_id,))
+        self._connect().execute("DELETE FROM video_asset_history WHERE video_id=?", (video_id,))
+        self._connect().execute("DELETE FROM generation_jobs WHERE video_id=?", (video_id,))
+        cur = self._connect().execute("DELETE FROM videos WHERE id=?", (video_id,))
+        self._connect().commit()
+        return {"deleted": bool(cur.rowcount), "counts": {"videos": cur.rowcount}}
+
 
 def _write(path: Path, size: int = 16) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -647,6 +662,10 @@ def test_stale_error_segments_reclaimed_after_window(seg_root, db):
     plan = mr.classify_reclaim(db, ["segments"], min_age_hours=24)
     info = plan["categories"]["segments"]
     assert info["reclaim_reasons"].get("video_error_stale") == 1
+    # Ya no protege material: no bloquea la reconciliación de la fila.
+    stale = plan["stale_pending_entities"]
+    assert all(e["id"] != 70 or e["segments_bytes"] == 0
+               for e in stale["entities"])
 
     rep = mr.purge_orphans(db, ["segments"], min_age_hours=24, dry_run=False)
     assert rep["freed_bytes"] == 1500
@@ -703,3 +722,75 @@ def test_files_reclaim_counts_only_reclaimed_dirs(seg_root, db):
     assert info["reclaim_bytes"] == 10
     assert info["protected_bytes"] == 20
     assert info["dirs_total"] == 2 and info["dirs_reclaim"] == 1
+
+
+# ── purga de vídeos fallidos (nov 2026) ──────────────────────────
+
+def test_dead_video_purged_files_and_row(tmp_path, db, seg_root):
+    """Un error antiguo nunca subido: archivos + segments + fila desaparecen."""
+    mp4 = _write(tmp_path / "output" / "videos" / "dead.mp4", 4096)
+    img = _write(tmp_path / "output" / "images" / "dead_scene.jpg", 1024)
+    seg = seg_root / "80"
+    _write(seg / "scene_0000.mp4", 2048)
+    db._connect().executescript(f"""
+        INSERT INTO videos (id, video_path, yt_video_id, status,
+                            created_at, updated_at)
+        VALUES (80, '{mp4}', NULL, 'error',
+                '{_ts(days_ago=10)}', '{_ts(days_ago=10)}');
+        INSERT INTO video_scenes (video_id, image_path) VALUES (80, '{img}');
+        INSERT INTO video_asset_history (video_id, file_path) VALUES (80, '{img}');
+    """)
+    db._connect().commit()
+
+    report = mr.purge_dead_videos(db, statuses=("error",), older_than_hours=72,
+                                  dry_run=False, delete_rows=True)
+
+    assert report["candidates"] == 1 and report["purged"] == 1
+    assert report["rows_deleted"] == 1
+    assert report["freed_bytes"] > 0
+    assert not mp4.exists() and not img.exists()
+    assert not seg.exists()
+    assert db.get_video(80) is None
+
+
+def test_dead_video_recent_is_preserved(tmp_path, db):
+    """Dentro de la gracia (posible reintento) no se toca nada."""
+    mp4 = _write(tmp_path / "output" / "videos" / "recent.mp4", 100)
+    db.add_video(id=81, video_path=str(mp4), yt_video_id=None,
+                 status="error", created_at=_ts(hours_ago=2))
+
+    report = mr.purge_dead_videos(db, statuses=("error",), older_than_hours=72,
+                                  dry_run=False, delete_rows=True)
+    assert report["candidates"] == 0
+    assert mp4.exists()
+    assert db.get_video(81) is not None
+
+
+def test_dead_video_uploaded_or_active_is_never_purged(tmp_path, db):
+    mp4 = _write(tmp_path / "output" / "videos" / "u.mp4", 100)
+    db.add_video(id=82, video_path=str(mp4), yt_video_id="YT82",
+                 status="error", created_at=_ts(days_ago=30))
+    db.add_video(id=83, video_path=str(mp4), yt_video_id=None,
+                 status="error", created_at=_ts(days_ago=30))
+    db.add_job(83, "running")
+
+    assert mr.purge_dead_entity(db, "video", 82)["skipped"] == "uploaded"
+    assert mr.purge_dead_entity(db, "video", 83)["skipped"] == "active_job"
+    assert mp4.exists()
+
+
+def test_incomplete_purge_keeps_db_reference(tmp_path, db):
+    """Fichero bloqueado → no se sella la purga (se reintenta después)."""
+    mp4 = _write(tmp_path / "output" / "videos" / "locked.mp4", 100)
+    db.add_video(id=84, video_path=str(mp4), yt_video_id="YT84",
+                 status="published")
+    db.locked = {str(mp4)}
+
+    report = mr.purge_entity_media(db, "video", 84)
+    assert report.get("incomplete") is True
+    assert mp4.exists()
+    row = db._connect().execute(
+        "SELECT media_purged_at, video_path FROM videos WHERE id=84"
+    ).fetchone()
+    assert row["media_purged_at"] is None
+    assert row["video_path"] == str(mp4)

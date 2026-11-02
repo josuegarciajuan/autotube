@@ -549,6 +549,29 @@ MEDIA_RETENTION_MIN_AGE_HOURS = int(os.getenv("MEDIA_RETENTION_MIN_AGE_HOURS", "
 MEDIA_RETENTION_SWEEP_INTERVAL_S = int(os.getenv("MEDIA_RETENTION_SWEEP_INTERVAL_S", "21600"))
 DISK_FREE_WARN_GB = int(os.getenv("DISK_FREE_WARN_GB", "30"))
 
+# ── Purga de material de vídeos fallidos (nov 2026) ──────────────
+# Un vídeo en estado terminal que NUNCA se subió no va a producir material
+# útil: sus MP4 parciales, segments e imágenes se acumulaban para siempre
+# (66 GB medidos en producción). Tras el periodo de gracia se purga su
+# material y se elimina la fila y sus restos de BD.
+#
+# Solo aplica a filas SIN yt_video_id y sin job running/queued. Estados
+# configurables (coma-separados); por defecto solo `error` (fallido). El
+# silencio de estados descartado/cancelado es deliberado: primero se revisan.
+DEAD_MEDIA_PURGE_ENABLED = (
+    os.getenv("DEAD_MEDIA_PURGE_ENABLED", "true").lower() == "true"
+)
+DEAD_MEDIA_PURGE_STATUSES = tuple(
+    s.strip() for s in os.getenv("DEAD_MEDIA_PURGE_STATUSES", "error").split(",")
+    if s.strip()
+)
+# Gracia antes de borrar: cubre reintentos/reassembles legítimos. La ventana de
+# reensamblado de errores es 48 h; 72 h deja margen sin acumular.
+DEAD_MEDIA_PURGE_AFTER_HOURS = int(os.getenv("DEAD_MEDIA_PURGE_AFTER_HOURS", "72"))
+# El barrido de segments reclama directorios de vídeos muertos pasado este
+# umbral (los recientes se conservan por si se reintenta).
+DEAD_SEGMENT_RETENTION_HOURS = int(os.getenv("DEAD_SEGMENT_RETENTION_HOURS", "72"))
+
 # ── View Gap Monitor ─────────────────────────────────────────────
 # Daily check comparing YT channel total views vs DB-tracked views.
 # When the gap grows beyond the threshold in 24h, an alert is raised

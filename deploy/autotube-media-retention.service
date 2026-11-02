@@ -17,7 +17,7 @@ IOSchedulingPriority=7
 # 2) Logs rotados + backups de BD viejos (los trackeados en git se omiten).
 # flock evita solapamiento con una ejecución manual.
 # `;` (no `&&`) para que la purga de logs se ejecute aunque el barrido falle.
-ExecStart=/bin/sh -c 'flock -n /run/lock/autotube-media-retention.lock /usr/bin/python3 /root/autotube/scripts/cleanup_residuals_batch.py --execute --min-age-hours 24 --json-out /root/autotube/logs/retention_latest.json; flock -n /run/lock/autotube-media-retention.lock /usr/bin/python3 /root/autotube/scripts/purge_logs_and_backups.py --execute --days 14'
+ExecStart=/bin/sh -c 'flock -n /run/lock/autotube-media-retention.lock /usr/bin/python3 /root/autotube/scripts/cleanup_residuals_batch.py --execute --dead-videos --min-age-hours 24 --json-out /root/autotube/logs/retention_latest.json; flock -n /run/lock/autotube-media-retention.lock /usr/bin/python3 /root/autotube/scripts/purge_logs_and_backups.py --execute --days 14'
 
 [Install]
 WantedBy=multi-user.target

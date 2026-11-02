@@ -439,11 +439,26 @@ def cleanup_error_videos(channel_id: int, older_than_days: int = 7, dry_run: boo
         raise HTTPException(404, "Channel not found")
 
     if dry_run:
-        count = db.count_error_videos(channel_id, older_than_days)
-        return {"ok": True, "dry_run": True, "would_delete": count}
+        ids = db.list_dead_video_ids(channel_id, older_than_days, statuses=("error",))
+        return {"ok": True, "dry_run": True, "would_delete": len(ids)}
 
-    deleted = db.cleanup_error_videos(channel_id, older_than_days)
-    return {"ok": True, "deleted": deleted}
+    # Purge files BEFORE deleting rows, otherwise the paths are lost and the
+    # material (MP4/segments/scenes) leaks forever — the old behaviour of this
+    # endpoint only deleted DB rows and was a confirmed source of dead media.
+    from pipeline.media_retention import purge_dead_entity
+    ids = db.list_dead_video_ids(channel_id, older_than_days, statuses=("error",))
+    freed = 0
+    errors = 0
+    deleted = 0
+    for vid in ids:
+        rep = purge_dead_entity(db, "video", vid, reason="cleanup_errors_endpoint",
+                                dry_run=False, delete_row=True)
+        freed += rep.get("freed_bytes", 0)
+        errors += len(rep.get("errors", []))
+        if rep.get("db_deleted", {}).get("deleted"):
+            deleted += 1
+    return {"ok": True, "deleted": deleted, "freed_bytes": freed,
+            "errors": errors}
 
 
 @router.get("/{channel_id}/content")

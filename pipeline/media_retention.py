@@ -111,6 +111,27 @@ TERMINAL_DEAD_SHORT_STATUSES = frozenset({"cancelled", "error", "failed"})
 # pending candidates (report only — never auto-reconciled).
 STALE_PENDING_DAYS = 45.0
 
+# ── Dead (never-uploaded) material (nov 2026) ────────────────────
+# A terminal/error row without yt_video_id will never produce useful material.
+# After the grace window its files are purged and the row + its dependants are
+# deleted (see ``purge_dead_entity``). Defaults are resolved from settings so
+# the operator can adjust them without code changes.
+DEAD_MEDIA_PURGE_ENABLED = bool(getattr(_settings, "DEAD_MEDIA_PURGE_ENABLED", True))
+DEAD_MEDIA_PURGE_STATUSES = tuple(
+    getattr(_settings, "DEAD_MEDIA_PURGE_STATUSES", ("error",))
+)
+DEAD_MEDIA_PURGE_AFTER_HOURS = float(
+    getattr(_settings, "DEAD_MEDIA_PURGE_AFTER_HOURS", 72)
+)
+DEAD_SEGMENT_RETENTION_HOURS = float(
+    getattr(_settings, "DEAD_SEGMENT_RETENTION_HOURS", 72)
+)
+
+# Statuses whose rows are safe to purge once the grace window has passed.
+PURGEABLE_DEAD_VIDEO_STATUSES = frozenset(
+    set(DEAD_MEDIA_PURGE_STATUSES) | set(TERMINAL_DEAD_VIDEO_STATUSES)
+)
+
 
 def segments_root() -> Path:
     """Root of the per-video render segments (single source of truth)."""
@@ -417,7 +438,7 @@ def _classify_segment_dir(name: str, meta: Optional[dict], *, active: bool,
     """Rules (evaluated in this order) → ``(reclaim, reason)``.
 
     Reclaim reasons: ``video_uploaded`` / ``video_error_stale`` /
-    ``orphan_stale``. Preserve reasons: ``non_numeric_dir``,
+    ``video_dead_expired`` / ``orphan_stale``. Preserve reasons: ``non_numeric_dir``,
     ``video_active_job``, ``video_error_recent``, ``video_terminal_dead``,
     ``video_pending``, ``orphan_locked``, ``orphan_protected``,
     ``orphan_recent``.
@@ -461,9 +482,9 @@ def _classify_segment_dir(name: str, meta: Optional[dict], *, active: bool,
         return True, "video_uploaded"
 
     status = str(meta.get("status") or "").lower()
+    ts = _parse_db_ts(meta.get("updated_at")) or _parse_db_ts(meta.get("created_at"))
+    age_h = (now - ts) / 3600.0 if ts else 0.0
     if status in DEAD_RETRY_VIDEO_STATUSES:
-        ts = _parse_db_ts(meta.get("updated_at")) or _parse_db_ts(meta.get("created_at"))
-        age_h = (now - ts) / 3600.0 if ts else 0.0
         if age_h <= ERROR_LOCK_WINDOW_HOURS:
             return False, "video_error_recent"
         # Past the reassembly window ``get_error_video_media_paths`` no longer
@@ -474,7 +495,11 @@ def _classify_segment_dir(name: str, meta: Optional[dict], *, active: bool,
             return False, "video_error_recent"
         return True, "video_error_stale"
     if status in TERMINAL_DEAD_VIDEO_STATUSES:
-        return False, "video_terminal_dead"
+        # Terminal rows never upload again. Keep a short grace window (in case
+        # an operator flips the row back) and then reclaim the segments.
+        if age_h <= DEAD_SEGMENT_RETENTION_HOURS:
+            return False, "video_terminal_dead"
+        return True, "video_dead_expired"
     return False, "video_pending"
 
 
@@ -623,6 +648,15 @@ def _unlink(path: Optional[Path], report: dict, label: str, dry_run: bool,
         return 0
 
 
+def _purge_complete(report: dict) -> bool:
+    """A purge may only clear DB references when nothing was left behind.
+
+    ``skipped_protected`` is expected (shared asset owned by a pending entity)
+    and does not block the owner's own references from being cleared.
+    """
+    return not report.get("errors") and not report.get("skipped_locked")
+
+
 def _mark_purged(db, sql: str, params: tuple, report: dict, dry_run: bool,
                  label: str) -> None:
     if dry_run:
@@ -694,6 +728,174 @@ def purge_entity_media(db, kind: str, entity_id: int, reason: str = "upload",
     return report
 
 
+# ──────────────────────────────────────────────────────────────────
+# Dead (never-uploaded) video purge
+# ──────────────────────────────────────────────────────────────────
+
+def _protected_excluding_entity(refs: dict, kind: str, entity_id: int) -> set[str]:
+    """``protected_refs`` minus basenames owned ONLY by this entity.
+
+    A non-uploaded entity marks all of its own refs as protected (that is the
+    correct rule for the orphan sweep). When purging that same dead entity we
+    must not let its own refs block its cleanup; assets shared with ANOTHER
+    pending entity remain protected.
+    """
+    out: set[str] = set()
+    for basename, entries in (refs.get("protected_rows") or {}).items():
+        if any(not (e.get("kind") in (kind, "scene", "asset_hist")
+                     and e.get("id") == entity_id) for e in entries):
+            out.add(basename)
+    return out
+
+
+def purge_dead_entity(db, kind: str, entity_id: int, reason: str = "dead_cleanup",
+                      dry_run: bool = False, log=None,
+                      refs: Optional[dict] = None,
+                      locked: Optional[set] = None,
+                      delete_row: bool = False) -> dict:
+    """Purge a NEVER-UPLOADED video/short in a terminal state.
+
+    Safety gates (all mandatory):
+      * the row exists and has NO YouTube id (never uploaded),
+      * its status is in ``PURGEABLE_DEAD_VIDEO_STATUSES``,
+      * no running/queued job owns it,
+      * files locked by an active job or shared with another pending entity
+        are preserved.
+
+    With ``delete_row=True`` the DB row and its dependants are removed once the
+    file purge is complete (never when a file was locked or a delete failed).
+    """
+    _log = log or logger
+    report: dict = {
+        "kind": kind,
+        "id": entity_id,
+        "reason": reason,
+        "dry_run": dry_run,
+        "freed_bytes": 0,
+        "deleted": [],
+        "would_delete": [],
+        "skipped_locked": [],
+        "skipped_protected": [],
+        "errors": [],
+    }
+    if kind != "video":
+        report["errors"].append({"error": f"unsupported dead kind {kind}"})
+        return report
+
+    video = db.get_video(entity_id)
+    if not video:
+        report["skipped"] = "not_found"
+        return report
+    if (video.get("yt_video_id") or "").strip():
+        report["skipped"] = "uploaded"
+        return report
+    status = str(video.get("status") or "").lower()
+    if status not in PURGEABLE_DEAD_VIDEO_STATUSES:
+        report["skipped"] = f"status_{status or 'unknown'}"
+        return report
+    if entity_id in _active_video_ids(db):
+        report["skipped"] = "active_job"
+        return report
+
+    if refs is None:
+        refs = build_reference_index(db)
+    if locked is None:
+        locked = _locked_basenames(db)
+    protected = _protected_excluding_entity(refs, "video", entity_id)
+
+    _purge_video(db, entity_id, report, protected, locked, dry_run, _log)
+
+    if delete_row and not dry_run and _purge_complete(report):
+        try:
+            cascade = db.delete_dead_video_cascade(entity_id)
+            report["db_deleted"] = cascade
+        except Exception as exc:  # noqa: BLE001
+            report["errors"].append({"error": f"delete_dead_video_cascade: {exc}"})
+            _log.warning(
+                "media_retention: DB row cleanup failed for dead video #%d: %s",
+                entity_id, exc,
+            )
+
+    if not dry_run:
+        _log.info(
+            "media_retention: purged dead video #%d (%s) — freed %.1f MB, "
+            "deleted %d files, row_deleted=%s",
+            entity_id, reason,
+            report["freed_bytes"] / (1024 * 1024),
+            len(report["deleted"]),
+            bool(report.get("db_deleted", {}).get("deleted")),
+        )
+    return report
+
+
+def purge_dead_videos(db, statuses: Optional[Iterable[str]] = None,
+                      older_than_hours: float = DEAD_MEDIA_PURGE_AFTER_HOURS,
+                      dry_run: bool = True, delete_rows: bool = True,
+                      log=None) -> dict:
+    """Purge all dead never-uploaded videos past the grace window.
+
+    Returns an aggregate report with per-video entries. Used by the daily
+    retention timer (``scripts/cleanup_residuals_batch.py --dead-videos``).
+    """
+    _log = log or logger
+    wanted = tuple(statuses or DEAD_MEDIA_PURGE_STATUSES)
+    report = {
+        "dry_run": dry_run,
+        "statuses": list(wanted),
+        "older_than_hours": older_than_hours,
+        "candidates": 0,
+        "purged": 0,
+        "skipped": {},
+        "freed_bytes": 0,
+        "deleted_files": 0,
+        "rows_deleted": 0,
+        "errors": [],
+        "videos": [],
+    }
+    if not wanted:
+        return report
+
+    placeholders = ",".join("?" * len(wanted))
+    try:
+        rows = db._connect().execute(
+            f"""SELECT id FROM videos
+                WHERE (yt_video_id IS NULL OR yt_video_id = '')
+                  AND status IN ({placeholders})
+                  AND COALESCE(updated_at, created_at)
+                      < datetime('now', '-{older_than_hours:g} hours')
+                  AND NOT EXISTS (SELECT 1 FROM generation_jobs gj
+                                  WHERE gj.video_id = videos.id
+                                    AND gj.status IN ('running','queued'))
+                ORDER BY id""",
+            wanted,
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001
+        report["errors"].append({"error": f"candidate query: {exc}"})
+        return report
+
+    ids = [r["id"] for r in rows]
+    report["candidates"] = len(ids)
+    refs = build_reference_index(db)
+    locked = _locked_basenames(db)
+    for vid in ids:
+        r = purge_dead_entity(
+            db, "video", vid, reason="dead_cleanup", dry_run=dry_run,
+            log=_log, refs=refs, locked=locked, delete_row=delete_rows,
+        )
+        report["freed_bytes"] += r.get("freed_bytes", 0)
+        report["deleted_files"] += len(r.get("deleted") or r.get("would_delete") or [])
+        if r.get("skipped"):
+            key = str(r["skipped"])
+            report["skipped"][key] = report["skipped"].get(key, 0) + 1
+        else:
+            report["purged"] += 1
+        if r.get("db_deleted", {}).get("deleted"):
+            report["rows_deleted"] += 1
+        report["errors"].extend(r.get("errors", []))
+        report["videos"].append(r)
+    return report
+
+
 def _purge_video(db, video_id: int, report: dict, protected: set[str],
                  locked: set[str], dry_run: bool, _log) -> None:
     video = db.get_video(video_id)
@@ -760,17 +962,28 @@ def _purge_video(db, video_id: int, report: dict, protected: set[str],
     _purge_video_segments_dir(video_id, report, protected, locked, dry_run)
 
     # ── Mark DB (keep rows; clear dangling paths) ────────────────
-    _mark_purged(
-        db,
-        "UPDATE video_scenes SET purged_at=datetime('now'), image_path='', audio_path='' "
-        "WHERE video_id=? AND purged_at IS NULL",
-        (video_id,), report, dry_run, "video_scenes",
-    )
-    _mark_purged(
-        db,
-        "UPDATE videos SET media_purged_at=datetime('now'), video_path='' WHERE id=?",
-        (video_id,), report, dry_run, "videos",
-    )
+    # Only stamp "purged" when nothing is left behind: a locked file (active
+    # job) or a delete error must keep the reference so a later pass retries.
+    # Marking an incomplete purge would hide real leftovers forever.
+    if _purge_complete(report):
+        _mark_purged(
+            db,
+            "UPDATE video_scenes SET purged_at=datetime('now'), image_path='', audio_path='' "
+            "WHERE video_id=? AND purged_at IS NULL",
+            (video_id,), report, dry_run, "video_scenes",
+        )
+        _mark_purged(
+            db,
+            "UPDATE videos SET media_purged_at=datetime('now'), video_path='' WHERE id=?",
+            (video_id,), report, dry_run, "videos",
+        )
+    elif not dry_run:
+        report["incomplete"] = True
+        _log.warning(
+            "media_retention: purge of video #%d incomplete (locked=%d, errors=%d); "
+            "references kept for retry",
+            video_id, len(report["skipped_locked"]), len(report["errors"]),
+        )
 
 
 def _purge_short(db, short_id: int, report: dict, protected: set[str],
@@ -824,12 +1037,13 @@ def _purge_asset_history(db, table: str, fk_col: str, entity_id: int,
             report["skipped_protected"].append(str(p))
             continue
         report["freed_bytes"] += _unlink(p, report, table, dry_run, locked)
-    _mark_purged(
-        db,
-        f"UPDATE {table} SET purged_at=datetime('now') "
-        f"WHERE {fk_col}=? AND purged_at IS NULL",
-        (entity_id,), report, dry_run, table,
-    )
+    if _purge_complete(report):
+        _mark_purged(
+            db,
+            f"UPDATE {table} SET purged_at=datetime('now') "
+            f"WHERE {fk_col}=? AND purged_at IS NULL",
+            (entity_id,), report, dry_run, table,
+        )
 
 
 # ──────────────────────────────────────────────────────────────────

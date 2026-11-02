@@ -172,6 +172,16 @@ def main() -> int:
                     help="Purgar material de vídeos subidos")
     ap.add_argument("--entity-shorts", action="store_true",
                     help="Purgar material de shorts subidos")
+    ap.add_argument("--dead-videos", action="store_true",
+                    help="Purgar vídeos fallidos/muertos NUNCA subidos y borrar sus filas")
+    ap.add_argument("--dead-statuses", type=str,
+                    default=",".join(getattr(
+                        _settings, "DEAD_MEDIA_PURGE_STATUSES", ("error",))),
+                    help="Estados de vídeo a purgar (coma-separados; def: error)")
+    ap.add_argument("--dead-older-hours", type=float,
+                    default=float(getattr(
+                        _settings, "DEAD_MEDIA_PURGE_AFTER_HOURS", 72)),
+                    help="Gracia antes de purgar un vídeo muerto (def: 72h)")
     ap.add_argument("--orphans", action="store_true",
                     help="Barrer archivos huérfanos")
     ap.add_argument("--canal", type=str, default=None,
@@ -192,8 +202,10 @@ def main() -> int:
         return 2
 
     # Si no se elige modo, hacer todo.
-    if not (args.entity_videos or args.entity_shorts or args.orphans):
-        args.entity_videos = args.entity_shorts = args.orphans = True
+    if not (args.entity_videos or args.entity_shorts or args.dead_videos
+            or args.orphans):
+        args.entity_videos = args.entity_shorts = args.dead_videos = \
+            args.orphans = True
 
     dry_run = not args.execute
     if args.read_only:
@@ -243,6 +255,26 @@ def main() -> int:
         print(f"   {format_size(srep['freed_bytes'])} en {srep['files']} archivos "
               f"(protegidos: {srep['skipped_protected']}, errores: {srep['errors']})")
         manifest["shorts"] = srep
+
+    if args.dead_videos:
+        statuses = tuple(s.strip() for s in (args.dead_statuses or "").split(",")
+                         if s.strip())
+        print(f"── Vídeos muertos nunca subidos a purgar: estados={statuses} "
+              f"gracia={args.dead_older_hours}h")
+        drep = mr.purge_dead_videos(
+            db, statuses=statuses, older_than_hours=args.dead_older_hours,
+            dry_run=dry_run, delete_rows=True,
+        )
+        for v in drep.get("videos", []):
+            files = (v.get("deleted") or []) if not dry_run else (v.get("would_delete") or [])
+            entity_paths.update(files)
+        total_freed += drep["freed_bytes"]
+        print(f"   Candidatos: {drep['candidates']} | purgados: {drep['purged']} "
+              f"| filas borradas: {drep['rows_deleted']} "
+              f"| {format_size(drep['freed_bytes'])} en {drep['deleted_files']} archivos"
+              f"{(' | saltados: ' + str(drep['skipped'])) if drep['skipped'] else ''}"
+              f"{(' | errores: ' + str(len(drep['errors']))) if drep['errors'] else ''}")
+        manifest["dead_videos"] = drep
 
     if args.orphans:
         print(f"── Huérfanos (min-age {args.min_age_hours}h, categorías: "

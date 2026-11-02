@@ -4664,6 +4664,26 @@ async def force_cancel_and_cleanup(job_id: int, video_id: int, channel_slug: str
     except Exception as exc:
         logger.error("DB update after cancel failed for job #%d: %s", job_id, exc)
 
+    # ── 5. Free the heavy material immediately (segments/scenes/audio) ──
+    # The generic channel-dir cleanup above misses render segments and scene
+    # assets, which are the bulk of the footprint. Keep the row for the daily
+    # dead-media reaper to remove after its grace window.
+    if video_id:
+        try:
+            from pipeline.media_retention import purge_dead_entity
+            _db = _get_db()
+            purge_report = purge_dead_entity(
+                _db, "video", video_id, reason="force_cancel",
+                dry_run=False, delete_row=False,
+            )
+            result["media_freed_bytes"] = purge_report.get("freed_bytes", 0)
+            if purge_report.get("skipped"):
+                result["media_skipped"] = purge_report["skipped"]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Force-cancel media purge failed for video #%d: %s", video_id, exc,
+            )
+
     # `return result` was misplaced inside `_read_worker_log_tail` (unreachable),
     # so this function returned None and the /cancel endpoint raised a 500
     # (`'NoneType' object is not subscriptable`) after doing the work.
