@@ -437,10 +437,11 @@ def _classify_segment_dir(name: str, meta: Optional[dict], *, active: bool,
                           now: float) -> tuple[bool, str]:
     """Rules (evaluated in this order) → ``(reclaim, reason)``.
 
-    Reclaim reasons: ``video_uploaded`` / ``orphan_stale``. Preserve reasons:
-    ``non_numeric_dir``, ``video_active_job``, ``video_error_recent``,
-    ``video_terminal_dead``, ``video_error_stale``, ``video_pending``,
-    ``orphan_locked``, ``orphan_protected``, ``orphan_recent``.
+    Reclaim reasons: ``video_uploaded`` / ``video_error_stale`` /
+    ``video_dead_expired`` / ``orphan_stale``. Preserve reasons: ``non_numeric_dir``,
+    ``video_active_job``, ``video_error_recent``, ``video_terminal_dead``,
+    ``video_pending``, ``orphan_locked``, ``orphan_protected``,
+    ``orphan_recent``.
 
     Conservative by construction: anything that cannot be proven reclaimable is
     preserved. Non-numeric dir names are never reclaimed (unknown owner).
@@ -462,10 +463,17 @@ def _classify_segment_dir(name: str, meta: Optional[dict], *, active: bool,
             return False, "orphan_recent"
         return True, "orphan_stale"
 
-    if active or locked_hit:
-        # A running/queued job owns this video (or files inside are locked by
-        # one) — even for uploaded rows the sweep defers to the active job.
+    if active:
+        # A running/queued job owns this video — even for uploaded rows the
+        # sweep defers to the active job.
         return False, "video_active_job"
+    # NOTE: ``locked_hit`` is intentionally NOT consulted for numeric dirs that
+    # have a videos row. Locks are keyed by BASENAME and media assets are
+    # shared across videos (``pexels_*``/``pixabay_*``): a lock owned by another
+    # video's active job was protecting this video's directory forever. The
+    # directory belongs exclusively to this video, and ``active`` above already
+    # covers a running/queued job for it. Orphan dirs (no row) still use the
+    # conservative basename check.
 
     uploaded = bool((meta.get("yt_video_id") or "").strip())
     if uploaded:
@@ -479,12 +487,16 @@ def _classify_segment_dir(name: str, meta: Optional[dict], *, active: bool,
     if status in DEAD_RETRY_VIDEO_STATUSES:
         if age_h <= ERROR_LOCK_WINDOW_HOURS:
             return False, "video_error_recent"
-        if age_h <= DEAD_SEGMENT_RETENTION_HOURS:
-            return False, "video_error_stale"
-        # Grace exhausted: the row will never upload (or its purge already
-        # removed the row). Reclaim its render segments instead of leaking.
-        return True, "video_dead_expired"
+        # Past the reassembly window ``get_error_video_media_paths`` no longer
+        # offers this material to any reassembly, so the render segments are
+        # dead weight (oct 2026: 62 GiB held by 45 stale error dirs). Require
+        # the files themselves to be old so a late re-render is never cut.
+        if newest_mtime > now - ERROR_LOCK_WINDOW_HOURS * 3600.0:
+            return False, "video_error_recent"
+        return True, "video_error_stale"
     if status in TERMINAL_DEAD_VIDEO_STATUSES:
+        # Terminal rows never upload again. Keep a short grace window (in case
+        # an operator flips the row back) and then reclaim the segments.
         if age_h <= DEAD_SEGMENT_RETENTION_HOURS:
             return False, "video_terminal_dead"
         return True, "video_dead_expired"
@@ -500,7 +512,8 @@ def plan_segments_sweep(db, refs: dict, locked: set[str], cutoff: float,
        bytes_total, file_actions: [(path, size)], excluded_files,
        excluded_bytes, can_rmdir}``.
     ``file_actions`` only contains the files a reclaim decision would delete —
-    locked / preserved / pending-referenced names are always excluded.
+    preserved names are always excluded. For owned dirs (a videos row exists)
+    foreign basename locks/pending refs are ignored; orphan dirs keep them.
     """
     now = time.time() if now is None else now
     root = segments_root()
@@ -516,15 +529,22 @@ def plan_segments_sweep(db, refs: dict, locked: set[str], cutoff: float,
 
     for d in children:
         files, newest = _segment_dir_files(d)
+        meta = metas.get(int(d.name)) if d.name.isdigit() else None
         locked_names = [p for p, _ in files if p.name in locked]
+        # Locks are keyed by basename and assets are shared across videos. For a
+        # directory owned by a videos row, only ``active`` (a running/queued job
+        # for THAT video) proves the material is in use; a foreign basename lock
+        # must not protect it. Orphan dirs keep the conservative check.
+        locked_excludes = locked if meta is None else set()
+        protected_excludes = protected if meta is None else set()
         excluded = [(p, s) for p, s in files
-                    if p.name in locked or p.name in protected
+                    if p.name in locked_excludes or p.name in protected_excludes
                     or _is_preserved_path(p)]
         excluded_bytes = sum(s for _, s in excluded)
         excluded_paths = {p for p, _s in excluded}
         file_actions = [(p, s) for p, s in files if p not in excluded_paths]
         reclaim, reason = _classify_segment_dir(
-            d.name, metas.get(int(d.name)) if d.name.isdigit() else None,
+            d.name, meta,
             active=bool(d.name.isdigit()) and int(d.name) in active,
             locked_hit=bool(locked_names),
             protected_hit=any(p.name in protected for p, _ in files),
@@ -533,6 +553,7 @@ def plan_segments_sweep(db, refs: dict, locked: set[str], cutoff: float,
         decisions.append({
             "dir": d.name,
             "path": str(d),
+            "owned": meta is not None,
             "numeric": d.name.isdigit(),
             "video_id": int(d.name) if d.name.isdigit() else None,
             "status": (metas.get(int(d.name)) or {}).get("status") if d.name.isdigit() else None,
@@ -582,15 +603,12 @@ def _purge_video_segments_dir(video_id: int, report: dict, protected: set[str],
     files, _newest = _segment_dir_files(seg_dir)
     excluded = 0
     for p, _size in files:
-        if p.name in locked:
-            report["skipped_locked"].append(str(p))
-            excluded += 1
-            continue
         if p.name in protected or _is_preserved_path(p):
             report["skipped_protected"].append(str(p))
             excluded += 1
             continue
-        report["freed_bytes"] += _unlink(p, report, "segments", dry_run, locked)
+        report["freed_bytes"] += _unlink(p, report, "segments", dry_run, locked,
+                                         ignore_locks=True)
     if not dry_run and excluded == 0:
         report["dirs_removed"] = report.get("dirs_removed", 0) + \
             _remove_empty_dirs(seg_dir)
@@ -601,13 +619,18 @@ def _purge_video_segments_dir(video_id: int, report: dict, protected: set[str],
 # ──────────────────────────────────────────────────────────────────
 
 def _unlink(path: Optional[Path], report: dict, label: str, dry_run: bool,
-            locked: set[str]) -> int:
-    """Delete a file (honouring locks). Returns bytes freed. Logs failures."""
+            locked: set[str], *, ignore_locks: bool = False) -> int:
+    """Delete a file (honouring locks). Returns bytes freed. Logs failures.
+
+    ``ignore_locks`` is used for directories owned by one entity: locks are
+    keyed by basename and media assets are shared, so a foreign lock must not
+    block deleting that entity's own material.
+    """
     if path is None:
         return 0
     bn = path.name
-    if bn in locked:
-        report["skipped_locked"].append(str(path))
+    if not ignore_locks and bn in locked:
+        report.setdefault("skipped_locked", []).append(str(path))
         return 0
     try:
         if not path.is_file():
@@ -1413,7 +1436,8 @@ def purge_orphans(db, categories: Optional[Iterable[str]] = None,
                 if not dec["reclaim"]:
                     continue
                 for path, _size in dec["file_actions"]:
-                    freed = _unlink(path, report, cat, dry_run, locked)
+                    freed = _unlink(path, report, cat, dry_run, locked,
+                                    ignore_locks=bool(dec.get("owned")))
                     if freed:
                         cat_freed += freed
                         cat_files += 1

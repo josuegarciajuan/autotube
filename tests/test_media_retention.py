@@ -647,11 +647,11 @@ def test_stale_pending_entities_report_only(seg_root, videos_root, db):
         "video_terminal_dead") == 1
 
 
-def test_stale_pending_error_stale_row_reported(seg_root, db):
-    """Error > gracia sin job: el sweep reclama sus segments (nov 2026).
+def test_stale_error_segments_reclaimed_after_window(seg_root, db):
+    """Error > 48h sin job: los segmentos son residuo y se reclaman.
 
-    Sigue listado en el informe stale_pending, pero el material ya no se
-    conserva indefinidamente: el vídeo fallido nunca va a subir.
+    ``get_error_video_media_paths`` ya no ofrece este material a ningún
+    reensamblaje pasada la ventana, así que conservarlo era una fuga.
     """
     d = seg_root / "70"
     f = _write(d / "scene_0000.mp4", 1500)
@@ -660,12 +660,46 @@ def test_stale_pending_error_stale_row_reported(seg_root, db):
                  created_at=_ts(days_ago=10))
 
     plan = mr.classify_reclaim(db, ["segments"], min_age_hours=24)
-    assert plan["categories"]["segments"]["reclaim_reasons"].get(
-        "video_dead_expired") == 1
+    info = plan["categories"]["segments"]
+    assert info["reclaim_reasons"].get("video_error_stale") == 1
+    # Ya no protege material: no bloquea la reconciliación de la fila.
     stale = plan["stale_pending_entities"]
-    # Ya no protege material: el sweep puede reclamarlo sin reconciliar la fila.
     assert all(e["id"] != 70 or e["segments_bytes"] == 0
                for e in stale["entities"])
+
+    rep = mr.purge_orphans(db, ["segments"], min_age_hours=24, dry_run=False)
+    assert rep["freed_bytes"] == 1500
+    assert not f.exists() and not d.exists()
+
+
+def test_recent_error_segments_preserved(seg_root, db):
+    """Dentro de la ventana de 48h el material sigue disponible."""
+    d = seg_root / "71"
+    f = _write(d / "scene_0000.mp4", 1500)
+    _age_paths(d, hours_ago=72)
+    db.add_video(id=71, yt_video_id=None, status="error",
+                 created_at=_ts(hours_ago=6))
+
+    rep = mr.purge_orphans(db, ["segments"], min_age_hours=24, dry_run=False)
+    assert rep["freed_bytes"] == 0
+    assert f.exists()
+
+
+def test_shared_basename_lock_does_not_protect_owned_dir(seg_root, db):
+    """Un lock de OTRO vídeo (mismo basename) no protege este directorio.
+
+    Los assets (pexels/pixabay) se comparten por basename; usar ese set para
+    proteger un directorio exclusivo de otro vídeo lo retenía para siempre.
+    """
+    d = seg_root / "72"
+    f = _write(d / "scene_0000.mp4", 1500)
+    _age_paths(d, hours_ago=240)
+    db.add_video(id=72, yt_video_id=None, status="error",
+                 created_at=_ts(days_ago=10))
+    db.locked = {str(f)}  # lock ajeno con el mismo basename
+
+    plan = mr.classify_reclaim(db, ["segments"], min_age_hours=24)
+    assert plan["categories"]["segments"]["reasons"].get("video_active_job") is None
     rep = mr.purge_orphans(db, ["segments"], min_age_hours=24, dry_run=False)
     assert rep["freed_bytes"] == 1500
     assert not f.exists()

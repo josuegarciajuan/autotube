@@ -263,3 +263,39 @@ Claves existentes intactas; claves nuevas:
   7 463 conexiones ro-URI, 1 intento rw (lectura de `ACTIVE_CHANNELS` al
   importar `config/settings.py`, bloqueada antes de abrir y sin uso alguno en
   el pipeline de retención), 0 llamadas de borrado.
+
+## 11. Vídeos fallidos / muertos nunca subidos (nov 2026)
+
+Un long-form con `status` terminal (`error` por defecto; opcionalmente
+`discarded`/`cancelled`/`validation_failed`) y **sin `yt_video_id`** no va a
+producir ningún material útil. Antes se conservaba para siempre: los segments
+de 45 vídeos en error acumulaban ~62 GiB y los MP4 parciales otros ~4,5 GiB.
+
+Reglas:
+
+1. **Purga con gracia:** pasadas `DEAD_MEDIA_PURGE_AFTER_HOURS` (def. 72 h) se
+   borran MP4 parcial, audio, escenas, assets del historial y el directorio de
+   segments; después se elimina la fila `videos` y sus dependencias
+   (`video_scenes`, `generation_jobs`, stats, planificación, reviews, locks…).
+   Nunca aplica a filas con `yt_video_id` ni con job `running/queued`.
+2. **Informe:** `scripts/cleanup_residuals_batch.py --dead-videos` (dry-run por
+   defecto; `--read-only` para producción). El timer diario lo ejecuta con
+   `--execute`.
+3. **Cancelación manual:** `force_cancel_and_cleanup` purga los ficheros
+   pesados al instante; la fila se retira en la siguiente pasada del reaper.
+4. **Endpoint de canal:** `DELETE /api/channels/{id}/videos/cleanup-errors`
+   ahora purga ficheros antes de borrar filas (antes solo borraba filas y
+   dejaba el material huérfano).
+5. **Barrido de segments:** un dir de vídeo en `error` se reclama pasadas
+   `ERROR_LOCK_WINDOW_HOURS` (48 h) y con ficheros antiguos; los estados
+   terminales, tras `DEAD_SEGMENT_RETENTION_HOURS` (72 h).
+6. **Purga incompleta:** si un fichero está bloqueado o falla el borrado, NO se
+   sella `media_purged_at` ni se vacían las rutas; una pasada posterior lo
+   reintenta. Antes se marcaba como purgado aunque quedaran ficheros.
+
+| Variable | Def. | Descripción |
+|---|---|---|
+| `DEAD_MEDIA_PURGE_ENABLED` | `true` | activa la purga de vídeos muertos |
+| `DEAD_MEDIA_PURGE_STATUSES` | `error` | estados a purgar (coma-separados) |
+| `DEAD_MEDIA_PURGE_AFTER_HOURS` | `72` | gracia antes de borrar |
+| `DEAD_SEGMENT_RETENTION_HOURS` | `72` | gracia de segments en estados terminales |
