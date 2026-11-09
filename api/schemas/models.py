@@ -101,6 +101,14 @@ class ChannelCreate(BaseModel):
     config: ChannelConfig = Field(default_factory=ChannelConfig)
     youtube_handle: Optional[str] = None
     google_account: Optional[str] = None
+    # ── Egress aislado (nov 2026) ─────────────────────────────
+    # Si el slug ya está en config/egress_agents.json, el canal se marca
+    # gestionado automáticamente. Si se pide explícitamente sin gateway,
+    # queda en 'provisioning' y las operaciones se bloquean (fail-closed).
+    egress_managed: bool = False
+    egress_expected_ip: Optional[str] = None
+    egress_mode: str = "gateway"
+    egress_label: Optional[str] = None
 
 
 class ChannelUpdate(BaseModel):
