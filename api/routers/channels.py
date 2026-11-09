@@ -508,7 +508,7 @@ def sync_channel_config(channel_id: int):
 @router.put("/{channel_id}/config")
 def update_channel_config(channel_id: int, data: dict):
     """Update channel config_json directly from the panel editor."""
-    from config.config_bridge import get_channel_config
+    from config.config_bridge import get_channel_config, normalize_config_patch
     import json as _json
 
     db = get_db()
@@ -517,6 +517,9 @@ def update_channel_config(channel_id: int, data: dict):
         raise HTTPException(404, "Channel not found")
     
     config = data.get("config", {})
+    # Canonical key names: prevents lower/upper duplicates that would make
+    # the change invisible to the pipeline (or be deleted on next startup).
+    config = normalize_config_patch(config, ch["slug"])
     db.update_channel(channel_id, config=config)
 
     # Invalidate cache

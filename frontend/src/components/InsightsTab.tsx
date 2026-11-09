@@ -391,6 +391,21 @@ function RecommendationCard({
                   Requiere codigo
                 </span>
               )}
+              {rec.applied_status === 'superseded' && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-amber-500/30 bg-amber-500/10 text-amber-400" title={`Sustituida por ${rec.superseded_by || 'otra recomendación'}`}>
+                  Sustituida
+                </span>
+              )}
+              {rec.applied_status === 'partial' && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-neon-gold/30 bg-neon-gold/10 text-neon-gold" title={(rec.warnings || []).join(' · ')}>
+                  Parcial
+                </span>
+              )}
+              {rec.applied_status === 'effective' && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-emerald-400">
+                  Verificada
+                </span>
+              )}
               {rec.hidden_as_duplicate && (
                 <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-gray-600/30 bg-gray-700/30 text-gray-400" title="Esta recomendacion ya fue sugerida en un analisis anterior">
                   Repetida (oculta)
@@ -877,6 +892,8 @@ export default function InsightsTab({
   const [loading, setLoading] = useState(!insights)
   const [error, setError] = useState<string | null>(null)
   const [applyingIds, setApplyingIds] = useState<Set<string>>(new Set())
+  const [applyError, setApplyError] = useState<string | null>(null)
+  const [applyNotice, setApplyNotice] = useState<string | null>(null)
   const [validatingIds, setValidatingIds] = useState<Set<string>>(new Set())
   const [refiningIds, setRefiningIds] = useState<Set<string>>(new Set())
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
@@ -1055,21 +1072,27 @@ export default function InsightsTab({
   async function handleApply(recId: string) {
     if (!insights) return
     setApplyingIds(prev => new Set(prev).add(recId))
+    setApplyError(null)
+    setApplyNotice(null)
     try {
-      await api.applyInsight(channelId, insights.id, recId)
-      // Reload channel to get updated config
-      const ch = await api.getChannel(channelId)
+      const result = await api.applyInsight(channelId, insights.id, recId)
+      // Reload channel + insight from the server: local optimistic state can
+      // diverge from what was actually persisted/effective.
+      const [ch, latest] = await Promise.all([
+        api.getChannel(channelId),
+        api.getLatestInsight(channelId),
+      ])
       setChannel(ch)
-      // Mark as applied in local state
-      const recs = insights.insights_json.recommendations.map(r =>
-        r.id === recId ? { ...r, applied: true } : r
-      )
-      setInsights({
-        ...insights,
-        insights_json: { ...insights.insights_json, recommendations: recs },
-      })
+      if (latest) setInsights(latest)
+      const warnings = result?.warnings ?? []
+      if (result?.applied_status === 'partial' || warnings.length > 0) {
+        setApplyNotice(`Aplicado con advertencias: ${warnings.join(' · ')}`)
+      } else {
+        setApplyNotice('Cambios aplicados y verificados en la configuración efectiva.')
+      }
     } catch (e: any) {
       console.error('Apply failed:', e)
+      setApplyError(e?.message || 'No se pudieron aplicar los cambios.')
     }
     setApplyingIds(prev => {
       const next = new Set(prev)
@@ -1199,19 +1222,25 @@ export default function InsightsTab({
   async function handleApplyRefined(recId: string, versionIndex: number) {
     if (!insights) return
     setApplyingIds(prev => new Set(prev).add(recId))
+    setApplyError(null)
+    setApplyNotice(null)
     try {
-      await api.applyInsight(channelId, insights.id, recId, versionIndex)
-      const ch = await api.getChannel(channelId)
+      const result = await api.applyInsight(channelId, insights.id, recId, versionIndex)
+      const [ch, latest] = await Promise.all([
+        api.getChannel(channelId),
+        api.getLatestInsight(channelId),
+      ])
       setChannel(ch)
-      const recs = insights.insights_json.recommendations.map(r =>
-        r.id === recId ? { ...r, applied: true } : r
-      )
-      setInsights({
-        ...insights,
-        insights_json: { ...insights.insights_json, recommendations: recs },
-      })
+      if (latest) setInsights(latest)
+      const warnings = result?.warnings ?? []
+      if (result?.applied_status === 'partial' || warnings.length > 0) {
+        setApplyNotice(`Aplicado con advertencias: ${warnings.join(' · ')}`)
+      } else {
+        setApplyNotice('Versión refinada aplicada y verificada.')
+      }
     } catch (e: any) {
       console.error('Apply refined failed:', e)
+      setApplyError(e?.message || 'No se pudo aplicar la versión refinada.')
     }
     setApplyingIds(prev => {
       const next = new Set(prev)
@@ -1321,6 +1350,27 @@ export default function InsightsTab({
 
   return (
     <div className="space-y-6">
+      {applyError && (
+        <div className="glass rounded-xl p-3 border border-neon-red/40 bg-neon-red/10 flex items-start gap-2">
+          <AlertCircle size={16} className="text-neon-red mt-0.5 flex-shrink-0" />
+          <div className="flex-1">
+            <p className="text-xs text-neon-red">{applyError}</p>
+            <p className="text-[10px] text-gray-500 mt-1">
+              La recomendación no se marcó como aplicada. Revisa el conflicto y vuelve a intentarlo.
+            </p>
+          </div>
+          <button onClick={() => setApplyError(null)} className="text-gray-500 hover:text-white text-xs">✕</button>
+        </div>
+      )}
+      {applyNotice && (
+        <div className="glass rounded-xl p-3 border border-emerald-500/30 bg-emerald-500/5 flex items-start gap-2">
+          <AlertCircle size={16} className="text-emerald-400 mt-0.5 flex-shrink-0" />
+          <div className="flex-1">
+            <p className="text-xs text-emerald-300">{applyNotice}</p>
+          </div>
+          <button onClick={() => setApplyNotice(null)} className="text-gray-500 hover:text-white text-xs">✕</button>
+        </div>
+      )}
       {/* ── Enrichment banner (when re-analyzing with existing data) ── */}
       {analyzing && (
         <div className="glass rounded-xl p-4 border border-neon-cyan/30 bg-neon-cyan/5 animate-pulse">

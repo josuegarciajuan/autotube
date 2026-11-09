@@ -75,6 +75,72 @@ def _normalize_field_name(name: str) -> str:
     return name.upper()
 
 
+def canonical_config_keys(slug: str) -> dict[str, str]:
+    """Return ``UPPER_SNAKE_CASE -> canonical key`` for a channel.
+
+    Canonical names are the ones defined by ``config.defaults`` and the
+    channel's Python module — the names the pipeline actually reads. This is
+    the single mapping used to normalise UI/Insights writes before they reach
+    ``channels.config_json``.
+    """
+    canonical: dict[str, str] = {}
+    for mod in (_load_defaults_module(), _load_python_module(slug)):
+        if mod is None:
+            continue
+        for name, value in vars(mod).items():
+            if name.startswith("_"):
+                continue
+            if inspect.ismodule(value) or inspect.isfunction(value) or inspect.isclass(value):
+                continue
+            canonical.setdefault(name.upper(), name)
+    return canonical
+
+
+def canonical_config_key(name: str, slug: str) -> str:
+    """Return the canonical spelling for *name* (or *name* if unknown)."""
+    return canonical_config_keys(slug).get(str(name).upper(), name)
+
+
+def normalize_config_patch(patch: dict, slug: str) -> dict:
+    """Map top-level keys in *patch* to their canonical config names.
+
+    Nested dictionaries (e.g. ``MEDIA_STRATEGY``) are left untouched: their
+    inner keys are policy fields, not top-level config keys. Unknown keys are
+    preserved so callers can warn about them without dropping data.
+
+    If the same canonical key appears twice (e.g. ``title_formulas`` and
+    ``TITLE_FORMULAS``), the canonical spelling wins and the duplicate is
+    discarded with a warning.
+    """
+    if not isinstance(patch, dict):
+        return patch
+    canonical = canonical_config_keys(slug)
+    out: dict = {}
+    for key, value in patch.items():
+        target = canonical.get(str(key).upper(), key)
+        if target in out and key != target:
+            logger.warning(
+                "normalize_config_patch: dropping duplicate key '%s' "
+                "(canonical '%s' already present) for slug=%s",
+                key, target, slug,
+            )
+            continue
+        out[target] = value
+    return out
+
+
+def _config_values_equal(a: object, b: object) -> bool:
+    """Structural equality that tolerates tuple/list JSON round-trips."""
+    if a == b:
+        return True
+    try:
+        return json.dumps(a, sort_keys=True, ensure_ascii=False) == json.dumps(
+            b, sort_keys=True, ensure_ascii=False
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 def _clean_duplicate_keys(db_config: dict, py_safe: dict) -> dict:
     """Remove duplicate normalized keys from DB config, keeping canonical casing.
 
@@ -105,6 +171,21 @@ def _clean_duplicate_keys(db_config: dict, py_safe: dict) -> dict:
     for upper, keys in groups.items():
         if len(keys) <= 1:
             continue  # No collision
+
+        # ── Never destroy conflicting values silently ──────────────
+        # If the variants disagree (e.g. an Insight AI change was written
+        # as `title_formulas` while `TITLE_FORMULAS` held an older list),
+        # keeping only one of them loses a user-accepted change. Leave the
+        # conflict in place (and visible via logs) until it is resolved
+        # explicitly.
+        values = [db_config[k] for k in keys]
+        if not all(_config_values_equal(values[0], v) for v in values[1:]):
+            logger.warning(
+                "Config bridge: duplicate keys %s have DIFFERENT values — "
+                "keeping both (resolve manually, do not delete blindly)",
+                keys,
+            )
+            continue
 
         # Prefer the key that matches Python's UPPER_SNAKE_CASE
         canonical = None
