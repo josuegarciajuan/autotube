@@ -77,7 +77,7 @@ def audit(conn: sqlite3.Connection, since_id: int, slug: str | None) -> list[dic
         except json.JSONDecodeError:
             continue
         for rec in data.get("recommendations", []):
-            changes = rec.get("config_changes") or {}
+            changes = rec.get("applied_changes") or rec.get("config_changes") or {}
             if not changes:
                 continue
             checks = []
