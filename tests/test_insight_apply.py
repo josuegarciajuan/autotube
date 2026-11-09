@@ -170,3 +170,14 @@ def test_unknown_key_is_preserved_with_warning(patch_db):
     assert json.loads(db.channels[3]["config_json"])["FOO_BAR"] == 1
     assert out["applied_status"] == "partial"
     assert any("Unknown config keys" in w for w in out["warnings"])
+
+
+def test_case_variant_is_removed_when_canonical_is_written(patch_db):
+    db = patch_db(FakeDB(
+        config={"title_formulas": ["shadow-old"]},
+        insight=_insight([_rec("r1", {"TITLE_FORMULAS": ["canonical-new"]})]),
+    ))
+    insights_router.apply_insight(3, 43, "r1", -1)
+    saved = json.loads(db.channels[3]["config_json"])
+    assert saved["TITLE_FORMULAS"] == ["canonical-new"]
+    assert "title_formulas" not in saved

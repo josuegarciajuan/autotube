@@ -209,6 +209,10 @@ def get_latest_insight(channel_id: int):
 _APPLY_LOCKS_GUARD = threading.Lock()
 _APPLY_LOCKS: dict[int, threading.Lock] = {}
 
+# Keys the analyzer can propose but the generation pipeline does not read.
+# Applying them is accepted (stored) but cannot change output yet.
+_INERT_KEYS = {"CONTENT_PILLARS", "script_end_hook"}
+
 _DURATION_KEYS = {
     "VIDEO_AVERAGE_DURATION_MIN",
     "VIDEO_DURATION_DISCREPANCY_MIN",
@@ -352,6 +356,11 @@ def apply_insight(channel_id: int, insight_id: int, rec_id: str = Query(""),
     warnings: list[str] = []
     if unknown:
         warnings.append(f"Unknown config keys (preserved): {unknown}")
+    inert = [k for k in changes if k in _INERT_KEYS]
+    if inert:
+        warnings.append(
+            f"Keys stored but not consumed by the pipeline yet: {inert}"
+        )
 
     lock = _apply_lock(channel_id)
     if not lock.acquire(timeout=15):
@@ -392,6 +401,13 @@ def apply_insight(channel_id: int, insight_id: int, rec_id: str = Query(""),
 
         previous_config = dict(current_config)
         merged_config = _deep_merge(current_config, changes)
+
+        # A case-variant duplicate of a key being changed would shadow the
+        # canonical write depending on dict order. Drop the variants.
+        changed_upper = {k.upper() for k in changes}
+        for key in list(merged_config):
+            if key.upper() in changed_upper and key not in changes:
+                merged_config.pop(key, None)
 
         # Save once. Verification below decides whether it stays.
         db.update_channel(channel_id, config=merged_config)

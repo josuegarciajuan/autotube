@@ -287,7 +287,13 @@ def _merge_configs(
         # prod_script_blocks_max=6 from UI) from overwriting each other.
         seen_normalized: set[str] = set()
 
-        for db_key, db_value in db_config.items():
+        # Canonical (UPPER_SNAKE_CASE) entries first: when a channel has both
+        # `TITLE_FORMULAS` and `title_formulas`, the canonical spelling must
+        # win deterministically regardless of JSON insertion order.
+        ordered_db_items = sorted(
+            db_config.items(), key=lambda kv: (kv[0] != kv[0].upper(),)
+        )
+        for db_key, db_value in ordered_db_items:
             # Policy dictionaries are merged below so DB can add nested fields.
             if db_key.upper() in {"MEDIA_STRATEGY", "CROSS_PLATFORM"}:
                 continue
