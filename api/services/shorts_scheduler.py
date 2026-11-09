@@ -5280,10 +5280,27 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     from config.llm_client import create_llm_client
     from config.llm_helpers import llm_json_call
     from pipeline.shorts_tts import (
-        validate_short_script, MAX_WORD_COUNT as _MAX_WORDS,
-        MIN_WORD_COUNT as _MIN_WORDS, voice_aware_word_budget,
-        prosody_budget_params,
+        validate_short_script, MIN_WORD_COUNT as _MIN_WORDS,
+        voice_aware_word_budget,
+        prosody_budget_params, trim_blocks_sentences,
     )
+
+    # Presupuesto real (prosodia incluida) calculado ANTES del prompt: el LLM
+    # debe pedir un guion que quepa. El prompt antiguo pedía 70-85 palabras pero
+    # el modelo devolvía 150-250 y el código cortaba frases a mitad.
+    _prosody_floor_pct, _avg_pause_ms = prosody_budget_params(ch_config)
+    _base_rate = (getattr(ch_config, "TTS_STRATEGY", {}) or {}).get("rate_base", "0%")
+    _prompt_blocks = 6
+    _prompt_budget = voice_aware_word_budget(
+        getattr(ch_config, "SHORTS_MAX_DURATION_SEC", 58.0),
+        rate=_base_rate,
+        block_count=_prompt_blocks,
+        prosody_floor_pct=_prosody_floor_pct,
+        avg_pause_ms=_avg_pause_ms,
+    )
+    # Margen para que un CTA (~7 palabras) aún quepa cuando se añade.
+    _prompt_target = max(_MIN_WORDS, _prompt_budget - 5)
+
     client = create_llm_client(enable_thinking=False)
 
     MAX_SCRIPT_ATTEMPTS = 3
@@ -5298,16 +5315,16 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
                 retry_delay=2.0,
                 model=LLM_MODEL,
                 messages=[{"role": "user", "content": (
-                    f"Genera un Short viral en español de ~50-58 segundos (~70-85 palabras totales, minimo 70). "
+                    f"Genera un Short viral en español de ~50-58 segundos. Presupuesto ESTRICTO: máximo {_prompt_target} palabras totales (mínimo {_MIN_WORDS}). "
                     f"Canal: {display_name} — {niche}. Tagline: {tagline}."
                     f"{topic_warning}"
                     f"{title_warning}"
                     f"{theme_block}"  # v8: visual theme context for query anchoring
                     f"{conflict_feedback}"
-                    f"Usa entre 6 y 8 bloques: hook, [desarrollo1, desarrollo2, (desarrollo3 opcional)], climax, cierre. "
-                    f"IMPORTANTE: los bloques de desarrollo y climax deben tener 3-4 frases cada uno. "
-                    f"Hook y cierre: 2-3 frases. Minimo 12 palabras por bloque, maximo 18. "
-                    f"El total debe superar 70 palabras y no exceder 90. "
+                    f"Usa entre 5 y 7 bloques: hook, [desarrollo1, desarrollo2, (desarrollo3 opcional)], climax, cierre. "
+                    f"IMPORTANTE: cada bloque debe contener 1-2 FRASES COMPLETAS. NUNCA repartas una frase entre dos bloques. "
+                    f"Hook y cierre: 1-2 frases. Reparte unas {max(8, _prompt_target // 6)} palabras por bloque. "
+                    f"El total NO debe exceder {_prompt_target} palabras; si no cabe, acorta frases completas (no recortes palabras sueltas). "
                     f"Añade desarrollo3 SOLO si el tema lo justifica (mas variedad visual). "
                     f"PARA CADA BLOQUE genera 'search_query_en': 5-8 keywords EN INGLÉS para buscar "
                     f"imagenes y videos de stock que coincidan EXACTAMENTE con lo narrado en ese momento. "
@@ -5323,13 +5340,13 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
                     f'"theme_keywords_en": ["global", "theme", "keywords"], '
                     f'"bloques": [{{"tipo": "hook", "tono": "suspense", "texto": "1-2 frases", '
                     f'"search_query_en": "english keywords for stock search"}}, '
-                    f'{{"tipo": "desarrollo1", "texto": "2-3 frases con contexto y detalle", '
+                    f'{{"tipo": "desarrollo1", "texto": "1-2 frases completas con contexto y detalle", '
                     f'"search_query_en": "english keywords"}}, '
-                    f'{{"tipo": "desarrollo2", "texto": "2-3 frases con dato impactante especifico", '
+                    f'{{"tipo": "desarrollo2", "texto": "1-2 frases completas con dato impactante especifico", '
                     f'"search_query_en": "english keywords"}}, '
-                    f'{{"tipo": "desarrollo3", "texto": "2-3 frases con detalle adicional (opcional)", '
+                    f'{{"tipo": "desarrollo3", "texto": "1-2 frases completas con detalle adicional (opcional)", '
                     f'"search_query_en": "english keywords"}}, '
-                    f'{{"tipo": "climax", "texto": "2-3 frases con la consecuencia o revelacion", '
+                    f'{{"tipo": "climax", "texto": "1-2 frases completas con la consecuencia o revelacion", '
                     f'"search_query_en": "english keywords"}}, '
                     f'{{"tipo": "cierre", "texto": "1-2 frases cierre + suscribete", '
                     f'"search_query_en": "english keywords"}}]}}. '
@@ -5357,68 +5374,93 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
             _native_fail(slot_id, job_id, f"script LLM devolvió tipo inesperado: {type(script).__name__}")
             return None
 
-        # 1b. Validate script completeness (with smart truncation for over-long scripts)
+        # 1b. Structural validation + prosody-aware budget enforcement.
+        #     A large overshoot is regenerated; a small one is trimmed by
+        #     COMPLETE SENTENCES. Words are never chopped mid-sentence.
         errors = validate_short_script(script)
-        if errors:
-            # Separate structural errors from word-count issues
-            structural_errors = [e for e in errors if "too long" not in e and "too short" not in e
-                                 and "words" not in e and "Blocks" not in e and "blocks" not in e]
-            if structural_errors:
-                if not _is_last:
-                    conflict_feedback = (
-                        f"❌ El script anterior no cumplía el schema: {structural_errors[:2]}. "
-                        f"Regénéralo cumpliendo EXACTAMENTE el schema indicado.\n"
-                    )
-                    continue
-                logger.error("Short script validation failed for %s: %s", channel_slug, structural_errors)
-                _native_fail(slot_id, job_id, f"script inválido: {structural_errors[:3]}")
-                return None
+        structural_errors = [
+            e for e in errors
+            if "too long" not in e and "too short" not in e
+            and "words" not in e and "Blocks" not in e and "blocks" not in e
+        ]
+        if structural_errors:
+            if not _is_last:
+                conflict_feedback = (
+                    f"❌ El script anterior no cumplía el schema: {structural_errors[:2]}. "
+                    f"Regénéralo cumpliendo EXACTAMENTE el schema indicado.\n"
+                )
+                continue
+            logger.error("Short script validation failed for %s: %s", channel_slug, structural_errors)
+            _native_fail(slot_id, job_id, f"script inválido: {structural_errors[:3]}")
+            return None
 
-            bloques_for_trim = script.get("bloques", [])
+        bloques_for_trim = script.get("bloques", [])
+        total_words = sum(len(b.get("texto", "").split()) for b in bloques_for_trim)
+
+        if total_words > _prompt_budget:
+            if total_words > int(_prompt_budget * 1.25) and not _is_last:
+                conflict_feedback = (
+                    f"❌ El script anterior tiene {total_words} palabras y el máximo es "
+                    f"{_prompt_target}. Regénéralo COMPLETO con frases completas y sin "
+                    f"pasar del presupuesto.\n"
+                )
+                logger.warning(
+                    "[%s] Script too long (%d > %d) — regenerating (intento %d/%d)",
+                    channel_slug, total_words, _prompt_budget,
+                    _attempt + 1, MAX_SCRIPT_ATTEMPTS,
+                )
+                continue
+
+            bloques_for_trim, _trim_report = trim_blocks_sentences(
+                bloques_for_trim, max_words=_prompt_budget, allow_word_fallback=False,
+            )
+            script["bloques"] = bloques_for_trim
             total_words = sum(len(b.get("texto", "").split()) for b in bloques_for_trim)
 
-            if total_words > _MAX_WORDS:
-                # Trim words from blocks: desarrollo → climax → cierre → hook (last resort)
-                trim_order = ["desarrollo3", "desarrollo2", "desarrollo1", "climax", "cierre", "hook"]
-                words_to_remove = total_words - _MAX_WORDS
-
-                for block_type in trim_order:
-                    if words_to_remove <= 0:
-                        break
-                    for b in bloques_for_trim:
-                        if b.get("tipo") == block_type:
-                            words = b.get("texto", "").split()
-                            min_words = 5 if block_type not in ("hook", "cierre") else 7
-                            if len(words) > min_words:
-                                remove_from_block = min(words_to_remove, len(words) - min_words)
-                                b["texto"] = " ".join(words[:len(words) - remove_from_block])
-                                words_to_remove -= remove_from_block
-
-                logger.warning(
-                    "[%s] Script trimmed from %d to ~%d words (LLM exceeded limit of %d)",
-                    channel_slug, total_words, _MAX_WORDS, _MAX_WORDS,
-                )
-
-                # Re-validate after trimming
-                errors2 = validate_short_script(script)
-                if errors2:
-                    if not _is_last:
-                        conflict_feedback = (
-                            f"❌ El script anterior seguía inválido tras el recorte: {errors2[:2]}. "
-                            f"Genera un script más corto (~70-85 palabras).\n"
-                        )
-                        continue
-                    logger.error(
-                        "Short script still invalid after trimming for %s: %s",
-                        channel_slug, errors2,
+            if _trim_report.get("needs_regeneration"):
+                if not _is_last:
+                    conflict_feedback = (
+                        f"❌ No se pudo ajustar el guion sin partir frases "
+                        f"(quedan {total_words} palabras; máximo {_prompt_target}). "
+                        f"Genera uno más corto con frases completas.\n"
                     )
-                    _native_fail(slot_id, job_id, f"script inválido tras recorte: {errors2[:3]}")
-                    return None
-            elif total_words < _MIN_WORDS:
-                logger.warning(
-                    "[%s] Script has only %d words (< %d min) — proceeding anyway",
-                    channel_slug, total_words, _MIN_WORDS,
+                    continue
+                logger.error(
+                    "[%s] Script still too long without cutting sentences: %d words",
+                    channel_slug, total_words,
                 )
+                _native_fail(
+                    slot_id, job_id,
+                    f"guion demasiado largo sin partir frases ({total_words} palabras)",
+                )
+                return None
+
+            logger.warning(
+                "[%s] Script trimmed by complete sentences: %d → %d words "
+                "(budget %d; %d sentence(s) removed, %d block(s) dropped)",
+                channel_slug, _trim_report.get("initial_words", total_words), total_words,
+                _prompt_budget, len(_trim_report.get("removed_sentences") or []),
+                len(_trim_report.get("dropped_blocks") or []),
+            )
+            # Dropping desarrollo3 changes the block count; re-check structure.
+            post_errors = [
+                e for e in validate_short_script(script)
+                if "too long" not in e and "words" not in e
+            ]
+            if post_errors:
+                if not _is_last:
+                    conflict_feedback = (
+                        f"❌ El guion quedó inválido tras el recorte: {post_errors[:2]}. "
+                        f"Regénéralo con 5-7 bloques y el presupuesto indicado.\n"
+                    )
+                    continue
+                _native_fail(slot_id, job_id, f"script inválido tras recorte: {post_errors[:3]}")
+                return None
+        elif total_words < _MIN_WORDS:
+            logger.warning(
+                "[%s] Script has only %d words (< %d min) — proceeding anyway",
+                channel_slug, total_words, _MIN_WORDS,
+            )
 
         # ── Hard topic-dedup guard (v58): tema ya consumido → regenerar/fail ──
         # Registro compartido long-form + shorts por canal. Evita repetir la
@@ -5575,56 +5617,43 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
             has_subscribe_cta = True
             logger.info("[%s] Added subscribe CTA to native short: '%s'", channel_slug, cta_text)
 
-    # ── Pre-TTS duration estimation ──────────────────────────
-    # Avoid wasting TTS time on scripts that will definitely fail
-    # the audio length check. Worst-case voice speed: 0.50 s/word.
-    pre_tts_words = sum(len(b.get("texto", "").split()) for b in bloques)
-    _base_rate = (getattr(ch_config, "TTS_STRATEGY", {}) or {}).get("rate_base", "0%")
+    # ── Pre-TTS safety: drop CTA first, then sentence-aware trim ──
     _tts_budget = voice_aware_word_budget(
         getattr(ch_config, "SHORTS_MAX_DURATION_SEC", 58.0),
         rate=_base_rate, block_count=len(bloques),
         prosody_floor_pct=_prosody_floor_pct, avg_pause_ms=_avg_pause_ms,
     )
-    pre_tts_est = pre_tts_words / max(
-        voice_aware_word_budget(58.0, rate=_base_rate, block_count=1) / 53.0, 0.1
-    )
-    if pre_tts_words > _tts_budget:
-        # Re-trim aggressively to ~90 words (safe under 45s)
-        target_words = _tts_budget
-        words_to_remove = pre_tts_words - target_words
+    pre_tts_words = sum(len(b.get("texto", "").split()) for b in bloques)
+    if pre_tts_words > _tts_budget and has_subscribe_cta:
+        # The CTA is optional; drop it before touching the narrative.
+        bloques = [b for b in bloques if b.get("tipo") != "subscribe_cta"]
+        script["bloques"] = bloques
+        has_subscribe_cta = False
+        pre_tts_words = sum(len(b.get("texto", "").split()) for b in bloques)
         logger.warning(
-            "[%s] Pre-TTS: estimated %.1fs from %d words (> 53s) — "
-            "re-trimming to ~%d words",
-            channel_slug, pre_tts_est, pre_tts_words, target_words,
+            "[%s] Pre-TTS: dropped subscribe CTA to fit the %d-word budget",
+            channel_slug, _tts_budget,
         )
-        trim_order = ["desarrollo3", "desarrollo2", "desarrollo1", "climax", "cierre", "hook"]
-        for block_type in trim_order:
-            if words_to_remove <= 0:
-                break
-            for b in bloques:
-                if b.get("tipo") == block_type:
-                    words = b.get("texto", "").split()
-                    if len(words) > 5:
-                        remove = min(words_to_remove, len(words) - 5)
-                        b["texto"] = " ".join(words[:len(words) - remove])
-                        words_to_remove -= remove
-
+    if pre_tts_words > _tts_budget:
+        bloques, _pre_report = trim_blocks_sentences(
+            bloques, max_words=_tts_budget, allow_word_fallback=False,
+        )
+        script["bloques"] = bloques
         new_total = sum(len(b.get("texto", "").split()) for b in bloques)
-        # Seconds/word implied by the (now prosody-aware) budget, instead of the
-        # optimistic 0.50 that let 59s shorts slip through the pre-TTS guard.
-        _sec_per_word = 53.0 / max(_tts_budget, 1)
-        new_est = new_total * _sec_per_word
-        logger.info(
-            "[%s] Re-trimmed: %d → %d words (est %.1fs → %.1fs)",
-            channel_slug, pre_tts_words, new_total, pre_tts_est, new_est,
-        )
-        if new_est > 55.0:
+        if _pre_report.get("needs_regeneration") or new_total > _tts_budget:
             logger.error(
-                "[%s] Still too long after re-trim (est %.1fs > 55s) — aborting",
-                channel_slug, new_est,
+                "[%s] Pre-TTS: cannot fit %d words in %d without cutting sentences — aborting",
+                channel_slug, new_total, _tts_budget,
             )
-            _native_fail(slot_id, job_id, f"guion demasiado largo tras recorte (est {new_est:.1f}s)")
-            return None  # will be caught by retry mechanism
+            _native_fail(
+                slot_id, job_id,
+                f"guion no cabe sin partir frases ({new_total} palabras, máximo {_tts_budget})",
+            )
+            return None
+        logger.info(
+            "[%s] Pre-TTS re-trim by complete sentences: %d → %d words (budget %d)",
+            channel_slug, pre_tts_words, new_total, _tts_budget,
+        )
 
     # 2. Segmented TTS
     output_dir = OUTPUT_DIR / "videos" / "shorts"
@@ -5633,7 +5662,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     audio_path = output_dir / f"sched_audio_{channel_slug}_{ts}.mp3"
     srt_path = output_dir / f"sched_audio_{channel_slug}_{ts}.srt"
 
-    from pipeline.shorts_tts import synthesize_shorts_blocks, trim_blocks_to_word_budget
+    from pipeline.shorts_tts import synthesize_shorts_blocks
 
     def _run_shorts_tts():
         tts_total = len(bloques)
@@ -5662,7 +5691,17 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
                 "[%s] Short audio too long — re-trimming %d→%d words and retrying once: %s",
                 channel_slug, _pre_retry_words, _retry_budget, e,
             )
-            trim_blocks_to_word_budget(bloques, max_words=_retry_budget)
+            bloques, _retry_report = trim_blocks_sentences(
+                bloques, max_words=_retry_budget, allow_word_fallback=False,
+            )
+            script["bloques"] = bloques
+            if _retry_report.get("needs_regeneration"):
+                logger.error(
+                    "[%s] Cannot re-trim to %d words without cutting sentences — failing slot",
+                    channel_slug, _retry_budget,
+                )
+                _native_fail(slot_id, job_id, "guion no cabe sin partir frases tras TTS")
+                return None
             try:
                 tts_result = _run_shorts_tts()
             except RuntimeError as e2:
@@ -5685,7 +5724,8 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     try:
         editor = VideoEditor(ch_config)
         scene_ranges = editor._compute_block_ranges(
-            bloques, tts_result.get("timestamps", [])
+            bloques, tts_result.get("timestamps", []),
+            audio_duration=tts_result.get("duration_sec"),
         )
         logger.info(
             "[%s] Computed %d scene ranges from %d blocks (TTS=%.1fs)",
@@ -5830,6 +5870,7 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     try:
         render_meta = validate_short_render(
             video_path, max_duration_sec=_short_max_duration,
+            expected_duration_sec=tts_result.get("duration_sec"),
         )
     except Exception as e:
         logger.error(

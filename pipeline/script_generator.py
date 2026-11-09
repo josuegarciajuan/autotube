@@ -2001,12 +2001,47 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             return []
 
     @staticmethod
+    def _normalized_words(text: str) -> list[str]:
+        import re
+        import unicodedata
+
+        low = unicodedata.normalize("NFKD", str(text or "").lower())
+        low = "".join(ch for ch in low if not unicodedata.combining(ch))
+        low = re.sub(r"[^a-z0-9ñ ]+", " ", low)
+        return [w for w in low.split() if w]
+
+    @classmethod
+    def _segments_cover_block(cls, block_text: str, segments: list[dict]) -> bool:
+        """True when the segments reproduce the whole block (order-aware).
+
+        The LLM sometimes omits a sentence from ``segmentos``; the old length
+        check (≥85%) accepted it and TTS narrated an incomplete block.  Require
+        ~100% coverage so no phrase is skipped.
+        """
+        block_words = cls._normalized_words(block_text)
+        if not block_words:
+            return False
+        seg_words: list[str] = []
+        for seg in segments:
+            seg_words.extend(cls._normalized_words(seg.get("texto", "")))
+        if not seg_words:
+            return False
+        # Greedy ordered match: every block word must appear, in order.
+        i = 0
+        for word in seg_words:
+            if i < len(block_words) and word == block_words[i]:
+                i += 1
+        coverage = i / len(block_words)
+        return coverage >= 0.99
+
+    @staticmethod
     def _sanitize_segmentos(block_text: str, segmentos) -> list[dict]:
         """Validate/normalize LLM-provided sub-phrase tone segments.
 
         Returns a clean list of ``{"texto","tono"}`` or ``[]`` when the
-        segments don't reproduce the original block text (which would make
-        the narration diverge from the stored guion).
+        segments do not reproduce **all** the original block text.  Falling
+        back to ``[]`` makes TTS narrate the full block, so no sentence can be
+        silently skipped (the old 85% threshold allowed exactly that).
         """
         if not isinstance(segmentos, list) or not segmentos:
             return []
@@ -2020,10 +2055,7 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             clean.append({"texto": stext, "tono": str(seg.get("tono") or "").strip()})
         if len(clean) < 2:
             return []
-        # The concatenation of the segments must reproduce the block text
-        # (allow small connector-word differences).
-        joined = " ".join(s["texto"] for s in clean)
-        if len(joined) < len(block_text) * 0.85:
+        if not ScriptGenerator._segments_cover_block(block_text, clean):
             return []
         return clean
 

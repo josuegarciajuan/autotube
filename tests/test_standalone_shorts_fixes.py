@@ -87,9 +87,12 @@ def test_trim_to_budget_keeps_hook_and_cierre():
     assert _word_count(bloques) == 167
     trim_blocks_to_word_budget(bloques, max_words=90)
     assert _word_count(bloques) <= 90
-    # Hook and cierre must stay intact (words removed from later blocks first)
-    assert len(bloques[0]["texto"].split()) == 12
-    assert len(bloques[5]["texto"].split()) == 15
+    # Hook and cierre must stay intact (words removed from later blocks first).
+    # The optional desarrollo3 block may be dropped whole (sentence-aware trim).
+    hook = next(b for b in bloques if b["tipo"] == "hook")
+    cierre = next(b for b in bloques if b["tipo"] == "cierre")
+    assert len(hook["texto"].split()) == 12
+    assert len(cierre["texto"].split()) == 15
 
 
 def test_trim_harder_budget():

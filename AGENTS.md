@@ -932,3 +932,34 @@ Cada CAMBIO se trabaja en una copia aislada:
    (pendiente de apply_changes); reportar la acción manual exacta para la nube. Nunca inventar un remoto.
 5. Si se pide OTRO cambio en la misma sesión, repetir el ciclo completo (nueva copia).
 ```
+
+## 🎙️ Invariante de integridad de narración (nov 2026)
+
+Tras detectar narración "rara"/frases saltadas en shorts y largos, rigen estas
+reglas duras (spec: `specs/narracion-integridad.md`):
+
+1. **El audio narrado nunca se recorta.** `audio_del_MP4 ≥ duración_MP3 − 1.5 s`.
+   El render de shorts valida `expected_duration_sec` y aborta si falta narración.
+2. **Shorts: los clips de stock más cortos que su escena se repiten**
+   (`-stream_loop -1`). Un clip de 9 s para una escena de 13 s ya no colapsa la
+   cadena `xfade` ni hace que `-shortest` corte la voz.
+3. **Shorts: el guion se ajusta por ORACIONES completas**, nunca por palabras
+   sueltas. Si no cabe sin partir frases, se **regenera** el guion (nunca se
+   publica un fragmento tipo "No eran simples ofrendas: los"). El presupuesto
+   real (`voice_aware_word_budget`, prosodia incluida) se inyecta en el prompt.
+4. **Edge-tts: los timestamps usan la duración REAL de cada MP3**, no el último
+   `WordBoundary` (que ignoraba ~1 s/bloque de padding y desfasaba el SRT ~6 s).
+5. **Long-form: las escenas son contiguas** (cada una incluye la pausa hasta el
+   siguiente bloque) y el body debe cubrir la narración. `_assert_body_timeline_sync`
+   falla si `audio > video + LONGFORM_MAX_TRAILING_AUDIO_SEC` (default 2 s);
+   nunca más "trim at mux" silencioso de 8-26 s.
+6. **`segmentos` del LLM deben cubrir el 100% del bloque**; si omiten una frase,
+   se narra el `texto` completo (nunca se saltan oraciones).
+7. **TTS nunca omite un bloque en silencio**: un fallo aborta/commuta de motor
+   (`TTS_FAIL_ON_BLOCK_ERROR=true`); no se publica audio incompleto.
+8. **Diagnóstico:** `python3 scripts/audit_narration_integrity.py --days 30`.
+   Recuperación de shorts en cola: `python3 scripts/refix_truncated_shorts.py`
+   (dry-run por defecto; `--apply` para re-renderizar, nunca re-sube).
+9. Kill-switches: `SHORTS_LOOP_SHORT_VIDEO_CLIPS`, `SHORTS_SENTENCE_TRIM`,
+   `LONGFORM_CONTIGUOUS_SCENES`, `TTS_TRIM_TRAILING_SILENCE`,
+   `TTS_FAIL_ON_BLOCK_ERROR` (todos `true` por defecto).

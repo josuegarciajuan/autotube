@@ -1026,10 +1026,13 @@ RESPONDE SOLO CON EL JSON. NADA MÁS."""
         raise HTTPException(500, f"Script generation failed: {str(e)[:200]}")
 
     # 2b. Validate script completeness
-    from pipeline.shorts_tts import validate_short_script
-    script_errors = validate_short_script(script)
-    if script_errors:
-        raise HTTPException(422, f"Script validation failed: {'; '.join(script_errors)}")
+    from pipeline.shorts_tts import prepare_short_script
+    script, script_errors, _trim_report = prepare_short_script(script, ch_config)
+    if script_errors or _trim_report.get("needs_regeneration"):
+        raise HTTPException(
+            422,
+            f"Script validation failed: {'; '.join(script_errors or ['no cabe sin partir frases'])}",
+        )
 
     title = (script.get("titulo") or script.get("title") or "Short")[:100]
     hook_text = (script.get("hook_text") or "")[:100]
@@ -1082,7 +1085,8 @@ RESPONDE SOLO CON EL JSON. NADA MÁS."""
     try:
         editor = VideoEditor(ch_config)
         scene_ranges = editor._compute_block_ranges(
-            bloques, tts_result.get("timestamps", [])
+            bloques, tts_result.get("timestamps", []),
+            audio_duration=tts_result.get("duration_sec"),
         )
         # Add 'duracion_sec' for fetch_short_assets_exhaustive compatibility
         for sr in scene_ranges:

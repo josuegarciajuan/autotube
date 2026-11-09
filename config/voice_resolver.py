@@ -292,6 +292,31 @@ def resolve_prosody(
     }
 
 
+def _normalized_words(text: str) -> list[str]:
+    import unicodedata
+    low = unicodedata.normalize("NFKD", str(text or "").lower())
+    low = "".join(ch for ch in low if not unicodedata.combining(ch))
+    low = re.sub(r"[^a-z0-9ñ ]+", " ", low)
+    return [w for w in low.split() if w]
+
+
+def _segments_cover_text(block_text: str, segments: list[dict]) -> bool:
+    """True when concatenated segments reproduce the block (order-aware)."""
+    block_words = _normalized_words(block_text)
+    if not block_words:
+        return False
+    seg_words: list[str] = []
+    for seg in segments:
+        seg_words.extend(_normalized_words(seg.get("texto", "")))
+    if not seg_words:
+        return False
+    i = 0
+    for word in seg_words:
+        if i < len(block_words) and word == block_words[i]:
+            i += 1
+    return (i / len(block_words)) >= 0.99
+
+
 def split_block_segments(
     bloque: dict,
     config: Any,
@@ -323,6 +348,15 @@ def split_block_segments(
                 "emocion": seg.get("emocion", emocion),
                 "tipo": tipo,
             })
+    # Defensive coverage check: if the LLM omitted sentences from the
+    # segments, narrate the full block instead (never skip phrases).
+    if candidates and not _segments_cover_text(bloque.get("texto", ""), candidates):
+        logger.warning(
+            "Segments do not cover the full block (tipo=%s) — narrating texto completo",
+            tipo,
+        )
+        candidates = []
+
     if not candidates:
         candidates = [{
             "texto": str(bloque.get("texto") or "").strip(),

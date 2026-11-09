@@ -2016,7 +2016,16 @@ class PipelineOrchestrator:
             timestamps = audio_data.get("timestamps") if audio_data else None
             if timestamps and bloques:
                 try:
-                    scene_ranges = self.video_editor._compute_block_ranges(bloques, timestamps)
+                    _voice_dur = None
+                    try:
+                        _ap = (audio_data or {}).get("audio_path")
+                        if _ap:
+                            _voice_dur = self.video_editor._get_voice_duration(Path(_ap))
+                    except Exception:  # noqa: BLE001
+                        _voice_dur = None
+                    scene_ranges = self.video_editor._compute_block_ranges(
+                        bloques, timestamps, audio_duration=_voice_dur,
+                    )
                     logger.info("[%s] Computed %d scene ranges from TTS timestamps "
                                 "(each subscene gets its own media)", self.canal, len(scene_ranges))
                 except Exception as e:

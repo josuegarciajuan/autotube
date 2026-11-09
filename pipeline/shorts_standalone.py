@@ -202,33 +202,31 @@ def run_standalone_short(
         # 107-130 word scripts; rejecting meant 2 attempts both failed and
         # the whole standalone short was abandoned).
         from pipeline.shorts_tts import (
-            normalize_short_script, validate_short_script,
-            trim_blocks_to_word_budget, MAX_WORD_COUNT,
+            prepare_short_script, synthesize_shorts_blocks, trim_blocks_sentences,
+            voice_aware_word_budget, prosody_budget_params,
         )
         script = None
         for _attempt in range(2):
             candidate = pipeline._phase_script_short(short_content)
             if not candidate or not candidate.get("bloques"):
                 continue
-            candidate = normalize_short_script(candidate)
-            # Trim excess words before structural validation
-            candidate["bloques"] = trim_blocks_to_word_budget(
-                candidate["bloques"], max_words=MAX_WORD_COUNT,
+            candidate, errors, report = prepare_short_script(
+                candidate, pipeline.config,
             )
-            errors = validate_short_script(candidate)
-            if not errors:
+            if not errors and not report.get("needs_regeneration"):
                 script = candidate
                 break
             logger.warning(
-                "[standalone] Invalid script for %s (attempt %d/2): %s",
-                channel_slug, _attempt + 1, errors[:3],
+                "[standalone] Invalid/too-long script for %s (attempt %d/2): %s "
+                "(needs_regeneration=%s)",
+                channel_slug, _attempt + 1, (errors or [])[:3],
+                report.get("needs_regeneration"),
             )
         if not script:
             logger.error("[standalone] Script generation failed for %s", channel_slug)
             return None
 
         # ── TTS ───────────────────────────────────────────
-        from pipeline.shorts_tts import synthesize_shorts_blocks, trim_blocks_to_word_budget
         from pathlib import Path
         import tempfile, uuid
 
@@ -243,16 +241,18 @@ def run_standalone_short(
         srt_path = output_dir / "standalone.srt"
 
         # ── Enforce the audio duration budget BEFORE TTS ──
-        # The LLM often exceeds ~105 words (audio > 58 s) and
-        # synthesize_shorts_blocks then raises "Short audio too long".
-        # Trim first, and if a slow voice still overflows, retry with a
-        # tighter budget instead of failing the whole standalone short.
+        # Prosody-aware budget: the old hardcoded 90/72 words ignored the
+        # channel voice speed. If the real TTS still overflows, drop whole
+        # sentences (never cut mid-sentence) and retry once.
+        _rate = (getattr(pipeline.config, "TTS_STRATEGY", {}) or {}).get("rate_base", "0%")
+        _floor, _avg_pause = prosody_budget_params(pipeline.config)
+        _tts_budget = voice_aware_word_budget(
+            getattr(pipeline.config, "SHORTS_MAX_DURATION_SEC", 58.0),
+            rate=_rate, block_count=max(len(script["bloques"]), 1),
+            prosody_floor_pct=_floor, avg_pause_ms=_avg_pause,
+        )
         tts_result = None
         for _attempt in range(2):
-            trim_blocks_to_word_budget(
-                script["bloques"],
-                max_words=90 if _attempt == 0 else 72,
-            )
             try:
                 tts_result = synthesize_shorts_blocks(
                     bloques=script["bloques"],
@@ -264,15 +264,23 @@ def run_standalone_short(
             except RuntimeError as _tts_err:
                 if "too long" not in str(_tts_err) or _attempt == 1:
                     raise
+                _retry_budget = max(45, int(_tts_budget * 0.8))
+                bloques, _rep = trim_blocks_sentences(
+                    script["bloques"], max_words=_retry_budget,
+                    allow_word_fallback=False,
+                )
+                script["bloques"] = bloques
+                if _rep.get("needs_regeneration"):
+                    raise
                 logger.warning(
-                    "[standalone] Audio still too long after trim (%s) — "
-                    "retrying with tighter budget",
-                    str(_tts_err)[:80],
+                    "[standalone] Audio still too long after sentence trim (%s) — "
+                    "retrying with %d words",
+                    str(_tts_err)[:80], _retry_budget,
                 )
         if tts_result is None:
             logger.error("[standalone] TTS failed for %s", channel_slug)
             return None
-        audio_duration = tts_result.get("duration_sec", 50)
+        audio_duration = tts_result.get("duration_sec", 50) + 1.5
 
         # ── Media ─────────────────────────────────────────
         from pipeline.shorts_media import fetch_short_assets_exhaustive, render_short_hybrid
@@ -299,7 +307,9 @@ def run_standalone_short(
             bloques = script["bloques"]
             ts = tts_result.get("timestamps", [])
             if bloques and ts:
-                scene_ranges = editor._compute_block_ranges(bloques, ts)
+                scene_ranges = editor._compute_block_ranges(
+                    bloques, ts, audio_duration=tts_result.get("duration_sec"),
+                )
                 for sr in scene_ranges:
                     sr["duracion_sec"] = sr.get("duration", 5.0)
                 from pipeline.shorts_media import sanitize_short_scene_ranges
@@ -330,6 +340,7 @@ def run_standalone_short(
         from pipeline.shorts_media import validate_short_render
         render_meta = validate_short_render(
             render_path, max_duration_sec=_max_duration,
+            expected_duration_sec=tts_result.get("duration_sec"),
         )
 
         # ── Cola unificada (ago 2026): generate_only → status='generated' ──

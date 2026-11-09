@@ -4867,11 +4867,16 @@ def _generate_and_publish_native_short(channel_id: int, channel_slug: str, db=No
         logger.error("Short script generation failed after retries for %s: %s", channel_slug, e)
         return
 
-    # 1b. Validate script completeness
-    from pipeline.shorts_tts import validate_short_script
-    errors = validate_short_script(script)
-    if errors:
-        logger.error("Short script validation failed for %s: %s", channel_slug, errors)
+    # 1b. Validate script completeness + sentence-aware trim
+    from pipeline.shorts_tts import prepare_short_script
+    script, errors, _trim_report = prepare_short_script(
+        script, ch_config, max_words=60,
+    )
+    if errors or _trim_report.get("needs_regeneration"):
+        logger.error(
+            "Short script validation failed for %s: %s (needs_regeneration=%s)",
+            channel_slug, (errors or [])[:3], _trim_report.get("needs_regeneration"),
+        )
         return
 
     title = (script.get("titulo") or script.get("title") or "Short")[:100]

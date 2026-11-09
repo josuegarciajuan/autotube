@@ -38,6 +38,42 @@ def _req():
 
 logger = logging.getLogger(__name__)
 
+
+def _loop_short_video_clips() -> bool:
+    """Kill-switch: repeat short stock clips until they cover their scene."""
+    raw = os.getenv("SHORTS_LOOP_SHORT_VIDEO_CLIPS")
+    if raw is None:
+        try:
+            from config.settings import SHORTS_LOOP_SHORT_VIDEO_CLIPS as _v
+            return bool(_v)
+        except Exception:  # noqa: BLE001
+            return True
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def rescale_short_scene_ranges(scene_ranges: list[dict] | None, target_duration: float) -> list[dict] | None:
+    """Scale scene durations so their sum matches the real narration duration."""
+    if not scene_ranges or target_duration <= 0:
+        return scene_ranges
+    try:
+        total = sum(float(r.get("duration", 0) or 0) for r in scene_ranges)
+    except (TypeError, ValueError):
+        return None
+    if total <= 0:
+        return None
+    factor = float(target_duration) / total
+    out: list[dict] = []
+    acc = 0.0
+    for r in scene_ranges:
+        dur = float(r.get("duration", 0) or 0) * factor
+        item = dict(r)
+        item["start"] = acc
+        item["end"] = acc + dur
+        item["duration"] = dur
+        out.append(item)
+        acc += dur
+    return out
+
 # ── Perfil de encode de los renders de shorts (fix oct 2026) ──────────────
 # Un short se re-encoda en YouTube, así que "veryfast" recorta ~2-3x el tiempo
 # de x264 frente a "fast" sin pérdida perceptible. Bajo carga concurrente
@@ -1309,6 +1345,24 @@ def sanitize_short_scene_ranges(
             total, audio, len(scene_ranges),
         )
         return None
+
+    # Lower bound: upstream timestamp drift used to produce ranges ~15% shorter
+    # than the narration, which let -shortest cut the closing words.  Rescale
+    # small drifts and reject anything genuinely broken.
+    if audio > 0 and total < audio * 0.85:
+        if total >= audio * 0.60:
+            logger.warning(
+                "Short scene_ranges too short (%.1fs for %.1fs audio) — "
+                "rescaling to the real narration duration",
+                total, audio,
+            )
+            return rescale_short_scene_ranges(scene_ranges, audio)
+        logger.error(
+            "Rejecting too-short short scene_ranges: %.1fs for %.1fs of audio "
+            "(%d ranges) — falling back to uniform split",
+            total, audio, len(scene_ranges),
+        )
+        return None
     return scene_ranges
 
 
@@ -1318,13 +1372,16 @@ def validate_short_render(
     max_duration_sec: float | None = None,
     expected_size: tuple[int, int] | None = (1080, 1920),
     slack_sec: float | None = None,
+    expected_duration_sec: float | None = None,
 ) -> dict:
     """Validate a rendered short and return its measured metadata.
 
     Raises ``ShortRenderValidationError`` when the file is missing/empty, has
     no video or audio stream, is not the expected 9:16 size, exceeds the
-    channel's ``SHORTS_MAX_DURATION_SEC`` budget, or its video and audio
-    durations diverge by more than ``slack_sec`` (the oct 2026 incident).
+    channel's ``SHORTS_MAX_DURATION_SEC`` budget, its video and audio durations
+    diverge by more than ``slack_sec`` (the oct 2026 incident), or the rendered
+    audio is shorter than ``expected_duration_sec`` (narration truncated by a
+    short stock clip / -shortest).
     """
     p = Path(path)
     if not p.exists() or p.stat().st_size <= 0:
@@ -1383,6 +1440,19 @@ def validate_short_render(
             f"slack {slack:.1f}s)",
             path=p, meta=meta,
         )
+
+    # Narration integrity: the rendered audio must contain the full TTS track.
+    # A short stock clip used to collapse the xfade timeline and -shortest cut
+    # the closing narration while video/audio stayed internally consistent.
+    if expected_duration_sec is not None:
+        expected = float(expected_duration_sec)
+        if expected > 0 and audio_dur < expected - slack:
+            raise ShortRenderValidationError(
+                "short render truncated narration: "
+                f"audio {audio_dur:.1f}s < narration {expected:.1f}s "
+                f"(slack {slack:.1f}s)",
+                path=p, meta={**meta, "expected_duration_sec": expected},
+            )
 
     meta["duration_sec"] = round(audio_dur, 3)
     meta["max_duration_sec"] = max_duration_sec
@@ -1576,7 +1646,18 @@ def render_short_hybrid(
             # Video: limitar la LECTURA al tramo necesario (-t antes de -i evita
             # decodificar el clip entero, clave con fuentes 4K/alta tasa) y
             # luego scale+crop a 9:16.
-            inputs.extend(["-t", f"{visual_dur:.3f}", "-i", asset_path])
+            #
+            # BUG (nov 2026): un clip de stock más corto que la escena colapsaba
+            # la cadena xfade y -shortest cortaba la narración (shorts de 21 s
+            # con 45 s de voz). -stream_loop -1 repite el clip hasta cubrir la
+            # escena; -t sigue limitando la lectura.
+            if _loop_short_video_clips():
+                inputs.extend([
+                    "-stream_loop", "-1", "-t", f"{visual_dur:.3f}",
+                    "-i", asset_path,
+                ])
+            else:
+                inputs.extend(["-t", f"{visual_dur:.3f}", "-i", asset_path])
             filter_parts.append(
                 f"[{i}:v]scale=1080:1920:force_original_aspect_ratio=increase,"
                 f"crop=1080:1920,setsar=1,fps=30,"
@@ -1697,8 +1778,18 @@ def render_short_hybrid(
     # A failed ffmpeg return code is not enough: oct 2026 produced 1080x1920
     # files whose video stream lasted 991-1657 s while the audio was 36-42 s.
     # Treat that as a failed render so the slot retries instead of publishing.
+    # Narration integrity: probe the real TTS MP3 and reject a render that cut
+    # part of it (video/audio may both be short and still "match" each other).
+    _expected_audio = None
+    try:
+        from pipeline.audio_utils import media_duration as _media_duration
+        _expected_audio = _media_duration(audio_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Could not probe narration duration: %s", exc)
     meta = validate_short_render(
-        output_path, max_duration_sec=max_duration_sec,
+        output_path,
+        max_duration_sec=max_duration_sec,
+        expected_duration_sec=_expected_audio,
     )
     logger.info(
         "Hybrid short rendered: %s (%.1f MB, %dx%d, video %.1fs, audio %.1fs)",

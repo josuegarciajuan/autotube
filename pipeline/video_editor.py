@@ -372,17 +372,18 @@ class VideoEditor:
             block_ranges = scene_ranges
             self.logger.info("Step 1/6: Using %d pre-computed scene ranges (1:1 with media_assets)", len(block_ranges))
         else:
-            block_ranges = self._compute_block_ranges(bloques, timestamps)
+            block_ranges = self._compute_block_ranges(
+                bloques, timestamps,
+                audio_duration=(self._get_voice_duration(Path(audio_path)) if audio_path else None),
+            )
             if not block_ranges:
                 raise RuntimeError("No block ranges computed — cannot build video.")
             self.logger.info("Step 1/6: %d blocks with time ranges computed", len(block_ranges))
 
-        # NOTE: the last scene is intentionally NOT extended to the raw audio
-        # duration. Kokoro leaves trailing silence after the last word, and
-        # stretching the last visual to cover it would freeze the final frame
-        # for 2-5s of dead air. Instead the trailing audio is trimmed to the
-        # rendered body at mux time (see the ``with_duration`` trim before
-        # ``audio_parts.append``), keeping narration aligned with the visuals.
+        # Scene ranges are contiguous (each scene owns the pause up to the next
+        # block), so the body covers the narration.  Only a small trailing
+        # silence after the last word (≤2 s) is trimmed at mux time; anything
+        # larger aborts in _finalize_scene_ranges/_assert_body_timeline_sync.
 
         # ── Heartbeat emitter (covers Steps 2-6: segment rendering through final mux) ──
         # Starts BEFORE the heavy segment rendering to prevent orphan detection
@@ -1368,7 +1369,8 @@ class VideoEditor:
     # ── v2: Block-based clip creation ──────────────────────────
 
     def _compute_block_ranges(
-        self, bloques: list[dict], timestamps: list[dict]
+        self, bloques: list[dict], timestamps: list[dict],
+        audio_duration: float | None = None,
     ) -> list[dict]:
         """Partition word-level timestamps into per-block time ranges.
 
@@ -1383,6 +1385,12 @@ class VideoEditor:
         or start/end in seconds).  This method normalises both to seconds before
         computing ranges so that scene durations always match the actual
         narration timing.
+
+        ``audio_duration`` (real MP3 duration) is used to validate the final
+        timeline: the inter-block gaps are included in each scene (contiguous
+        ranges), so the sum must cover the narration.  A gap larger than
+        ``LONGFORM_MAX_TRAILING_AUDIO_SEC`` aborts instead of silently trimming
+        the closing narration at mux time (nov 2026 incident).
         """
         # ── Normalise timestamps to seconds ────────────────────
         # The TTS engines (edge-tts, Kokoro) return start_ms / end_ms
@@ -1426,6 +1434,14 @@ class VideoEditor:
                 end_idx = min(word_idx + n_words - 1, total_ts_words - 1)
                 end_time = timestamps[end_idx].get("end", start_time + 1)
 
+                # Contiguous ranges: each scene owns the pause after its last
+                # word, up to the first word of the next block.  The old code
+                # dropped every inter-block pause, making the body 8-26 s
+                # shorter than the narration; the mux then trimmed the ending.
+                next_word_idx = word_idx + n_words
+                if next_word_idx < total_ts_words:
+                    end_time = timestamps[next_word_idx].get("start", end_time)
+
                 # Force last block to cover full remaining audio
                 is_last = (i == len(bloques) - 1)
                 if is_last and total_audio_end > end_time:
@@ -1451,6 +1467,7 @@ class VideoEditor:
             if ranges and total_audio_end > 0:
                 ranges[-1]["end"] = max(ranges[-1]["end"], total_audio_end)
                 ranges[-1]["duration"] = ranges[-1]["end"] - ranges[-1]["start"]
+            ranges = self._finalize_scene_ranges(ranges, audio_duration)
             return self._enforce_scene_durations(ranges)
 
         # Fallback: proportional allocation based on text length
@@ -1483,6 +1500,7 @@ class VideoEditor:
             ranges[-1]["end"] = max(ranges[-1]["end"], total_audio)
             ranges[-1]["duration"] = ranges[-1]["end"] - ranges[-1]["start"]
 
+        ranges = self._finalize_scene_ranges(ranges, audio_duration)
         return self._enforce_scene_durations(ranges)
 
     # ── Scene duration enforcement ──────────────────────────────
@@ -1704,7 +1722,13 @@ class VideoEditor:
         for left, right in zip(indexes, indexes[1:]):
             part_words = words[left:right]
             part_start = start if left == 0 else float(part_words[0].get("start", start))
-            part_end = end if right == len(words) else float(part_words[-1].get("end", end))
+            # Contiguous sub-scenes: the current part owns the pause up to the
+            # first word of the next part. Using the last word end here dropped
+            # intra-block sentence pauses and shortened the body timeline.
+            part_end = (
+                end if right == len(words)
+                else float(words[right].get("start", end))
+            )
             result.append((part_start, part_end, self._preserve_word_fragment(scene.get("texto", ""), left, right, part_words), part_words))
         return result
 
@@ -1738,6 +1762,49 @@ class VideoEditor:
         last["duration"] = audio_duration - float(last["start"])
         self.logger.info("Adjusted final scene endpoint %.3fs → %.3fs to match narration", planned_end, audio_duration)
 
+    def _finalize_scene_ranges(
+        self,
+        block_ranges: list[dict],
+        audio_duration: float | None,
+    ) -> list[dict]:
+        """Validate that the scene timeline covers the real narration.
+
+        With contiguous ranges the sum of scene durations equals
+        ``last.end - first.start``.  The final MP3 may still have a little
+        trailing silence; anything above ``LONGFORM_MAX_TRAILING_AUDIO_SEC``
+        means the timeline dropped narration and must fail instead of letting
+        ``-shortest`` cut the ending.
+        """
+        if not block_ranges or audio_duration is None:
+            return block_ranges
+        try:
+            gap = float(audio_duration) - float(block_ranges[-1]["end"])
+        except (TypeError, ValueError):
+            return block_ranges
+        max_trailing = float(
+            self.canal.get("LONGFORM_MAX_TRAILING_AUDIO_SEC", 2.0) or 2.0
+        )
+        if gap > max_trailing:
+            raise RuntimeError(
+                "Scene timeline does not cover the narration: "
+                f"audio={float(audio_duration):.2f}s "
+                f"timeline_end={float(block_ranges[-1]['end']):.2f}s "
+                f"gap={gap:.2f}s (max {max_trailing:.2f}s). "
+                "Refusing to render a video that would cut the closing narration."
+            )
+        if gap < -0.5:
+            raise RuntimeError(
+                "Scene timeline exceeds the narration: "
+                f"audio={float(audio_duration):.2f}s "
+                f"timeline_end={float(block_ranges[-1]['end']):.2f}s"
+            )
+        if gap > 0.15:
+            self.logger.debug(
+                "Scene timeline leaves %.2fs of trailing audio (trimmed at mux)",
+                gap,
+            )
+        return block_ranges
+
     def _segment_matches_planned_duration(self, path: str, planned_duration: float) -> bool:
         """Verify one encoded segment is within the configured timing tolerance."""
         duration = self._probe_video_duration([path])
@@ -1745,26 +1812,36 @@ class VideoEditor:
         return duration > 0 and abs(duration - planned_duration) < tolerance
 
     def _assert_body_timeline_sync(self, video_duration: float, audio_duration: float) -> None:
-        """Fail only on a genuinely broken body sync.
+        """Fail on a genuinely broken body sync.
 
-        Only two divergences are possible:
-
-        * ``audio < video`` — the narration ends before the visual body. This
-          means words are missing (TTS dropped a block) → real bug, fail hard.
-        * ``audio > video`` — the TTS encoder left trailing silence beyond the
-          last word. Benign: the trailing audio is trimmed to the body at mux
-          time (see the ``with_duration`` trim before ``audio_parts.append``).
+        * ``audio < video`` — narration ends before the visual body → words are
+          missing (TTS dropped a block) → real bug, fail hard.
+        * ``audio > video`` — only a small trailing silence is benign (trimmed
+          at mux).  The old code treated ANY difference as trailing silence and
+          silently cut 8-26 s of the closing narration (nov 2026).  More than
+          ``LONGFORM_MAX_TRAILING_AUDIO_SEC`` is a timeline bug → fail hard.
         """
         tolerance = float(self.canal.get("SCENE_SYNC_TOLERANCE_SEC", 0.15))
+        max_trailing = float(
+            self.canal.get("LONGFORM_MAX_TRAILING_AUDIO_SEC", 2.0) or 2.0
+        )
         if audio_duration < video_duration - tolerance:
             raise RuntimeError(
                 "Body narration is shorter than the video body: "
                 f"video={video_duration:.3f}s audio={audio_duration:.3f}s "
                 f"gap={video_duration - audio_duration:.3f}s (tolerance={tolerance:.3f}s)"
             )
+        if audio_duration > video_duration + max_trailing:
+            raise RuntimeError(
+                "Body narration is longer than the video body by "
+                f"{audio_duration - video_duration:.3f}s "
+                f"(max trailing silence {max_trailing:.1f}s). "
+                "The scene timeline is missing inter-block pauses; refusing to "
+                "trim the closing narration at mux."
+            )
         if audio_duration > video_duration + tolerance:
-            self.logger.warning(
-                "Body narration has %.3fs of trailing audio beyond the video body — will trim at mux",
+            self.logger.debug(
+                "Body narration has %.3fs of trailing audio (trimmed at mux)",
                 audio_duration - video_duration,
             )
 
