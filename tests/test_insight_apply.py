@@ -197,3 +197,16 @@ def test_contradictory_duration_patch_is_rejected(patch_db):
     assert exc.value.status_code == 422
     assert "Incoherent duration patch" in exc.value.detail
     assert db.updates == []
+
+
+def test_inert_key_is_rejected_instead_of_false_success(patch_db):
+    db = patch_db(FakeDB(
+        config={"CONTENT_PILLARS": [{"name": "El Caso", "ratio": 55}]},
+        insight=_insight([_rec("r1", {"CONTENT_PILLARS": [{"name": "El Caso", "ratio": 65}]})]),
+    ))
+    with pytest.raises(HTTPException) as exc:
+        insights_router.apply_insight(3, 43, "r1", -1)
+    assert exc.value.status_code == 422
+    assert "does not consume yet" in exc.value.detail
+    assert db.updates == []
+    assert db.applied_marks == []

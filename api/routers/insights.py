@@ -358,8 +358,14 @@ def apply_insight(channel_id: int, insight_id: int, rec_id: str = Query(""),
         warnings.append(f"Unknown config keys (preserved): {unknown}")
     inert = [k for k in changes if k in _INERT_KEYS]
     if inert:
-        warnings.append(
-            f"Keys stored but not consumed by the pipeline yet: {inert}"
+        # Storing these would report a success that cannot change any output.
+        # They need code to wire them into generation, so they are not
+        # applicable from the panel.
+        raise HTTPException(
+            422,
+            "Recommendation targets keys the pipeline does not consume yet: "
+            f"{inert}. It requires a code change; applying it would have no "
+            "effect. Mark it as 'requires_code' instead.",
         )
 
     lock = _apply_lock(channel_id)
