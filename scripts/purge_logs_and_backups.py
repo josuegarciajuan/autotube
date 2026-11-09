@@ -4,7 +4,8 @@
 Dos mecanismos complementarios:
 
 1. **Por antigüedad** (``--days``, def. 14): borra ``logs/**`` con mtime >
-   ``--days``, backups de BD en la raíz (``autotube.db.bak*``, ``*.db.bak*``,
+   ``--days``, backups de BD en la raíz (``autotube.db.bak*``,
+   ``autotube.db.backup*``, ``*.db.bak*``, ``*.db.backup*``,
    ``autotube.db.corrupt.*``) y ``data/*.bak*`` antiguos.
 2. **Por tamaño** (``--max-total-mb``, def. 1000): tras la purga por antigüedad,
    borra los ``.log`` / ``.log.*`` / ``.gz`` más antiguos de ``logs/`` (incluido
@@ -74,8 +75,9 @@ def _collect(min_age_days: float):
         for p in logs.rglob("*"):
             if p.is_file() and p.stat().st_mtime < cutoff:
                 candidates.append(p)
-    patterns = ["autotube.db.bak*", "*.db.bak*", "autotube.db.corrupt.*",
-                "*.corrupt.*", "*.bak"]
+    patterns = ["autotube.db.bak*", "autotube.db.backup*", "*.db.bak*",
+                "*.db.backup*", "autotube.db.corrupt.*", "*.corrupt.*",
+                "*.bak"]
     for pat in patterns:
         for p in ROOT.glob(pat):
             if p.is_file() and p.stat().st_mtime < cutoff:
