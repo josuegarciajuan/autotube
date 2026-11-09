@@ -34,7 +34,7 @@ CHANNELS = [
 def _set_marathon_cooldown(db, hours: int, min_interval_hours: int | None = None) -> None:
     """Fija MARATHON_COOLDOWN_HOURS (y opcionalmente el suelo duro) en config_json.
 
-    ``min_interval_hours=None`` deja el default del módulo (48h). Pasar 0 aísla
+    ``min_interval_hours=None`` deja el default del módulo (36h). Pasar 0 aísla
     el test del suelo para validar solo el mecanismo de cooldown.
     """
     with db._connect() as conn:
@@ -295,12 +295,12 @@ class TestMarathonCooldown:
         selected = select_marathon_channel(db)
         assert selected is not None, "sin cooldown ni suelo siempre hay canal elegible"
 
-    def test_default_floor_48h_blocks_even_with_cooldown_zero(self, db):
-        """Sin override, el suelo por defecto (48h) bloquea un maratón reciente
+    def test_default_floor_36h_blocks_even_with_cooldown_zero(self, db):
+        """Sin override, el suelo por defecto (36h) bloquea un maratón reciente
         aunque MARATHON_COOLDOWN_HOURS=0."""
         from api.services.marathon_service import select_marathon_channel
 
-        _set_marathon_cooldown(db, 0)  # min_interval sin tocar → default 48h
+        _set_marathon_cooldown(db, 0)  # min_interval sin tocar → default 36h
         for ch_id, _n, _s, _p, _a in CHANNELS:
             db.record_marathon(ch_id, "running")
 
