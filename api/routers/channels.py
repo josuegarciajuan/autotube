@@ -88,7 +88,45 @@ def create_channel(data: ChannelCreate):
     google_account = getattr(data, 'google_account', None)
     if google_account:
         db.update_channel(ch_id, google_account=google_account)
-    
+
+    # ── Egress aislado: marcar el flag durable ──────────────────────
+    # Si el slug ya está en config/egress_agents.json, el canal es gestionado
+    # automáticamente. Si el operador lo pide sin gateway, queda en
+    # 'provisioning' y TODA operación de YouTube/Google se bloquea hasta que
+    # el perfil exista (nunca se cae a la IP del servidor).
+    try:
+        from api.services.egress_registry import get_profile, is_egress_managed
+        registered = is_egress_managed(data.slug)
+        requested = bool(getattr(data, "egress_managed", False))
+        if requested or registered:
+            profile = None
+            if registered:
+                try:
+                    profile = get_profile(data.slug)
+                except Exception as _profile_exc:  # perfil incompleto
+                    logging.getLogger(__name__).warning(
+                        "Egress profile incomplete for '%s': %s", data.slug, _profile_exc
+                    )
+            expected_ip = (
+                getattr(data, "egress_expected_ip", None)
+                or (profile.expected_ip if profile else None)
+            )
+            label = (
+                getattr(data, "egress_label", None)
+                or (profile.label if profile else None)
+            )
+            db.set_channel_egress_managed(
+                ch_id, True,
+                expected_ip=expected_ip,
+                mode=getattr(data, "egress_mode", None) or "gateway",
+                label=label,
+                status="active" if profile else "provisioning",
+            )
+    except Exception as _egress_exc:  # nunca bloquear el alta por esto
+        logging.getLogger(__name__).warning(
+            "Egress marking failed for new channel '%s': %s", data.slug, _egress_exc
+        )
+
     # ── Auto-create 10 thematic playlists for new channel ──
     try:
         from pipeline.youtube_playlists import create_playlists_for_channel
