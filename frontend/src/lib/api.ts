@@ -218,6 +218,9 @@ export const api = {
   getChannelVideosAggregate: (id: number) => request<any>(`/channels/${id}/videos-aggregate-stats`),
   getChannelMarathonAnalytics: (id: number) => request<any>(`/channels/${id}/analytics/marathons`),
   generateChannelProfile: (id: number) => request<any>(`/channels/${id}/generate-profile`, { method: 'POST' }),
+  getProfileVariants: (id: number) => request<any>(`/channels/${id}/profile-variants`),
+  applyProfileVariant: (id: number, data: { kind: string; file: string }) =>
+    request<any>(`/channels/${id}/apply-profile-variant`, { method: 'POST', body: JSON.stringify(data) }),
   
   // Social Media Accounts
   getSocialAccounts: (channelId: number) => request<any[]>(`/channels/${channelId}/social-accounts`),

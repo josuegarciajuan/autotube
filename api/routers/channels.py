@@ -1,6 +1,9 @@
 """Channel management router."""
 import json
 import logging
+import re
+import shutil
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Query
 from fastapi.concurrency import run_in_threadpool
@@ -369,6 +372,105 @@ def generate_channel_profile(channel_id: int):
         ch["created_at"] = str(ch.get("created_at", ""))
         ch["updated_at"] = str(ch.get("updated_at", ""))
     return {"ok": True, "channel": ch, "profile": profile}
+
+
+@router.get("/{channel_id}/profile-variants")
+def get_profile_variants(channel_id: int):
+    """Lista banner/avatar actuales y variantes IA generadas por Pollo."""
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+    slug = ch["slug"]
+    from config.settings import OUTPUT_DIR
+    base = Path(OUTPUT_DIR) / "thumbnails" / slug
+    ai_dir = base / "ai"
+    manifest = None
+    if (ai_dir / "manifest.json").exists():
+        try:
+            manifest = json.loads((ai_dir / "manifest.json").read_text(encoding="utf-8"))
+        except Exception:
+            manifest = None
+
+    def _url(name: str, ai: bool = True) -> str:
+        sub = f"/ai/{name}" if ai else f"/{name}"
+        return f"/api/static/output/thumbnails/{slug}{sub}"
+
+    current = []
+    for kind in ("banner", "avatar"):
+        f = base / f"{kind}.jpg"
+        if f.exists():
+            current.append({
+                "kind": kind, "file": f.name, "label": "Actual",
+                "url": _url(f.name, ai=False),
+                "mtime": f.stat().st_mtime,
+            })
+
+    variants = []
+    if manifest and isinstance(manifest.get("variants"), list):
+        for v in manifest["variants"]:
+            fname = str(v.get("file") or "")
+            if fname and (ai_dir / fname).exists():
+                variants.append({
+                    "kind": v.get("kind"),
+                    "file": fname,
+                    "label": v.get("label") or fname,
+                    "url": v.get("url") or _url(fname),
+                    "mtime": (ai_dir / fname).stat().st_mtime,
+                })
+    else:
+        for pattern in ("banner*.jpg", "avatar*.jpg"):
+            for f in sorted(ai_dir.glob(pattern)):
+                kind = "banner" if f.name.startswith("banner") else "avatar"
+                variants.append({
+                    "kind": kind, "file": f.name, "label": f.stem,
+                    "url": _url(f.name), "mtime": f.stat().st_mtime,
+                })
+    return {
+        "ok": True, "slug": slug, "current": current,
+        "variants": variants,
+        "generated_at": (manifest or {}).get("generated_at"),
+        "model": (manifest or {}).get("model"),
+    }
+
+
+@router.post("/{channel_id}/apply-profile-variant")
+def apply_profile_variant(channel_id: int, data: dict):
+    """Aplica una variante IA como banner/avatar actual (con backup)."""
+    db = get_db()
+    ch = db.get_channel(channel_id)
+    if not ch:
+        raise HTTPException(404, "Channel not found")
+    kind = str((data or {}).get("kind") or "")
+    fname = str((data or {}).get("file") or "")
+    if kind not in ("banner", "avatar"):
+        raise HTTPException(400, "kind debe ser banner o avatar")
+    if not fname or fname != Path(fname).name or not re.match(r"^[A-Za-z0-9._-]+$", fname):
+        raise HTTPException(400, "file inválido")
+    if not fname.startswith(kind):
+        raise HTTPException(400, "file no corresponde al kind")
+
+    slug = ch["slug"]
+    from config.settings import OUTPUT_DIR
+    base = Path(OUTPUT_DIR) / "thumbnails" / slug
+    ai_dir = base / "ai"
+    src = ai_dir / fname
+    if not src.exists():
+        raise HTTPException(404, "variante no encontrada")
+    dest = base / f"{kind}.jpg"
+    ai_dir.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        shutil.copy2(dest, ai_dir / f"{kind}_current_backup.jpg")
+    shutil.copy2(src, dest)
+    url = f"/api/static/output/thumbnails/{slug}/{kind}.jpg"
+    db.update_channel_profile_fields(channel_id, **{f"{kind}_url": url})
+    updated = db.get_channel(channel_id)
+    if updated:
+        updated["created_at"] = str(updated.get("created_at", ""))
+        updated["updated_at"] = str(updated.get("updated_at", ""))
+        _parse_config(updated)
+    return {"ok": True, "applied": {"kind": kind, "file": fname, "url": url},
+            "channel": updated}
 
 
 @router.delete("/{channel_id}")
