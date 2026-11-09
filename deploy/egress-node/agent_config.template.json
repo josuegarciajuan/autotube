@@ -1,0 +1,21 @@
+{
+  "slug": "__SLUG__",
+  "google_account": "__GOOGLE_ACCOUNT__",
+  "egress_label": "__EGRESS_LABEL__",
+  "auth_token": "<set-by-install>",
+  "expected_ip": "__EXPECTED_IP__",
+  "egress_verify": true,
+  "project_root": "/app",
+  "client_secret_path": "/data/client_secret___SLUG__.json",
+  "token_pickle_path": "/data/tokens/__SLUG__.pickle",
+  "browser_profile_dir": "/data/tokens/__GOOGLE_ACCOUNT___browser_profile",
+  "browser_session_path": "/data/tokens/__GOOGLE_ACCOUNT___browser_session.json",
+  "host": "0.0.0.0",
+  "port": 9101,
+  "max_body_mb": 4096,
+  "staging_dir": "/data/staging",
+  "staging_max_gb": 5,
+  "staging_ttl_hours": 6,
+  "min_free_gb": 2,
+  "playwright_proxy": {}
+}

@@ -21,7 +21,9 @@ IMAGES_DIR = OUTPUT_DIR / "images"
 VIDEOS_DIR = OUTPUT_DIR / "videos"
 THUMBNAILS_DIR = OUTPUT_DIR / "thumbnails"
 ASSETS_DIR = PROJECT_ROOT / "assets"
-TOKENS_DIR = PROJECT_ROOT / "tokens"
+# En el contenedor del gateway los tokens/perfiles viven en /data/tokens (volumen
+# persistente), no en el código montado. Override explícito para no tocar /app.
+TOKENS_DIR = Path(os.getenv("TOKENS_DIR") or (PROJECT_ROOT / "tokens"))
 LOGS_DIR = PROJECT_ROOT / "logs"
 AI_SCENES_DIR = OUTPUT_DIR / "ai_scenes"
 AI_CACHE_DIR = AI_SCENES_DIR / "cache"
