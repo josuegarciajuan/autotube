@@ -266,8 +266,10 @@ def sync_youtube(channel_id: int):
     cfg = get_channel_config(ch["slug"])
     
     mgr = YouTubeChannelManager(ch["slug"])
-    if not mgr.authenticate():
-        raise HTTPException(401, "No autenticado. Ejecuta /auth-start primero o verifica el token.")
+    from api.services.egress_client import is_egress_managed
+    if not is_egress_managed(ch["slug"]):
+        if not mgr.authenticate():
+            raise HTTPException(401, "No autenticado. Ejecuta /auth-start primero o verifica el token.")
 
     # Actualizar lo que se puede por API
     result = mgr.update_channel_metadata(

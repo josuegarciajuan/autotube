@@ -330,3 +330,7 @@ class EgressAgent:
     def auth_exchange(self, code: str) -> bool:
         data = self._post("/auth/exchange", {"account": self.slug, "code": code})
         return bool(data.get("ok"))
+
+    def auth_status(self) -> dict:
+        """Estado local del token OAuth en el gateway."""
+        return self._get("/auth/status")
