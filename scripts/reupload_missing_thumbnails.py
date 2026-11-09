@@ -318,6 +318,11 @@ if __name__ == "__main__":
                         help="Path to specific diagnose report JSON")
     args = parser.parse_args()
 
+    # Egress: no re-subir thumbnails localmente para un canal gestionado.
+    if args.channel:
+        from api.services.egress_delegation import fail_closed_if_managed
+        fail_closed_if_managed(args.channel, "reupload_missing_thumbnails")
+
     dry_run = not args.execute
     report_path = Path(args.report) if args.report else None
 
