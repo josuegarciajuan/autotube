@@ -265,7 +265,16 @@ def reassemble_video(video_id: int, background_tasks: BackgroundTasks):
     v = db.get_video(video_id)
     if not v:
         raise HTTPException(404, "Video not found")
-    if v.get("status") not in ("error", "ready", "assembled", "reassembling"):
+    # ``validation_failed`` con fase ``post_validate`` (p. ej. render gate de
+    # negro excesivo) se puede reintentar desde el checkpoint: re-ensambla el
+    # vídeo sin re-scrapear. Sin esto esos vídeos quedaban atascados para siempre.
+    _retryable = ("error", "ready", "assembled", "reassembling")
+    if (
+        v.get("status") == "validation_failed"
+        and (v.get("progress_phase") or "") in ("post_validate", "render")
+    ):
+        _retryable = _retryable + ("validation_failed",)
+    if v.get("status") not in _retryable:
         raise HTTPException(400, "Video must be in error/ready/assembled state")
     
     # Guard: don't start if this channel already has an active job

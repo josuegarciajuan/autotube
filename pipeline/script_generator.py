@@ -1287,8 +1287,11 @@ class ScriptGenerator:
             blocks_max = getattr(cfg, "TEST_SCRIPT_BLOCKS_MAX", 6)
         else:
             words_obj = words_for_duration(self.canal_config, duration_target)
-            words_min = max(100, int(words_obj * 0.85))
-            words_max = int(words_obj * 1.3)
+            # Margen estrecho alrededor del objetivo. El antiguo 1.3x permitía
+            # que el LLM entregara hasta 130% de la duración pedida (canal4:
+            # objetivo 10-18 min → vídeos de 18-26 min y deriva de duración).
+            words_min = max(100, int(words_obj * 0.95))
+            words_max = int(words_obj * 1.05)
             blocks_min = max(3, int(duration_target * 1.2))
             blocks_max = max(5, int(duration_target * 2.0))
 
@@ -2582,8 +2585,13 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             from config.duration_policy import resolve_duration_range
 
             policy = resolve_duration_range(cfg, getattr(cfg, "CANAL_NAME", None))
+            # Techo efectivo: con el margen de palabras 1.05x, el target debe
+            # quedar por debajo de `max/1.05` para no rebasar el máximo
+            # publicado. El suelo se mantiene (el LLM puede quedarse corto,
+            # pero el retry sube la longitud).
+            _hi = max(policy.min_min, policy.max_min / 1.05)
             duration_target = round(
-                random.uniform(policy.min_min, policy.max_min), 1
+                random.uniform(policy.min_min, _hi), 1
             )
 
         return self._compute_word_target(duration_target)

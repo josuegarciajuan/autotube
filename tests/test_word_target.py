@@ -23,8 +23,8 @@ class TestComputeWordTarget:
         sg = ScriptGenerator(MockDB(), MockConfigCanal2)
         wt = sg._compute_word_target(14.0)
         assert wt["palabras_objetivo"] == 2426
-        assert wt["words_min"] == 2062   # 2426 * 0.85 = 2062.1
-        assert wt["words_max"] == 3153   # 2426 * 1.3 = 3153.8
+        assert wt["words_min"] == 2304   # 2426 * 0.95 = 2304.7
+        assert wt["words_max"] == 2547   # 2426 * 1.05 = 2547.3
         assert wt["duration_target"] == 14.0
         assert wt["blocks_min"] >= 3
         assert wt["blocks_max"] >= 5
