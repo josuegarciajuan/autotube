@@ -402,7 +402,7 @@ def get_profile_variants(channel_id: int):
         if f.exists():
             current.append({
                 "kind": kind, "file": f.name, "label": "Actual",
-                "url": _url(f.name, ai=False),
+                "url": _url(f.name, ai=False) + f"?v={int(f.stat().st_mtime)}",
                 "mtime": f.stat().st_mtime,
             })
 
@@ -415,7 +415,7 @@ def get_profile_variants(channel_id: int):
                     "kind": v.get("kind"),
                     "file": fname,
                     "label": v.get("label") or fname,
-                    "url": v.get("url") or _url(fname),
+                    "url": (v.get("url") or _url(fname)) + ("&" if "?" in (v.get("url") or _url(fname)) else "?") + f"v={int((ai_dir / fname).stat().st_mtime)}",
                     "mtime": (ai_dir / fname).stat().st_mtime,
                 })
     else:
@@ -424,7 +424,8 @@ def get_profile_variants(channel_id: int):
                 kind = "banner" if f.name.startswith("banner") else "avatar"
                 variants.append({
                     "kind": kind, "file": f.name, "label": f.stem,
-                    "url": _url(f.name), "mtime": f.stat().st_mtime,
+                    "url": _url(f.name) + f"?v={int(f.stat().st_mtime)}",
+                    "mtime": f.stat().st_mtime,
                 })
     return {
         "ok": True, "slug": slug, "current": current,
@@ -462,7 +463,8 @@ def apply_profile_variant(channel_id: int, data: dict):
     if dest.exists():
         shutil.copy2(dest, ai_dir / f"{kind}_current_backup.jpg")
     shutil.copy2(src, dest)
-    url = f"/api/static/output/thumbnails/{slug}/{kind}.jpg"
+    url = (f"/api/static/output/thumbnails/{slug}/{kind}.jpg"
+           f"?v={int(datetime.now(timezone.utc).timestamp())}")
     db.update_channel_profile_fields(channel_id, **{f"{kind}_url": url})
     updated = db.get_channel(channel_id)
     if updated:
