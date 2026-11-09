@@ -391,6 +391,11 @@ function RecommendationCard({
                   Requiere codigo
                 </span>
               )}
+              {rec.conflict_with && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-orange-500/30 bg-orange-500/10 text-orange-400" title={`Compite con "${rec.conflict_title || rec.conflict_with}" en ${(rec.conflict_keys || []).join(', ')}`}>
+                  Conflicto
+                </span>
+              )}
               {rec.applied_status === 'superseded' && (
                 <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-amber-500/30 bg-amber-500/10 text-amber-400" title={`Sustituida por ${rec.superseded_by || 'otra recomendación'}`}>
                   Sustituida

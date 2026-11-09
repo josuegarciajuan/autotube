@@ -386,6 +386,37 @@ class VideoValidator:
         )
         warnings.extend(gate.get("warnings") or [])
 
+        # ── 4a. Severe duration outlier (BLOCKING) ────────────────
+        # A 25-second "long-form" was uploaded in canal2 (nov 2026). Being
+        # below half the target minimum is a generation defect, not a
+        # packaging choice: upload it as a long-form would damage the channel.
+        if (
+            not getattr(self.config, "TEST_MODE", False)
+            and getattr(self.config, "DURATION_OUTLIER_BLOCK", True)
+        ):
+            hard_floor = max(60, int(self.duration_min_sec * 0.5))
+            if duration_sec < hard_floor:
+                msg = (
+                    f"Video duration {duration_sec:.0f}s is below the hard floor "
+                    f"of {hard_floor}s (target min {self.duration_min_sec}s). "
+                    "This is a generation defect — blocking upload. "
+                    "Kill-switch: DURATION_OUTLIER_BLOCK=False"
+                )
+                checks.append(
+                    ValidationCheck("duration_outlier", False, msg, "blocking")
+                )
+                blocking.append(msg)
+                return PostValidationResult(
+                    passed=False,
+                    checks=checks,
+                    blocking_errors=blocking,
+                    warnings=warnings,
+                    duration_seconds=duration_sec,
+                    title=updated_title,
+                    description=updated_description,
+                    tags=updated_tags,
+                )
+
         # ── 4. Duration range (WARNING only — NEVER blocks) ───────
         if duration_sec < self.duration_min_sec:
             msg = (

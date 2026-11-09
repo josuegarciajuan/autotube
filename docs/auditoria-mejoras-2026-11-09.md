@@ -85,6 +85,7 @@ canal4 Expediciones sin retorno, canal5 Anomalías Médicas). Datos de alcance
 | P0-5 | Error de aplicación invisible en el panel | `console.error` únicamente | Banner de error + recarga desde servidor |
 | P0-6 | Duración contradictoria entre objetivo y legacy | 4 canales con rangos incompatibles | `config/duration_policy.py` como fuente única |
 | P0-7 | Recomendaciones aceptadas perdidas | Se reprodujo en canal3 | Script de reparación con replay de aceptadas |
+| P0-8 | Largo de **25 segundos** subido como long-form (canal2) | `videos.id=2852`, `duracion_seg=25` | Gate bloqueante si duración < 50% del mínimo objetivo |
 
 ### P1 — Pendientes (impacto alto, sin implementar aún)
 
@@ -92,14 +93,14 @@ canal4 Expediciones sin retorno, canal5 Anomalías Médicas). Datos de alcance
 |---|---|---|---|
 | P1-1 | **Claves inertes**: Insight AI propone cambios que el pipeline no lee | `CONTENT_PILLARS` no se consume en generación; `script_end_hook` tampoco | O se cablean al generador o se marcan como `requires_code` y no se ofrecen como “aplicar” |
 | P1-2 | Pilares de contenido con dos esquemas distintos | canal2 usa `{pillar,pct,description}`; el resto `{name,ratio,desc}` | Unificar esquema y validarlo al aplicar |
-| P1-3 | Deduplicación oculta recomendaciones con valores distintos | Compara título + claves, no valores | Ocultar solo si claves **y** valores coinciden; si no, `conflict_with` |
-| P1-4 | Analítica etiquetada “30 días” sin filtro temporal | `get_channel_ctr_summary` agrega todo el histórico | Ventana explícita, CTR ponderado, tratar ceros como ausencia |
-| P1-5 | Insight AI solo ve 20 vídeos y 15 puntos de crecimiento | `channel_analyzer.py` LIMIT 20/15 | Agregados completos por formato/ventana + detalle de 20 |
+| P1-3 | Deduplicación ocultaba recomendaciones con valores distintos | Compara título + claves, no valores | **Implementado:** conflicto visible, no oculto |
+| P1-4 | Analítica etiquetada “30 días” sin filtro temporal | `get_channel_ctr_summary` agregaba todo el histórico | **Implementado:** ventana real, CTR ponderado, ceros como ausencia |
+| P1-5 | Insight AI solo ve 20 vídeos y 15 puntos de crecimiento | `channel_analyzer.py` LIMIT 20/15 | **Implementado:** agregados últimos 28 días por formato + errores del periodo |
 | P1-6 | Errores de pipeline sin periodo ni denominador | 17 errores `video` en canal3 en 28 días | Errores por periodo y por 100 ejecuciones |
-| P1-7 | Duración real fuera de objetivo | canal4 mediana 22,6 min vs objetivo 10–18 | Medir tras el cambio; alerta si >20% fuera de rango |
+| P1-7 | Duración real fuera de objetivo | canal4 mediana 22,6 min vs objetivo 10–18 | **Parcial:** gate de outliers extremos; falta alerta de deriva |
 | P1-8 | Títulos en inglés en canal2 | “Dreamt the earthquake before it happened…” entre los más vistos recientes | Validación de idioma en título |
 | P1-9 | Fase `video` concentra fallos | 17 canal3, 8 canal4 en 28 días | Investigar causa antes de aumentar cadencia |
-| P1-10 | canal2: largos sin distribución | 47 subidos, 254 vistas, 1.791 impresiones | Diagnóstico de visibilidad/privacidad/thumbnail antes de tocar contenido |
+| P1-10 | **canal2: largos sin distribución** | 47 subidos, 254 vistas; **1–17 impresiones por vídeo**, todos públicos | **Diagnóstico hecho:** no es privacidad ni thumbnail. Recomendación: reducir/pausar largos y revisar Studio; no seguir alimentando un canal sin distribución |
 
 ### P2 — Experimentos de crecimiento (requieren aprobación y plazo)
 
@@ -132,17 +133,17 @@ ventana de comparación, métrica principal, guardarraíl y criterio de reversi�
 
 | Prioridad | ID | Cambio | Estado |
 |---|---|---|---|
-| P0 | P0-1…P0-7 | Aplicación fiable, reparación y duración única | **Implementado en este cambio** |
+| P0 | P0-1…P0-8 | Aplicación fiable, reparación y duración única | **Implementado en este cambio** |
 | P1 | P1-1 | Cablear o invalidar claves inertes | Pendiente |
 | P1 | P1-2 | Unificar esquema de pilares | Pendiente |
-| P1 | P1-3 | Dedup por valores | Pendiente |
-| P1 | P1-4 | Ventana y CTR ponderado en analítica | Pendiente |
-| P1 | P1-5 | Agregados completos para Insight AI | Pendiente |
+| P1 | P1-3 | Dedup por valores | **Implementado** |
+| P1 | P1-4 | Ventana y CTR ponderado en analítica | **Implementado** |
+| P1 | P1-5 | Agregados completos para Insight AI | **Implementado** |
 | P1 | P1-6 | Errores por periodo | Pendiente |
-| P1 | P1-7 | Monitor de duración real | Pendiente |
+| P1 | P1-7 | Monitor de duración real | Parcial (gate de outliers) |
 | P1 | P1-8 | Validación de idioma de título | Pendiente |
 | P1 | P1-9 | Causa raíz de fallos de render | Pendiente |
-| P1 | P1-10 | Diagnóstico de distribución de largos canal2 | Pendiente |
+| P1 | P1-10 | Distribución de largos canal2 | Diagnosticado; requiere decisión operativa |
 | P2 | E1–E5 | Experimentos de crecimiento | Pendiente de aprobación y ejecución |
 
 ---
