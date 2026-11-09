@@ -274,6 +274,32 @@ def test_dashboard_reach_delta_sin_periodo_anterior(tmp_path):
     assert kpis["ctr"]["delta"] is None
 
 
+def test_dashboard_reach_sparkline_usa_dias_con_datos(tmp_path):
+    """El sparkline de reach usa los últimos días CON datos, sin cola de ceros.
+
+    Antes se rellenaban 8 fechas fijas desde hoy: si el Reporting API iba con
+    latencia, los últimos huecos quedaban en 0 y el gráfico parecía desplomarse.
+    """
+    db = _get_db(tmp_path)
+    for days_ago in (1, 2, 3, 5, 6, 7, 8, 9, 10):
+        db.upsert_video_reach_daily(
+            3, f"V{days_ago}", _iso_days_ago(days_ago),
+            impressions=100 * days_ago, impressions_ctr=5.0,
+        )
+
+    kpis = db.get_dashboard_data(channel_id=3)["global_kpis"]
+    imp = kpis["sparkline_impressions"]
+    ctr = kpis["sparkline_ctr"]
+
+    assert len(imp) == 8                  # LIMIT 8 días reales
+    assert len(ctr) == 8
+    assert all(v > 0 for v in imp)        # sin cola de ceros
+    assert all(v > 0 for v in ctr)
+    # Orden: más antiguo → más reciente (el valor crece con el hueco recortado).
+    assert imp == sorted(imp, reverse=True)
+    assert ctr == [5.0] * 8
+
+
 def test_dashboard_reach_delta_filtra_por_canal(tmp_path):
     """El periodo anterior respeta el filtro channel_id."""
     db = _get_db(tmp_path)

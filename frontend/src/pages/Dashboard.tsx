@@ -552,7 +552,8 @@ export default function Dashboard() {
     sparkline_ctr: kpis?.sparkline_ctr || [],
     sparkline_engagement: kpis?.sparkline_engagement || [],
     sparkline_watch_hours: kpis?.sparkline_watch_hours || [],
-    in_production: Array(8).fill(kpis?.in_production?.value || 0),
+    // Pipeline is a current-state gauge (no historical series): no sparkline.
+    in_production: [],
   }
 
   // Channel breakdown for expanded KPI view (views per channel)

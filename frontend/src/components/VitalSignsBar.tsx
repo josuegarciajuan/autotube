@@ -30,6 +30,23 @@ function buildSparkData(values: number[]) {
   return values.map((v, i) => ({ day: i, value: v === 0 ? null : v }))
 }
 
+// Recharts' implicit Y axis starts at 0. On high-baseline cumulative metrics
+// (subs, views, watch hours, engagement) a 1-5% swing then collapses into ~1 px
+// and the line looks flat. Auto-scale to the real min/max with a small margin so
+// every series shows its actual shape.
+function sparkDomain(values: number[]): [number, number] {
+  const nums = values.filter(v => typeof v === 'number' && Number.isFinite(v) && v > 0)
+  if (nums.length === 0) return [0, 1]
+  const min = Math.min(...nums)
+  const max = Math.max(...nums)
+  if (min === max) {
+    const pad = Math.max(Math.abs(min) * 0.02, 1)
+    return [Math.max(0, min - pad), max + pad]
+  }
+  const pad = (max - min) * 0.15
+  return [Math.max(0, min - pad), max + pad]
+}
+
 export default function VitalSignsBar({ kpis, sparklines, channelBreakdown, previousKpis }: VitalSignsBarProps) {
   const [expandedKey, setExpandedKey] = useState<string | null>(null)
   const { triggerGlitch, glitchTick } = useEasterEgg()
@@ -88,6 +105,7 @@ export default function VitalSignsBar({ kpis, sparklines, channelBreakdown, prev
           {kpis.map(kpi => {
             const isExpanded = expandedKey === kpi.key
             const Icon = kpi.icon
+            const series = sparklines[kpi.key] || []
             return (
               <button
                 key={kpi.key}
@@ -118,14 +136,17 @@ export default function VitalSignsBar({ kpis, sparklines, channelBreakdown, prev
                     {formatShortNumber(previousKpis[kpi.key])}
                   </span>
                 )}
-                {/* Mini sparkline */}
-                <div className="w-full h-8 opacity-50">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={buildSparkData(sparklines[kpi.key] || [])}>
-                      <Area type="monotone" dataKey="value" stroke={kpi.color} fill={kpi.color} fillOpacity={0.15} strokeWidth={1} dot={false} />
-                    </AreaChart>
-                  </ResponsiveContainer>
-                </div>
+                {/* Mini sparkline — hidden for current-state gauges (no history, e.g. Pipeline) */}
+                {series.length >= 2 && (
+                  <div className="w-full h-8 opacity-50">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={buildSparkData(series)}>
+                        <YAxis hide domain={sparkDomain(series)} />
+                        <Area type="monotone" dataKey="value" stroke={kpi.color} fill={kpi.color} fillOpacity={0.15} strokeWidth={1} dot={false} baseValue="dataMin" />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
               </button>
             )
           })}
@@ -136,7 +157,8 @@ export default function VitalSignsBar({ kpis, sparklines, channelBreakdown, prev
           {expandedKey && (() => {
             const kpi = kpis.find(k => k.key === expandedKey)
             if (!kpi) return null
-            const data = buildSparkData(sparklines[kpi.key] || [])
+            const series = sparklines[kpi.key] || []
+            const data = buildSparkData(series)
             return (
               <motion.div
                 initial={{ height: 0, opacity: 0 }}
@@ -147,7 +169,7 @@ export default function VitalSignsBar({ kpis, sparklines, channelBreakdown, prev
               >
                 <div className="mt-3 p-4 rounded-xl border border-dark-500 bg-dark-800/80"
                   style={{ backdropFilter: 'blur(8px)' }}>
-                  <h4 className="text-sm font-semibold text-gray-300 mb-3">{kpi.label} - Ultimos 30 dias</h4>
+                  <h4 className="text-sm font-semibold text-gray-300 mb-3">{kpi.label} - Últimos {data.length} días</h4>
                   <ResponsiveContainer width="100%" height={160}>
                     <AreaChart data={data}>
                       <defs>
@@ -157,7 +179,7 @@ export default function VitalSignsBar({ kpis, sparklines, channelBreakdown, prev
                         </linearGradient>
                       </defs>
                       <XAxis dataKey="day" hide />
-                      <YAxis hide />
+                      <YAxis hide domain={sparkDomain(series)} />
                       <Tooltip
                         contentStyle={{
                           background: 'rgba(15,15,22,0.95)',
@@ -168,7 +190,7 @@ export default function VitalSignsBar({ kpis, sparklines, channelBreakdown, prev
                         labelFormatter={() => ''}
                       />
                       <Area type="monotone" dataKey="value" stroke={kpi.color} strokeWidth={2}
-                        fill={`url(#grad-${kpi.key})`} dot={false} />
+                        fill={`url(#grad-${kpi.key})`} dot={false} baseValue="dataMin" />
                     </AreaChart>
                   </ResponsiveContainer>
 
