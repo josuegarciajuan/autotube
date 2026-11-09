@@ -71,18 +71,27 @@ def _format_local(dt: datetime, tz_name: str) -> Optional[str]:
         return None
 
 
-def _ytdlp_confirm_public(yt_video_id: str) -> bool:
-    """Confirma (0 cuota) si un vídeo está público vía yt-dlp watch-page.
+def _ytdlp_confirm_public(yt_video_id: str, channel_slug: str = "") -> Optional[bool]:
+    """Confirma (0 cuota) si un vídeo está público vía watch-page.
 
-    Punto ciego del wall-scrape RSS: el feed público solo conserva ~15 entradas;
-    en un canal con mucha actividad, un vídeo público puede caer fuera del feed
-    y el verifier lo daría por "no publicado" indefinidamente (vídeos atascados
-    en 'uploaded'/'uploaded_private' sin published_at, con alertas eternas).
-    Este fallback comprueba la watch page con yt-dlp (0 cuota de Data API, el
-    mismo mecanismo que usa youtube_stats_scraper). Solo se invoca cuando el
-    vídeo lleva pasado el grace period y NO aparece en el feed, así que no añade
-    coste en el camino feliz.
+    Devuelve True/False, o None si el estado no se pudo determinar (gateway
+    caído). En un canal gestionado NUNCA se usa yt-dlp local.
     """
+    try:
+        from api.services.egress_client import get_egress_client
+        _client = get_egress_client(channel_slug) if channel_slug else None
+    except Exception:  # noqa: BLE001
+        return None
+
+    if _client is not None:
+        try:
+            res = _client.ytdlp("watch_status", {"yt_id": yt_video_id})
+        except Exception:  # noqa: BLE001
+            return None
+        if not res.get("ok"):
+            return None
+        return (res.get("result") or {}).get("status") == "available"
+
     import subprocess
     try:
         out = subprocess.run(
@@ -182,12 +191,19 @@ def _verify_published_status_bg(video_id: int, channel_slug: str, yt_video_id: s
         # ── Free wall scrape (RSS) ──
         public_ids = {}
         try:
-            from pipeline.youtube_wall_scraper import (
-                fetch_channel_public_video_ids, FeedUnavailable,
-            )
-            public_ids = fetch_channel_public_video_ids(
-                channel_id, raise_on_http_error=True
-            )
+            from pipeline.youtube_wall_scraper import FeedUnavailable
+            from api.services.egress_client import get_egress_client
+            _client = get_egress_client(channel_slug) if channel_slug else None
+            if _client is not None:
+                _rss = _client.ytdlp("rss", {"channel_id": channel_id})
+                if not _rss.get("ok"):
+                    raise RuntimeError(_rss.get("error", "rss vía gateway falló"))
+                public_ids = _rss.get("result") or {}
+            else:
+                from pipeline.youtube_wall_scraper import fetch_channel_public_video_ids
+                public_ids = fetch_channel_public_video_ids(
+                    channel_id, raise_on_http_error=True
+                )
         except FeedUnavailable as exc:
             # Feed down is not evidence that the video is private. Reintentar
             # sin consumir el presupuesto de 3 intentos (el 404/500 duró días
@@ -238,16 +254,24 @@ def _verify_published_status_bg(video_id: int, channel_slug: str, yt_video_id: s
         # público → marcar publicado; no público → alerta (flujo previo).
         if elapsed_min is not None and elapsed_min >= _PUBLISH_GRACE_MINUTES:
             try:
-                if _ytdlp_confirm_public(yt_video_id):
+                _confirmed = _ytdlp_confirm_public(yt_video_id, channel_slug)
+                if _confirmed is True:
                     vlog.info(
-                        "[%s] ✅ Video #%d (yt=%s) confirmado público vía yt-dlp "
+                        "[%s] ✅ Video #%d (yt=%s) confirmado público vía watch-page "
                         "(fallback: feed RSS limitado a ~15 entradas)",
                         channel_slug, video_id, yt_video_id,
                     )
                     _mark_video_published(video_id, channel_slug, yt_video_id)
                     return
+                if _confirmed is None:
+                    vlog.warning(
+                        "[%s] confirmación de publicación no disponible (gateway) — "
+                        "retry in %dmin", channel_slug, _PUBLISH_RETRY_MINUTES,
+                    )
+                    _schedule_publish_retry(video_id, _PUBLISH_RETRY_MINUTES)
+                    return
             except Exception as yt_exc:
-                vlog.debug("[%s] yt-dlp fallback skipped: %s", channel_slug, yt_exc)
+                vlog.debug("[%s] watch-page fallback skipped: %s", channel_slug, yt_exc)
 
         # ── Raise system alert once grace period is exceeded ──
         if elapsed_min is not None and elapsed_min >= _PUBLISH_GRACE_MINUTES:

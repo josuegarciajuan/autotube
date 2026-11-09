@@ -144,7 +144,14 @@ class GoogleNewsScraper(BaseScraper):
             country=self.country,
         )
 
-        feed = feedparser.parse(url)
+        # Canal gestionado: el RSS de Google News se descarga desde su gateway.
+        from api.services.egress_client import is_egress_managed
+        if is_egress_managed(self.canal):
+            from api.services import youtube_gateway
+            text = youtube_gateway.fetch_google(self.canal, url)
+            feed = feedparser.parse(text)
+        else:
+            feed = feedparser.parse(url)
         if feed.bozo and not feed.entries:
             self.logger.debug("Google News RSS empty for query '%s'", query)
             return []

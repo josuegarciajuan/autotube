@@ -702,6 +702,19 @@ PROXY_CHANNELS=canal2         # vacío = todos los canales
 > del VPS). Solo los canales SIN egress externo usan la IP del server. **Nunca**
 > mezclar la IP del server con canales con egress propio. Ver `specs/egress-aislado.md`.
 
+> **Egress por canal (nov 2026, canales nuevos):** cada canal nuevo tiene su
+> propio gateway contenedor (`deploy/egress-node/`), su IP/cuenta GCP/perfil. El
+> flag durable `channels.egress_managed` + `api/services/egress_registry.py`
+> deciden si el canal es gestionado; si el JSON secreto se pierde, sigue
+> bloqueado. TODA interacción con YouTube/Google pasa por
+> `api/services/youtube_gateway.py`. El worker instala
+> `api/services/egress_guard.py` (bloquea DNS directo a Google/YouTube). El gate
+> estático `scripts/audit_egress_coverage.py` debe estar en verde antes de
+> desplegar. Runbook: `docs/runbook-egress-node.md`; invariantes:
+> `specs/egress-por-canal.md`; alta: `scripts/provision_egress_channel.py`.
+> **Regla:** cualquier ruta nueva a YouTube/Google sin gateway debe fallar en el
+> escáner estático y en los tests `test_egress_no_local_fallback`.
+
 - Un canal se marca como gestionado añadiéndolo a **`config/egress_agents.json`**
   (gitignored) con `{url, token}` del agente. Entonces todo su egress se **delega**
   al agente del VPS (subidas, navegador, reconciler, OAuth, comentarios, colabs,

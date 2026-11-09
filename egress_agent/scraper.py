@@ -7,12 +7,29 @@ from __future__ import annotations
 import logging
 import socket
 from typing import Optional
+from urllib.parse import urlparse
 
 import requests
 
 from egress_agent.config import AgentConfig
 
 logger = logging.getLogger("egress_agent.scraper")
+
+# Dominios que el gateway puede leer (Google/YouTube + CDN). Evita SSRF y
+# garantiza que las lecturas "públicas" también salgan por la IP del canal.
+ALLOWED_FETCH_HOSTS = (
+    "youtube.com", "youtu.be", "ytimg.com", "googlevideo.com",
+    "googleapis.com", "googleusercontent.com", "gstatic.com",
+    "google.com", "news.google.com", "suggestqueries.google.com",
+)
+
+
+def _host_allowed(url: str) -> bool:
+    try:
+        host = (urlparse(url).hostname or "").lower().strip(".")
+    except Exception:
+        return False
+    return any(host == d or host.endswith("." + d) for d in ALLOWED_FETCH_HOSTS)
 
 
 def ytdlp_classify(cfg: AgentConfig, yt_id: str) -> dict:
@@ -61,6 +78,8 @@ def rss_feed(cfg: AgentConfig, channel_id: str) -> dict:
 
 def fetch(cfg: AgentConfig, url: str, timeout: int = 30) -> dict:
     """GET genérico (watch pages, feeds) desde la IP de la VPS."""
+    if not _host_allowed(url):
+        return {"ok": False, "error": f"host no permitido: {urlparse(url).hostname}"}
     try:
         resp = requests.get(
             url, timeout=timeout,
@@ -75,6 +94,66 @@ def fetch(cfg: AgentConfig, url: str, timeout: int = 30) -> dict:
             "status": resp.status_code,
             "text": resp.text[:500_000],
         }}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)[:1000]}
+
+
+def fetch_bytes(cfg: AgentConfig, url: str, timeout: int = 30) -> dict:
+    """Descarga binaria (thumbnails) desde la IP del gateway a un fichero."""
+    if not _host_allowed(url):
+        return {"ok": False, "error": f"host no permitido: {urlparse(url).hostname}"}
+    import tempfile
+    from pathlib import Path
+    try:
+        resp = requests.get(url, timeout=timeout, headers={
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/126.0.0.0 Safari/537.36"),
+        })
+        resp.raise_for_status()
+        data = resp.content[:20 * 1024 * 1024]
+        outdir = Path(tempfile.mkdtemp(prefix="agent_bytes_"))
+        ext = Path(urlparse(url).path).suffix or ".bin"
+        p = outdir / f"fetch{ext}"
+        p.write_bytes(data)
+        return {"ok": True, "result": {"path": str(p), "size": len(data)}}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)[:1000]}
+
+
+def ytdlp_clip(cfg: AgentConfig, url: str, section: str,
+               max_height: int = 720) -> dict:
+    """Descarga una sección de un vídeo de YouTube desde la IP del gateway."""
+    import os
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    ytdlp_bin = os.getenv("YTDLP_BIN", "yt-dlp")
+    outdir = Path(tempfile.mkdtemp(prefix="agent_clip_"))
+    out = outdir / "clip.mp4"
+    cmd = [
+        ytdlp_bin, url,
+        "--download-sections", str(section),
+        "-f", f"best[height<={int(max_height)}]/best",
+        "--no-playlist",
+        "--socket-timeout", "30",
+        "--retries", "5",
+        "--fragment-retries", "5",
+        "--extractor-retries", "3",
+        "--file-access-retries", "3",
+        "--force-overwrites",
+        "--no-warnings",
+        "-o", str(out),
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if not out.exists() or out.stat().st_size == 0:
+            err = (proc.stderr or "")[-800:].replace("\n", " ")
+            return {"ok": False, "error": f"yt-dlp clip sin salida: {err}"}
+        return {"ok": True, "result": {"path": str(out), "size": out.stat().st_size}}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "yt-dlp clip timeout (>600s)"}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)[:1000]}
 
@@ -193,6 +272,7 @@ _YTDLP_OPS = {
     "rss": rss_feed,
     "watch_status": watch_status,
     "audio": ytdlp_audio,
+    "clip": ytdlp_clip,
 }
 
 

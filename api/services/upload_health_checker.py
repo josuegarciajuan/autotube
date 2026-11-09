@@ -203,6 +203,29 @@ def _verify_processing(yt_video_id: str, channel_slug: str) -> dict:
                     "processing_status": "quota_exhausted",
                     "reason": "YouTube quota exhausted (project breaker)"}
 
+        # ── Canal gestionado: consultar el estado vía gateway (IP aislada) ──
+        from api.services.egress_client import get_egress_client
+        _egress = get_egress_client(channel_slug)
+        if _egress is not None:
+            try:
+                st = _egress.get_video_status(yt_video_id)
+            except Exception as exc:  # noqa: BLE001
+                return {"ok": False, "processing_failed": False,
+                        "processing_status": "unknown", "reason": str(exc)}
+            ps = st.get("processing_status") or st.get("upload_status") or ""
+            if ps == "failed":
+                return {
+                    "ok": False, "processing_failed": True,
+                    "processing_status": "failed",
+                    "processing_failure_reason": st.get("processing_failure_reason", ""),
+                    "reason": f"Processing failed: {st.get('processing_failure_reason') or 'unknown'}",
+                }
+            if ps in ("succeeded", "processed") or st.get("upload_status") == "processed":
+                return {"ok": True, "processing_failed": False,
+                        "processing_status": ps, "reason": ""}
+            return {"ok": False, "processing_failed": False,
+                    "processing_status": ps or "unknown", "reason": "processing"}
+
         uploader = YouTubeUploader(account_name=channel_slug, channel_slug=channel_slug)
         if not uploader.authenticate():
             return {"ok": False, "processing_failed": False,
@@ -363,10 +386,12 @@ def _auto_retry_upload(video_id: int, yt_video_id: str, channel_slug: str,
             video_id, yt_video_id, failure_reason,
         )
 
-        uploader = YouTubeUploader(channel_slug)
-        if not uploader.authenticate():
-            logger.error("[health_check] Auth failed for re-upload of video #%d", video_id)
-            return False
+        from api.services.egress_client import is_egress_managed
+        uploader = YouTubeUploader(account_name=channel_slug, channel_slug=channel_slug)
+        if not is_egress_managed(channel_slug):
+            if not uploader.authenticate():
+                logger.error("[health_check] Auth failed for re-upload of video #%d", video_id)
+                return False
 
         result = uploader.upload(
             video_path=video_path,

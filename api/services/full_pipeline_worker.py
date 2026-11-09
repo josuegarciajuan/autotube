@@ -1066,7 +1066,21 @@ def run_job(
 
     canal = ch["slug"]
     channel_name = ch.get("name", canal)
-    
+
+    # ── Guard runtime de egress + canal activo para lecturas Google ──
+    # Si el canal es gestionado, cualquier conexión directa a Google/YouTube
+    # (incluidas librerías) se bloquea. El camino correcto es el gateway.
+    try:
+        from api.services.egress_guard import install_for_channel
+        install_for_channel(canal)
+    except Exception as _eg_exc:  # noqa: BLE001
+        logger.warning("egress guard no instalado: %s", _eg_exc)
+    try:
+        from pipeline.topic_demand import set_active_channel
+        set_active_channel(canal)
+    except Exception:  # noqa: BLE001
+        pass
+
     # ── 2b. Ghost-worker guard: verify the job still exists in DB ──
     # Job rows can be deleted externally (channel deletion cascade,
     # manual DB cleanup) while the worker subprocess continues running.

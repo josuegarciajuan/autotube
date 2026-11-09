@@ -128,3 +128,24 @@ Cualquier ruta no delegada debe fallar con `EgressAgentUnavailableError` o
 - `docs/runbook-egress-node.md` — alta de los 2 canales y réplica.
 - `specs/egress-aislado.md` — arquitectura original del agente.
 - `specs/onboarding-canal-egress.md` — checklist de onboarding.
+
+## 11. Implementación software (nov 2026)
+
+| Pieza | Función |
+|---|---|
+| `api/services/youtube_gateway.py` | Fachada única; delega o falla, nunca local para gestionados. |
+| `api/services/egress_guard.py` | Hook DNS en el worker: bloquea Google/YouTube directo. |
+| `api/services/egress_registry.py` | Marca durable DB + registro secreto; perfiles incompletos fallan. |
+| `egress_agent/server.py` | `/stage`, `/upload` idempotente, `/cleanup`, `/thumbnail`, `/fetch-bytes`. |
+| `egress_agent/youtube_api.py` | Ops: upload, status, título, descripción, privacidad, publishAt, thumbnail, stats, playlists, comentarios. |
+| `egress_agent/scraper.py` | yt-dlp: classify, rss, watch, audio, clip; fetch con allowlist Google/YouTube. |
+| `scripts/provision_egress_channel.py` | Alta DB + instalación del gateway + registro + password VNC. |
+| `scripts/deploy_channel_oauth.py` | Copia el client_secret solo al nodo y reinicia el gateway. |
+| `scripts/sync_egress_gateways.py` | Rebuild/transfer/restart/healthz de todos los gateways. |
+| `scripts/audit_egress_coverage.py` | Gate estático contra rutas locales nuevas. |
+| `scripts/verify_egress.py --deep` | healthz + IP curl + navegador/WebRTC + get_channel_info + sin credenciales locales. |
+| `GET /api/system/egress-status` | Estado por canal (IP, expected, down, última verificación). |
+
+Estados de subida: `pending → transferring → staged → uploading → done` y
+`awaiting_egress` cuando el gateway no está disponible. `upload_ref` es estable
+por vídeo+archivo; el ledger del gateway evita duplicados tras un crash.

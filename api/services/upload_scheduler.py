@@ -1704,6 +1704,19 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
         )
         return None
 
+    # ── Egress: no despachar si el gateway del canal está caído ──
+    # La subida se reintenta en el siguiente ciclo cuando egress_down vuelva a 0.
+    try:
+        from api.services.egress_client import is_egress_managed
+        if is_egress_managed(slug) and db.get_system_state(f"egress_down_{slug}") == "1":
+            logger.warning(
+                "[%s] gateway egress caído — se difiere la subida del video #%d",
+                slug, video_id,
+            )
+            return None
+    except Exception:
+        pass
+
     # ── 5. Atomic claim closes the selection→dispatch race ──
     claimant = f"upload:{__import__('os').getpid()}:{__import__('threading').get_ident()}"
     if hasattr(db, "claim_upload_video") and not db.claim_upload_video(video_id, claimant):

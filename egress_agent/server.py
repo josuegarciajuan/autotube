@@ -5,7 +5,9 @@ Todos los egress a YouTube/Google ocurren desde la red de la VPS.
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import shutil
 import time
 import uuid
@@ -206,6 +208,13 @@ class AgentApp:
             self._require_egress()
             return scraper.fetch(self.cfg, body.url, body.timeout)
 
+        @app.post("/fetch-bytes")
+        def fetch_bytes(body: AgentApp.FetchModel,
+                        x_agent_token: Optional[str] = Header(None)):
+            self._check_token(x_agent_token)
+            self._require_egress()
+            return scraper.fetch_bytes(self.cfg, body.url, body.timeout)
+
         @app.get("/download")
         def download(path: str, x_agent_token: Optional[str] = Header(None)):
             """Sirve un fichero descargado por el agente (p.ej. audio yt-dlp).
@@ -280,12 +289,21 @@ class AgentApp:
                 meta_dict = _json.loads(meta)
             except _json.JSONDecodeError:
                 meta_dict = {}
+
+            # ── Idempotencia: si este ref ya se subió, devolver el video_id ──
+            upload_ref = str(meta_dict.get("upload_ref") or "")
+            if upload_ref:
+                cached = self._ledger_get(upload_ref)
+                if cached and cached.get("status") == "done":
+                    logger.info("upload idempotente: ref=%s ya completado", upload_ref)
+                    return {"ok": True, **cached}
+
             # Subida desde un archivo ya stageado (transferencia previa).
             if staged_path:
                 thumb_path = meta_dict.pop("thumbnail_path", None)
                 meta_dict["thumbnail_path"] = thumb_path
                 try:
-                    return youtube_api.upload_video(self.cfg, staged_path, meta_dict)
+                    return self._upload_and_record(staged_path, meta_dict)
                 except Exception as exc:  # noqa: BLE001
                     logger.exception("upload (staged) failed")
                     return {"ok": False, "error": str(exc)[:1000]}
@@ -294,7 +312,7 @@ class AgentApp:
             paths = self._save_upload(video, thumbnail, ref=meta_dict.get("ref", ""))
             try:
                 meta_dict["thumbnail_path"] = paths.get("thumbnail_path")
-                return youtube_api.upload_video(self.cfg, paths["staged_path"], meta_dict)
+                return self._upload_and_record(paths["staged_path"], meta_dict)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("upload (fresh) failed")
                 return {"ok": False, "error": str(exc)[:1000]}
@@ -316,6 +334,74 @@ class AgentApp:
             """
             self._check_token(x_agent_token)
             return self._cleanup_staged(body.staged_path)
+
+        @app.post("/thumbnail")
+        async def thumbnail(video_id: str = Form(...),
+                            thumbnail: UploadFile = File(...),
+                            x_agent_token: Optional[str] = Header(None)):
+            """Aplica un thumbnail a un vídeo ya subido, desde la IP del gateway."""
+            self._check_token(x_agent_token)
+            self._require_egress()
+            d = Path(self.cfg.staging_dir) / f"thumb-{uuid.uuid4().hex[:8]}"
+            d.mkdir(parents=True, exist_ok=True)
+            ext = Path(thumbnail.filename or "thumb.jpg").suffix or ".jpg"
+            p = d / f"thumb{ext}"
+            try:
+                with open(p, "wb") as out:
+                    while chunk := thumbnail.file.read(1024 * 1024):
+                        out.write(chunk)
+                return youtube_api.set_thumbnail(self.cfg, video_id, str(p))
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("thumbnail failed")
+                return {"ok": False, "error": str(exc)[:1000]}
+            finally:
+                try:
+                    p.unlink(missing_ok=True)
+                    d.rmdir()
+                except OSError:
+                    pass
+
+    # ── Ledger de subida idempotente ────────────────────────────────
+    def _ledger_dir(self) -> Path:
+        d = Path(self.cfg.state_dir) / "uploads"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _ledger_path(self, ref: str) -> Path:
+        safe = "".join(c for c in str(ref) if c.isalnum() or c in "-_")[:80]
+        return self._ledger_dir() / f"{safe or 'noref'}.json"
+
+    def _ledger_get(self, ref: str) -> dict:
+        try:
+            p = self._ledger_path(ref)
+            if not p.exists():
+                return {}
+            return json.loads(p.read_text(encoding="utf-8")) or {}
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("ledger get failed (%s): %s", ref, exc)
+            return {}
+
+    def _ledger_put(self, ref: str, data: dict) -> None:
+        try:
+            p = self._ledger_path(ref)
+            tmp = p.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, p)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ledger put failed (%s): %s", ref, exc)
+
+    def _upload_and_record(self, video_path: str, meta: dict) -> dict:
+        ref = str(meta.get("upload_ref") or "")
+        res = youtube_api.upload_video(self.cfg, video_path, meta)
+        if res.get("ok") and ref:
+            self._ledger_put(ref, {
+                "status": "done",
+                "video_id": res.get("video_id"),
+                "url": res.get("url"),
+                "thumbnail_applied": res.get("thumbnail_applied"),
+                "completed_at": time.time(),
+            })
+        return res
 
     def _cleanup_staged(self, staged_path: str) -> dict:
         if not staged_path:

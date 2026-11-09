@@ -141,6 +141,15 @@ def _recent_shorts(db, lookback_hours: int = RECONCILE_LOOKBACK_HOURS) -> list[d
     return [dict(r) for r in rows]
 
 
+def _slug_for_channel(db, channel_id: int) -> str | None:
+    try:
+        with db._connect() as conn:
+            row = conn.execute("SELECT slug FROM channels WHERE id=?", (channel_id,)).fetchone()
+        return row["slug"] if row else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _classify_for_channel(yt_id: str, slug: str | None = None) -> str:
     """Clasifica la visibilidad delegando al agente egress si el canal es gestionado.
 
@@ -372,7 +381,8 @@ def reconcile_recent_videos(db=None, lookback_days: int = 45) -> dict:
         if checked and (now - checked).total_seconds() < RECONCILE_SHORT_COOLDOWN_SEC:
             continue
         try:
-            visibility = classify_video_visibility(video["yt_video_id"])
+            _slug = _slug_for_channel(db, int(video["channel_id"]))
+            visibility = _classify_for_channel(video["yt_video_id"], _slug)
             feed = _feed_public_ids(db, int(video["channel_id"]))
             if video["yt_video_id"] in feed:
                 visibility = "public"
@@ -502,6 +512,14 @@ def scan_studio_for_channel(db, channel_id: int, account: str = "", timeout_s: i
                     return result
             except Exception as exc:
                 logger.warning("[%s] agent studio scan failed: %s", slug, exc)
+
+        # ── Fail-closed: un canal gestionado NUNCA cae al navegador local ──
+        if _client is not None:
+            return {
+                "status": "error",
+                "reason": "studio_scan vía gateway no disponible (fail-closed)",
+                "channel": slug,
+            }
 
         if not account:
             return {"status": "skipped", "reason": "sin google_account"}

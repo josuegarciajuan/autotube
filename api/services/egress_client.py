@@ -249,6 +249,80 @@ class EgressAgent:
             return {"ok": True, "skipped": "no_staged_path"}
         return self._post("/cleanup", {"staged_path": staged_path})
 
+    def set_thumbnail(self, video_id: str, thumbnail_path: str) -> dict:
+        """Aplica un thumbnail a un vídeo ya subido (multipart al gateway)."""
+        path = Path(thumbnail_path)
+        files = {
+            "video_id": (None, video_id),
+            "thumbnail": (path.name, open(path, "rb"), "image/jpeg"),
+        }
+        try:
+            return self._post("/thumbnail", files=files,
+                              timeout=max(self.timeout, 300))
+        finally:
+            try:
+                files["thumbnail"][1].close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def fetch_bytes(self, url: str, timeout: int = 45) -> bytes:
+        """Descarga binaria (thumbnail servido) desde la IP del gateway."""
+        res = self._post("/fetch-bytes", {"url": url, "timeout": timeout})
+        if not res.get("ok"):
+            raise EgressAgentUnavailableError(res.get("error", "fetch-bytes falló"))
+        remote = (res.get("result") or {}).get("path")
+        if not remote:
+            raise EgressAgentUnavailableError("fetch-bytes no devolvió ruta")
+        self._check_egress_health()
+        try:
+            resp = requests.get(f"{self.base_url}/download", headers=self._headers(),
+                                params={"path": remote},
+                                timeout=max(self.timeout, timeout))
+        except requests.RequestException as exc:
+            raise EgressAgentUnavailableError(
+                f"descarga de bytes desde el agente falló ({exc})") from exc
+        if resp.status_code != 200:
+            raise EgressAgentUnavailableError(
+                f"HTTP {resp.status_code} al descargar bytes del agente")
+        return resp.content
+
+    def download_clip(self, url: str, section: str, dest_path: str,
+                      timeout: int = 900) -> str:
+        """Descarga una sección de vídeo desde la IP del gateway."""
+        res = self.ytdlp("clip", {"url": url, "section": section})
+        if not res.get("ok"):
+            raise EgressAgentUnavailableError(
+                f"yt-dlp clip del agente falló: {res.get('error')}")
+        remote = (res.get("result") or {}).get("path")
+        if not remote:
+            raise EgressAgentUnavailableError("el agente no devolvió ruta del clip")
+        self._check_egress_health()
+        try:
+            resp = requests.get(
+                f"{self.base_url}/download", headers=self._headers(),
+                params={"path": remote}, stream=True,
+                timeout=max(self.timeout, timeout),
+            )
+        except requests.RequestException as exc:
+            raise EgressAgentUnavailableError(
+                f"descarga de clip desde el agente falló ({exc})") from exc
+        if resp.status_code != 200:
+            raise EgressAgentUnavailableError(
+                f"HTTP {resp.status_code} al descargar clip del agente")
+        dest = Path(dest_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with open(dest, "wb") as fh:
+            for chunk in resp.iter_content(chunk_size=1 << 20):
+                if chunk:
+                    fh.write(chunk)
+        return str(dest)
+
+    def get_video_status(self, video_id: str) -> dict:
+        res = self.api_call("get_video_status", {"kwargs": {"video_id": video_id}})
+        if not res.get("ok"):
+            raise EgressAgentUnavailableError(res.get("error", "get_video_status falló"))
+        return res.get("result", {})
+
     def oauth_url(self) -> str:
         data = self._post("/auth/oauth-url", {"account": self.slug})
         return data.get("auth_url", "")

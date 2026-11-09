@@ -137,7 +137,52 @@ def create_playlists_for_channel(channel_slug: str, force: bool = False) -> dict
     config_json["PLAYLISTS_GENERATED"] = playlist_configs
     db.update_channel(channel_id, config=config_json)
 
-    # Create on YouTube + cache in DB
+    # ── Canal gestionado: crear/listar vía su gateway (IP aislada) ──
+    from api.services.egress_client import get_egress_client
+    _egress = get_egress_client(channel_slug)
+    if _egress is not None:
+        listing = _egress.api_call("list_playlists", {})
+        existing: dict[str, dict] = {}
+        if listing.get("ok"):
+            for p in (listing.get("result") or []):
+                existing[str(p.get("title", "")).strip().lower()] = p
+        created, errors = [], []
+        for pl_cfg in playlist_configs:
+            name = pl_cfg.get("name", "")
+            slug_key = pl_cfg.get("slug", "")
+            description = pl_cfg.get("description", "")
+            pl_type = pl_cfg.get("type", "thematic")
+            if not name or not slug_key:
+                errors.append(f"Invalid playlist config: {pl_cfg}")
+                continue
+            try:
+                found = existing.get(name.strip().lower())
+                if found:
+                    yt_id = found.get("id")
+                    logger.info("[%s] Playlist exists on YT: '%s' (%s)", channel_slug, name, yt_id)
+                else:
+                    res = _egress.api_call("create_playlist", {"kwargs": {
+                        "title": name, "description": description}})
+                    if not res.get("ok"):
+                        errors.append(f"{name}: {res.get('error')}")
+                        continue
+                    yt_id = (res.get("result") or {}).get("playlist_id")
+                    existing[name.strip().lower()] = {"id": yt_id, "title": name}
+                if not yt_id:
+                    errors.append(f"{name}: sin playlist_id")
+                    continue
+                db.upsert_youtube_playlist(channel_id, slug_key, yt_id, name, pl_type)
+                created.append({"slug": slug_key, "name": name, "yt_playlist_id": yt_id})
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{name}: {exc}")
+                logger.error("[%s] Error creando playlist '%s' vía gateway: %s",
+                             channel_slug, name, exc)
+        logger.info("[%s] Playlists vía gateway: %d creadas, %d errores",
+                    channel_slug, len(created), len(errors))
+        return {"created_count": len(created), "existing_count": 0,
+                "errors": errors, "playlists": playlist_configs, "via": "gateway"}
+
+    # Create on YouTube + cache in DB (canal local)
     mgr = YouTubePlaylistManager(channel_slug)
     if not mgr.authenticate():
         return {"error": f"Cannot authenticate channel '{channel_slug}' — check OAuth token"}
@@ -222,6 +267,22 @@ class YouTubePlaylistManager:
 
         Quota: 1 unit.
         """
+        from api.services.egress_client import get_egress_client
+        _client = get_egress_client(self.slug)
+        if _client is not None:
+            res = _client.api_call("list_playlists", {})
+            if not res.get("ok"):
+                raise RuntimeError(res.get("error", "list_playlists vía gateway falló"))
+            return [
+                {
+                    "yt_playlist_id": p.get("id"),
+                    "title": p.get("title", ""),
+                    "description": "",
+                    "item_count": p.get("item_count", 0),
+                    "published_at": "",
+                }
+                for p in (res.get("result") or [])
+            ]
         self._ensure_auth()
         playlists: list[dict] = []
         page_token = None
@@ -272,6 +333,21 @@ class YouTubePlaylistManager:
 
         Returns {yt_playlist_id, title, url}.
         """
+        from api.services.egress_client import get_egress_client
+        _client = get_egress_client(self.slug)
+        if _client is not None:
+            res = _client.api_call("create_playlist", {"kwargs": {
+                "title": title[:150], "description": description[:5000]}})
+            if not res.get("ok"):
+                raise RuntimeError(res.get("error", "create_playlist vía gateway falló"))
+            r = res.get("result") or {}
+            yt_id = r.get("playlist_id")
+            logger.info("[%s] Created playlist (gateway): %s (%s)", self.slug, title, yt_id)
+            return {
+                "yt_playlist_id": yt_id,
+                "title": r.get("title", title),
+                "url": f"https://www.youtube.com/playlist?list={yt_id}",
+            }
         self._ensure_auth()
 
         body = {

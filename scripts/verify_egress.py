@@ -33,10 +33,17 @@ from api.services.egress_client import (  # noqa: E402
     EgressAgentUnavailableError,
     get_egress_client,
 )
-from api.services.egress_client import _load_agents  # noqa: E402
+from api.services.egress_registry import (  # noqa: E402
+    find_local_credentials,
+    get_managed_slugs,
+)
 
 
-def _check_one(slug: str, skip_browser: bool) -> dict:
+def _check_one(slug: str, skip_browser: bool, deep: bool = False) -> dict:
+    local = find_local_credentials(slug)
+    if local:
+        return {"ok": False, "slug": slug,
+                "error": f"credenciales locales en el servidor principal: {local}"}
     client = get_egress_client(slug)
     if client is None:
         return {"ok": False, "slug": slug, "error": "no gestionado (sin agente)"}
@@ -108,6 +115,18 @@ def _check_one(slug: str, skip_browser: bool) -> dict:
         result["ok"] = False
         result["error"] = "WebRTC fuga IPs locales (posible fuga anti-detección)"
         return result
+    if deep:
+        try:
+            info = client.api_call("get_channel_info", {})
+        except Exception as exc:  # noqa: BLE001
+            result["ok"] = False
+            result["error"] = f"deep get_channel_info falló: {exc}"
+            return result
+        if not info.get("ok"):
+            result["ok"] = False
+            result["error"] = f"deep get_channel_info: {info.get('error')}"
+            return result
+        result["checks"]["channel_title"] = ((info.get("result") or {}).get("title") or "")
     return result
 
 
@@ -116,17 +135,19 @@ def main() -> int:
     ap.add_argument("--slug", help="verificar solo un slug (default: todos)")
     ap.add_argument("--skip-browser", action="store_true",
                     help="omitir la prueba costosa del navegador")
+    ap.add_argument("--deep", action="store_true",
+                    help="además, prueba get_channel_info vía gateway")
     args = ap.parse_args()
 
-    agents = _load_agents()
-    if not agents:
-        print("No hay canales gestionados en config/egress_agents.json")
+    managed = get_managed_slugs()
+    if not managed and not args.slug:
+        print("No hay canales gestionados (DB ni config/egress_agents.json)")
         return 1
 
-    slugs = [args.slug] if args.slug else list(agents.keys())
+    slugs = [args.slug] if args.slug else sorted(managed)
     failed = 0
     for slug in slugs:
-        res = _check_one(slug, args.skip_browser)
+        res = _check_one(slug, args.skip_browser, deep=args.deep)
         if res["ok"]:
             detail = f"IP {res['checks'].get('curl_ip', '')}"
             if res["checks"].get("browser_ip"):
