@@ -62,6 +62,18 @@ class NativeShortsPipeline:
                 logger.error(f"[{self.channel_slug}] Short script generation failed")
                 return None
 
+            # Sentence-aware budget enforcement (never cut words mid-sentence).
+            from pipeline.shorts_tts import prepare_short_script
+            short_script, _script_errors, _trim_report = prepare_short_script(
+                short_script, self.config,
+            )
+            if _script_errors or _trim_report.get("needs_regeneration"):
+                logger.error(
+                    "[%s] Short script cannot fit the budget without cutting "
+                    "sentences: %s", self.channel_slug, (_script_errors or [])[:3],
+                )
+                return None
+
             # 3. TTS
             audio_data = self._phase_tts_short(short_script)
             if not audio_data:
@@ -77,7 +89,9 @@ class NativeShortsPipeline:
                 editor = VideoEditor(self.config)
                 bloques = short_script.get("bloques", [])
                 timestamps = audio_data.get("timestamps", [])
-                scene_ranges = editor._compute_block_ranges(bloques, timestamps)
+                scene_ranges = editor._compute_block_ranges(
+                    bloques, timestamps, audio_duration=audio_data.get("duration_sec"),
+                )
                 # Add 'duracion_sec' for fetch_short_assets_exhaustive compatibility
                 for sr in scene_ranges:
                     sr["duracion_sec"] = sr.get("duration", 5.0)
@@ -351,7 +365,17 @@ Devuelve SOLO un array JSON con 3 objetos, cada uno con campos "title" y "tema":
         else:
             cierre_desc = "6. cierre (3-5 seg) — cierre natural"
 
-        prompt = f"""Crea un guion para YouTube Shorts (~50-58 segundos de narración, ~90-110 palabras en español).
+        from pipeline.shorts_tts import voice_aware_word_budget, prosody_budget_params
+        _rate = (getattr(self.config, "TTS_STRATEGY", {}) or {}).get("rate_base", "0%")
+        _floor, _avg_pause = prosody_budget_params(self.config)
+        _budget = voice_aware_word_budget(
+            getattr(self.config, "SHORTS_MAX_DURATION_SEC", 58.0),
+            rate=_rate, block_count=6,
+            prosody_floor_pct=_floor, avg_pause_ms=_avg_pause,
+        )
+        _target = max(45, _budget - 5)
+
+        prompt = f"""Crea un guion para YouTube Shorts (~50-58 segundos de narración, máximo {_target} palabras en español).
 
 CANAL: {display_name}
 ESTILO: {niche}
