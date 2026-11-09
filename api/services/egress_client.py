@@ -16,6 +16,7 @@ convierta el canal en local en silencio.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Optional
 
 import requests
