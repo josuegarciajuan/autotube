@@ -47,7 +47,7 @@ def test_aborta_sin_reintentar_por_segmento(monkeypatch):
 
 
 def test_transitorio_si_reintenta(monkeypatch):
-    """Un fallo no-provider reintenta una vez y, si vuelve a fallar, devuelve vacío."""
+    """Un fallo no-provider reintenta una vez y ABORTA (nunca omite audio)."""
     eng = TE.TTSEngine({})
     state = {"n": 0}
 
@@ -56,6 +56,6 @@ def test_transitorio_si_reintenta(monkeypatch):
         raise RuntimeError("connection reset by peer")
 
     monkeypatch.setattr(eng, "_stream_sync", _boom)
-    audio, ts = eng._synthesize_with_retry("hola", None, None, None, timeout=5)
-    assert (audio, ts) == ([], [])
+    with pytest.raises(RuntimeError, match="TTS segment failed"):
+        eng._synthesize_with_retry("hola", None, None, None, timeout=5)
     assert state["n"] == 2
