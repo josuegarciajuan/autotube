@@ -800,10 +800,15 @@ def _jaccard_similarity(set_a: set[str], set_b: set[str]) -> float:
     return len(intersection) / len(union) if union else 0.0
 
 
+def _as_dict(value: Any) -> dict:
+    """Return *value* when it is a dict, otherwise an empty dict."""
+    return value if isinstance(value, dict) else {}
+
+
 def _config_key_overlap(rec_a: dict, rec_b: dict) -> float:
     """Compute overlap of config_changes keys between two recommendations."""
-    keys_a = set(rec_a.get("config_changes", {}).keys())
-    keys_b = set(rec_b.get("config_changes", {}).keys())
+    keys_a = set(_as_dict(rec_a.get("config_changes")).keys())
+    keys_b = set(_as_dict(rec_b.get("config_changes")).keys())
     if not keys_a or not keys_b:
         return 0.0
     intersection = keys_a & keys_b
@@ -921,22 +926,112 @@ def _dedup_recommendations(
 def _extract_json_from_content(content: str) -> dict:
     """Robust JSON extraction from LLM streaming output.
 
-    Handles markdown fences, thinking-mode preamble text, and other
-    common LLM response wrapping patterns.
+    Handles markdown fences, thinking-mode preamble text, residual text
+    after a valid JSON object, and truncated JSON recovered best-effort.
+    Always returns a dict root; raises if the root is not a JSON object.
     """
-    text = content.strip()
+    text = (content or "").strip()
 
     # 1. Try markdown code fence extraction (anywhere in the text)
     m = re.search(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)
     if m:
         text = m.group(1).strip()
     else:
-        # 2. Try to extract the first JSON object { ... } from anywhere
-        m = re.search(r"\{.*\}", text, re.DOTALL)
-        if m:
-            text = m.group(0)
+        # 2. Trim everything before the first opening brace instead of
+        #    relying on a greedy {.*} regex (which chokes on trailing text).
+        brace = text.find("{")
+        if brace != -1:
+            text = text[brace:]
 
-    return json.loads(text)
+    parse_error: json.JSONDecodeError | None = None
+    parsed = None
+    try:
+        # raw_decode tolerates residual text after a valid JSON value.
+        parsed, _end = json.JSONDecoder().raw_decode(text)
+    except json.JSONDecodeError as e:
+        parse_error = e
+
+    if parsed is None:
+        # Best-effort recovery for truncated responses (token limit).
+        try:
+            from pipeline_dist.llm_repair import repair_truncated_json
+            repaired = repair_truncated_json(text)
+        except Exception:  # noqa: BLE001 - repair is best-effort only
+            repaired = None
+        if isinstance(repaired, dict):
+            logger.warning(
+                "JSON parse failed — recovered via repair_truncated_json"
+            )
+            return repaired
+        if parse_error is not None:
+            raise parse_error
+        raise ValueError("LLM returned unparseable JSON")
+
+    if not isinstance(parsed, dict):
+        raise ValueError("LLM returned a non-object JSON root")
+    return parsed
+
+
+def _normalize_recommendation(rec: Any) -> dict | None:
+    """Coerce a single recommendation into a safe, predictable shape.
+
+    Returns None when *rec* is not a dict. Never raises on missing/None
+    sub-fields (fixes ``'NoneType' object has no attribute 'keys'``).
+    """
+    if not isinstance(rec, dict):
+        return None
+    normalized = dict(rec)
+    normalized["config_changes"] = _as_dict(rec.get("config_changes"))
+    normalized["data_cited"] = _as_dict(rec.get("data_cited"))
+    normalized["requires_code"] = bool(rec.get("requires_code", False))
+    if normalized["requires_code"] and normalized.get("opencode_prompt") is None:
+        normalized["opencode_prompt"] = ""
+    return normalized
+
+
+def _validate_exploration_payload(payload: Any) -> dict:
+    """Validate/normalize the phase-1 exploration payload."""
+    if not isinstance(payload, dict):
+        raise ValueError("exploration payload is not a JSON object")
+    raw_patterns = payload.get("patterns")
+    if not isinstance(raw_patterns, list):
+        raise ValueError("exploration payload has no 'patterns' list")
+    patterns = [p for p in raw_patterns if isinstance(p, dict)]
+    if not patterns:
+        raise ValueError("exploration returned no valid patterns")
+    result = dict(payload)
+    result["patterns"] = patterns
+    return result
+
+
+def _validate_unified_payload(payload: Any) -> dict:
+    """Validate/normalize the phase-2 unified (hypotheses+recommendations) payload."""
+    if not isinstance(payload, dict):
+        raise ValueError("unified payload is not a JSON object")
+    raw_recs = payload.get("recommendations")
+    if not isinstance(raw_recs, list):
+        raise ValueError("unified payload has no 'recommendations' list")
+
+    recommendations: list[dict] = []
+    for rec in raw_recs:
+        normalized = _normalize_recommendation(rec)
+        if normalized is not None:
+            recommendations.append(normalized)
+
+    result = dict(payload)
+    result["recommendations"] = recommendations
+
+    hypotheses = payload.get("hypotheses")
+    result["hypotheses"] = hypotheses if isinstance(hypotheses, list) else []
+
+    key_metrics = payload.get("key_metrics")
+    result["key_metrics"] = key_metrics if isinstance(key_metrics, list) else []
+
+    analysis_summary = payload.get("analysis_summary")
+    result["analysis_summary"] = (
+        analysis_summary if isinstance(analysis_summary, str) else ""
+    )
+    return result
 
 
 def _run_phase_streaming(
@@ -947,6 +1042,7 @@ def _run_phase_streaming(
     temperature: float,
     insight_id: int,
     phase_label: str,
+    validator=None,
 ) -> dict:
     """Execute one LLM pass with streaming and dead-man switch.
 
@@ -1057,6 +1153,8 @@ def _run_phase_streaming(
 
         # Parse JSON
         result = _extract_json_from_content(full_content)
+        if validator is not None:
+            result = validator(result)
 
         # Rough token estimates
         user_messages_text = " ".join(
@@ -1091,6 +1189,7 @@ def _run_phase_streaming_with_retry(
     insight_id: int,
     phase_label: str,
     max_retries: int = 1,
+    validator=None,
 ) -> dict:
     """Streaming LLM call with one retry on empty/broken content.
 
@@ -1103,6 +1202,7 @@ def _run_phase_streaming_with_retry(
         return _run_phase_streaming(
             client, model, messages, max_tokens, temperature,
             insight_id, phase_label,
+            validator=validator,
         )
     except (ValueError, json.JSONDecodeError) as e:
         logger.warning(
@@ -1124,6 +1224,7 @@ def _run_phase_streaming_with_retry(
                 no_thinking_client, model, messages, max_tokens * 2,
                 temperature, insight_id,
                 f"{phase_label} (sin thinking)",
+                validator=validator,
             )
         except Exception as e2:
             logger.error("%s: thinking-disabled fallback also failed: %s", phase_label, e2)
@@ -1296,6 +1397,7 @@ def run_channel_analysis_sync(insight_id: int, channel_id: int,
                 max_tokens=8000, temperature=0.7,
                 insight_id=insight_id,
                 phase_label=f"{phase_label} · Fase 1/2: Exploración",
+                validator=_validate_exploration_payload,
             )
             total_tokens_in += patterns["tokens_in"]
             total_tokens_out += patterns["tokens_out"]
@@ -1413,6 +1515,7 @@ def run_channel_analysis_sync(insight_id: int, channel_id: int,
                 max_tokens=12000, temperature=0.5,
                 insight_id=insight_id,
                 phase_label=f"{phase_label} · Fase 2/2: Recomendaciones",
+                validator=_validate_unified_payload,
             )
             total_tokens_in += unified_result["tokens_in"]
             total_tokens_out += unified_result["tokens_out"]
@@ -1463,13 +1566,14 @@ def run_channel_analysis_sync(insight_id: int, channel_id: int,
                 if carried_over:
                     new_recs = unified_result["content"].get("recommendations", [])
                     new_config_keys = [
-                        set(nr.get("config_changes", {}).keys())
+                        set(_as_dict(nr.get("config_changes")).keys())
                         for nr in new_recs
                     ]
                     deduped_carried = []
                     for cr in carried_over:
-                        if cr.get("applied") and cr.get("config_changes"):
-                            cr_keys = set(cr["config_changes"].keys())
+                        cr_changes = _as_dict(cr.get("config_changes"))
+                        if cr.get("applied") and cr_changes:
+                            cr_keys = set(cr_changes.keys())
                             if any(cr_keys & nck for nck in new_config_keys):
                                 continue
                         if cr.get("discarded"):
@@ -1517,7 +1621,7 @@ def run_channel_analysis_sync(insight_id: int, channel_id: int,
             db.complete_insight(
                 insight_id,
                 insights_json=json.dumps(unified_result["content"],
-                                         ensure_ascii=False),
+                                         ensure_ascii=False, default=str),
                 raw_patterns=json.dumps(patterns["content"], ensure_ascii=False),
                 raw_hypotheses=raw_hypotheses,
                 model=model,
