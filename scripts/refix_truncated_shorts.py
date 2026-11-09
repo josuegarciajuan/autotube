@@ -93,7 +93,7 @@ def _srt_matches_audio(srt: Path | None, audio_duration: float) -> bool:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true", help="write changes (default: dry-run)")
-    ap.add_argument("--status", default="generated")
+    ap.add_argument("--status", default="generated,held")
     ap.add_argument("--channel", default="")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--json-out", default="")
@@ -163,6 +163,20 @@ def main() -> int:
             report.append(entry)
             continue
 
+        # Hold the short while re-rendering so the upload valve cannot publish
+        # the old truncated MP4 in the middle of the replacement.
+        _original_status = r["status"]
+        try:
+            conn.execute(
+                "UPDATE shorts SET status='held', updated_at=datetime('now') WHERE id=?",
+                (r["id"],),
+            )
+            conn.commit()
+        except Exception as exc:  # noqa: BLE001
+            entry.update(action="error", reason=f"no se pudo retener: {exc}"[:200])
+            report.append(entry)
+            continue
+
         from config.config_bridge import get_channel_config
         cfg = get_channel_config(r["slug"])
         max_dur = getattr(cfg, "SHORTS_MAX_DURATION_SEC", 58.0)
@@ -183,6 +197,15 @@ def main() -> int:
             )
         except Exception as exc:  # noqa: BLE001
             entry.update(action="error", reason=str(exc)[:200])
+            try:
+                conn.execute(
+                    "UPDATE shorts SET status='held', error_message=?, "
+                    "updated_at=datetime('now') WHERE id=?",
+                    (f"refix falló: {str(exc)[:400]}", r["id"]),
+                )
+                conn.commit()
+            except Exception:
+                pass
             report.append(entry)
             try:
                 tmp_out.unlink(missing_ok=True)
@@ -197,7 +220,8 @@ def main() -> int:
                 shutil.copy2(mp4, backup)
             tmp_out.replace(mp4)
             conn.execute(
-                "UPDATE shorts SET duration=?, updated_at=datetime('now') WHERE id=?",
+                "UPDATE shorts SET duration=?, status='generated', "
+                "error_message=NULL, updated_at=datetime('now') WHERE id=?",
                 (meta["duration_sec"], r["id"]),
             )
             conn.commit()
