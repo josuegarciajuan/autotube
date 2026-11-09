@@ -29,6 +29,12 @@ AI_BENCHMARKS_DIR = AI_SCENES_DIR / "benchmarks"
 AI_TEST_DIR = AI_SCENES_DIR / "test"
 DATABASE_PATH = os.getenv("DATABASE_PATH", str(PROJECT_ROOT / "autotube.db"))
 
+# ── Modo agente egress (contenedor del gateway) ─────────────────
+# El gateway corre en el VPS del canal y NO debe abrir ni depender de la DB del
+# servidor principal. Con AUTOTUBE_AGENT_MODE=1 se evita leer `ACTIVE_CHANNELS`
+# de la DB y YouTubeUploader desactiva sus side-effects de DB/alertas.
+AGENT_MODE = os.getenv("AUTOTUBE_AGENT_MODE", "").lower() in ("1", "true", "yes")
+
 # Ensure output dirs exist. Best-effort: en el contenedor del pool el código va
 # montado en solo lectura (`/app:ro`), así que un fallo al crear dirs no debe
 # tumbar el import (el worker TTS escribe en el sandbox `/work`).
@@ -72,6 +78,9 @@ def _load_active_channels() -> list[str]:
     env_override = os.getenv("ACTIVE_CHANNELS", "")
     if env_override:
         return [c.strip() for c in env_override.split(",") if c.strip()]
+    if AGENT_MODE:
+        # El gateway no tiene (ni debe tener) la DB del servidor principal.
+        return []
     try:
         import sqlite3
         db_path = os.getenv("DATABASE_PATH", str(PROJECT_ROOT / "autotube.db"))

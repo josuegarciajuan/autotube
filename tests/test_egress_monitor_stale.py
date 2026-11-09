@@ -1,9 +1,11 @@
-"""Egress monitor: descarta agentes sin canal en la DB.
+"""Egress monitor: descarta agentes sin canal en la DB y exige perfil completo.
 
 Regresión: ``config/egress_agents.json`` puede conservar slugs retirados o
 renombrados (p. ej. 'canal6'). El monitor creaba una alerta crítica
 ``egress_ip_down`` fantasma para un canal que ya no existe. Ahora se omite y se
 resuelve cualquier alerta previa.
+
+Además (nov 2026): un perfil sin ``expected_ip`` ya NO se considera sano.
 """
 from __future__ import annotations
 
@@ -12,7 +14,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from api.services import egress_client as ec
 from api.services import egress_monitor
+from api.services import egress_registry as reg
+from api.services.egress_registry import ManagedProfile
 
 
 class _Rows:
@@ -62,19 +67,11 @@ class _FakeDB:
 
 def test_stale_egress_slug_is_skipped_and_alert_resolved(monkeypatch):
     db = _FakeDB(slugs=["canal2", "canal5"])
-    monkeypatch.setattr(
-        egress_monitor, "_load_agents",
-        lambda: {"canal6": {"url": "http://x", "token": "t", "expected_ip": "1.2.3.4"}},
-    )
+    monkeypatch.setattr(reg, "get_managed_slugs", lambda _db=None: {"canal6"})
 
     alerts = []
     import api.services.lifecycle_monitor as lm
     monkeypatch.setattr(lm, "create_alert", lambda *a, **k: alerts.append(k))
-
-    # Si el monitor intentara comprobar el egress del slug huérfano, el cliente
-    # no existiría/fallaría; forzamos un fallo para detectar un chequeo indebido.
-    import api.services.egress_delegation as ed
-    monkeypatch.setattr(ed, "egress_client_for", lambda slug: (_ for _ in ()).throw(AssertionError("no debe chequearse")))
 
     results = egress_monitor.check_all_egress(db)
 
@@ -85,18 +82,45 @@ def test_stale_egress_slug_is_skipped_and_alert_resolved(monkeypatch):
 
 def test_known_slug_is_monitored(monkeypatch):
     db = _FakeDB(slugs=["canal2"])
+    profile = ManagedProfile(
+        slug="canal2", url="http://x", token="t", expected_ip="1.2.3.4",
+    )
+    monkeypatch.setattr(reg, "get_managed_slugs", lambda _db=None: {"canal2"})
     monkeypatch.setattr(
-        egress_monitor, "_load_agents",
-        lambda: {"canal2": {"url": "http://x", "token": "t", "expected_ip": "1.2.3.4"}},
+        reg, "get_profile",
+        lambda slug, db_row=None: profile if slug == "canal2" else None,
     )
 
     class _Client:
-        def egress_check(self):
-            return {"result": {"ip": "1.2.3.4"}}
+        def __init__(self, *a, **k):
+            pass
 
-    import api.services.egress_delegation as ed
-    monkeypatch.setattr(ed, "egress_client_for", lambda slug: _Client())
+        def healthz(self):
+            return {
+                "ok": True, "egress_ok": True,
+                "egress_ip": "1.2.3.4", "expected_ip": "1.2.3.4",
+            }
+
+    monkeypatch.setattr(ec, "EgressAgent", _Client)
 
     results = egress_monitor.check_all_egress(db)
     assert results["canal2"]["ok"] is True
     assert db.get_system_state("egress_down_canal2") == "0"
+
+
+def test_incomplete_profile_marks_down(monkeypatch):
+    db = _FakeDB(slugs=["canal2"])
+    monkeypatch.setattr(reg, "get_managed_slugs", lambda _db=None: {"canal2"})
+
+    def _raise(slug, db_row=None):
+        raise reg.EgressConfigurationError("falta expected_ip")
+
+    monkeypatch.setattr(reg, "get_profile", _raise)
+    alerts = []
+    import api.services.lifecycle_monitor as lm
+    monkeypatch.setattr(lm, "create_alert", lambda *a, **k: alerts.append(k))
+
+    results = egress_monitor.check_all_egress(db)
+    assert results["canal2"]["ok"] is False
+    assert db.get_system_state("egress_down_canal2") == "1"
+    assert alerts  # alerta crítica creada

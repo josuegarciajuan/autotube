@@ -43,6 +43,14 @@ class AgentConfig:
     port: int = 9101
     max_body_mb: int = 4096            # límite subida multipart (MB)
 
+    # ── Staging (recibir vídeo → subir → borrar) ────────────────
+    # El gateway recibe el mp4, lo sube y el server pide /cleanup. Además se
+    # purga por TTL y se rechaza si el disco libre baja del mínimo.
+    staging_dir: str = ""              # default: <project_root>/output/vps_staging
+    staging_max_gb: float = 5.0        # cuota por canal
+    staging_ttl_hours: int = 6         # purga de ficheros huérfanos
+    min_free_gb: float = 2.0           # no aceptar staging por debajo de esto
+
     # ── Proxy Playwright opcional (si NO se usa túnel a nivel de SO) ──
     # Si la VPS enruta su salida a nivel de sistema, esto debe dejarse vacío.
     playwright_proxy: dict = field(default_factory=dict)
@@ -64,6 +72,7 @@ class AgentConfig:
         self.token_pickle_path = str(_abs(self.token_pickle_path, f"tokens/{self.slug}.pickle"))
         self.browser_profile_dir = str(_abs(self.browser_profile_dir, f"tokens/{self.google_account or self.slug}_browser_profile"))
         self.browser_session_path = str(_abs(self.browser_session_path, f"tokens/{self.google_account or self.slug}_browser_session.json"))
+        self.staging_dir = str(_abs(self.staging_dir, "output/vps_staging"))
         self.project_root = str(base)
         return self
 
@@ -101,6 +110,9 @@ class AgentConfig:
             google_account=_g("AGENT_GOOGLE_ACCOUNT"),
             egress_label=_g("AGENT_EGRESS_LABEL"),
             auth_token=_g("AGENT_AUTH_TOKEN"),
+            # Bug fix: expected_ip se omitía en from_env() y todo quedaba
+            # bloqueado por fail-closed (o peor, sin verificar). Es obligatorio.
+            expected_ip=_g("AGENT_EXPECTED_IP"),
             egress_verify=_g("AGENT_EGRESS_VERIFY", "true").lower() in ("1", "true", "yes"),
             project_root=_g("AGENT_PROJECT_ROOT"),
             client_secret_path=_g("AGENT_CLIENT_SECRET_PATH"),
@@ -111,6 +123,10 @@ class AgentConfig:
             host=_g("AGENT_HOST", "0.0.0.0"),
             port=int(_g("AGENT_PORT", "9101")),
             max_body_mb=int(_g("AGENT_MAX_BODY_MB", "4096")),
+            staging_dir=_g("AGENT_STAGING_DIR"),
+            staging_max_gb=float(_g("AGENT_STAGING_MAX_GB", "5")),
+            staging_ttl_hours=int(_g("AGENT_STAGING_TTL_HOURS", "6")),
+            min_free_gb=float(_g("AGENT_MIN_FREE_GB", "2")),
             playwright_proxy=proxy,
         )
         return cfg.resolve_paths()

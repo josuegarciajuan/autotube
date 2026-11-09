@@ -357,6 +357,26 @@ async def lifespan(app: FastAPI):
         logging.getLogger("autotube.startup").warning("Config sync skipped: %s", exc)
     _ping_watchdog_now()  # config sync can be slow on first run
 
+    # ── Egress aislado: autochequeo fail-closed al arrancar ──────────
+    # Si un canal marcado como gestionado no tiene perfil completo o aún
+    # conserva credenciales locales, se marca egress_status=error y se alerta.
+    # Las operaciones ya quedan bloqueadas por egress_registry; NUNCA cae a local.
+    try:
+        from database.db_extended import ExtendedDatabase as _EDBEgress
+        from api.services.egress_registry import reconcile_on_startup
+        _egress_report = reconcile_on_startup(_EDBEgress())
+        logging.getLogger("autotube.startup").info(
+            "Egress registry: managed=%d errors=%d warnings=%d",
+            len(_egress_report.get("managed", [])),
+            len(_egress_report.get("errors", {})),
+            len(_egress_report.get("warnings", [])),
+        )
+    except Exception as _egress_exc:
+        logging.getLogger("autotube.startup").warning(
+            "Egress registry reconcile skipped: %s", _egress_exc,
+        )
+    _ping_watchdog_now()
+
     # ── Backfill: sembrar el registro de temáticas consumidas (v58) ──
     # Marca los long-forms y shorts nativos ya publicados para que la fábrica
     # no repita temas históricos desde el primer momento. Idempotente: cada

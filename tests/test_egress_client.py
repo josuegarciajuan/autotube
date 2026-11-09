@@ -4,17 +4,26 @@ import json
 import pytest
 
 from api.services import egress_client as ec
+from api.services import egress_registry as reg
 
 
 @pytest.fixture
 def agents_file(tmp_path, monkeypatch):
-    """Apunta el mapa de agentes a un fichero temporal controlado."""
+    """Apunta el registro de agentes a un fichero temporal controlado."""
     f = tmp_path / "egress_agents.json"
     data = {
-        "canal_managed": {"url": "http://127.0.0.1:9", "token": "tok-ok"},
+        "canal_managed": {
+            "url": "http://127.0.0.1:9",
+            "token": "tok-ok",
+            "expected_ip": "1.2.3.4",
+        },
     }
     f.write_text(json.dumps(data))
+    # El registro durable es la fuente real; parcheamos ambos alias.
+    monkeypatch.setattr(reg, "_AGENTS_FILE", f)
     monkeypatch.setattr(ec, "_AGENTS_FILE", f)
+    # Sin DB: ningún canal está marcado como gestionado por flag.
+    monkeypatch.setattr(reg, "_db_channel", lambda slug: None)
     return f
 
 
@@ -51,8 +60,10 @@ def test_fail_closed_browser_action(agents_file):
 
 
 def test_egress_agents_missing_file(tmp_path, monkeypatch):
-    """Sin fichero de agentes → ningún canal es gestionado."""
+    """Sin fichero de agentes y sin flag DB → ningún canal es gestionado."""
     missing = tmp_path / "no_existe.json"
+    monkeypatch.setattr(reg, "_AGENTS_FILE", missing)
     monkeypatch.setattr(ec, "_AGENTS_FILE", missing)
+    monkeypatch.setattr(reg, "_db_channel", lambda slug: None)
     assert ec.is_egress_managed("canal2") is False
     assert ec.get_egress_client("canal2") is None

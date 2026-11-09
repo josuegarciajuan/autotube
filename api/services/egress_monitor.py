@@ -1,13 +1,16 @@
-"""Monitor de liveness de la IP residencial de los agentes egress.
+"""Monitor de liveness de la IP de los gateways egress por canal.
 
-Comprueba periódicamente que cada canal gestionado sigue saliendo por su IP
-residencial esperada (``/egress-check`` del agente). Si el agente no responde o
-devuelve otra IP (proxy caducado/caído), marca ``egress_down_<slug>=1`` y crea
-una alerta crítica ``egress_ip_down``.
+Comprueba periódicamente que cada canal gestionado (flag durable en DB **o**
+registro secreto) sigue saliendo por su IP esperada. Si el gateway no responde,
+la IP no coincide o el perfil está incompleto, marca ``egress_down_<slug>=1`` y
+crea una alerta crítica ``egress_ip_down``.
 
 La capa de delegación (``egress_client``) consulta ese flag antes de cualquier
 operación → FAIL-CLOSED: no intenta nada con la IP muerta (ni cae a la del
 server). Al recuperarse, la alerta se resuelve y se reanuda solo.
+
+Regla estricta nov 2026: un perfil sin ``expected_ip`` NO se considera sano.
+Antes, si faltaba ``expected_ip``, cualquier IP no vacía pasaba el check.
 """
 from __future__ import annotations
 
@@ -30,7 +33,8 @@ def _entity_id(slug: str) -> int:
 
 
 def _load_agents() -> dict:
-    from api.services.egress_client import _load_agents as _la
+    """Compatibilidad: delega en el registro durable."""
+    from api.services.egress_registry import _load_agents as _la
     return _la()
 
 
@@ -48,33 +52,33 @@ def _resolve_alert(db, slug: str) -> None:
         logger.debug("[%s] resolve egress alert failed: %s", slug, exc)
 
 
-def _raise_alert(db, slug: str, ip: str, expected: str) -> None:
+def _raise_alert(db, slug: str, ip: str, expected: str, error: str = "") -> None:
     try:
         from api.services.lifecycle_monitor import create_alert
+        detail = f" Detalle: {error}" if error else ""
         create_alert(
             db, entity_type="system", entity_id=_entity_id(slug), channel_id=None,
             alert_type=EGRESS_ALERT, severity="critical",
-            title=f"IP residencial del canal {slug} caída/inactiva",
+            title=f"Gateway/IP del canal {slug} caído o mal configurado",
             message=(
-                f"El agente egress de {slug} no sale por su IP residencial esperada. "
-                f"IP detectada: {ip or 'desconocida'}; esperada: {expected or 'no configurada'}. "
-                f"Posible caducidad del proxy (Geonix). Las operaciones de este canal están "
-                f"BLOQUEADAS (fail-closed) hasta que se renueve/active la IP. "
-                f"Verificar: panel → Verificar egress, o renovar en el proveedor."
+                f"El gateway egress de {slug} no sale por su IP esperada. "
+                f"IP detectada: {ip or 'desconocida'}; esperada: {expected or 'no configurada'}."
+                f"{detail} Las operaciones de este canal están BLOQUEADAS "
+                f"(fail-closed) hasta corregirlo. Verificar: panel → Verificar egress, "
+                f"o revisar config/egress_agents.json / la DB del canal."
             ),
-            metadata={"slug": slug, "ip": ip, "expected": expected, "checked_at": datetime.now(timezone.utc).isoformat()},
+            metadata={
+                "slug": slug, "ip": ip, "expected": expected,
+                "error": error[:400],
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+            },
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[%s] egress alert create failed: %s", slug, exc)
 
 
 def _known_channel_slugs(db) -> set[str]:
-    """Slugs de canales registrados en la DB (para descartar egress obsoletos).
-
-    ``config/egress_agents.json`` puede contener entradas de canales retirados o
-    renombrados (p. ej. 'canal6' tras un renumbering). Sin este filtro se creaba
-    una alerta crítica ``egress_ip_down`` fantasma para un canal inexistente.
-    """
+    """Slugs de canales registrados en la DB (para descartar egress obsoletos)."""
     try:
         with db._connect() as conn:
             rows = conn.execute("SELECT slug FROM channels").fetchall()
@@ -84,45 +88,115 @@ def _known_channel_slugs(db) -> set[str]:
         return set()
 
 
+def _update_channel_status(db, slug: str, status: str, ip: str = "") -> None:
+    """Persiste el estado del gateway en ``channels`` (best-effort)."""
+    try:
+        setter = getattr(db, "set_channel_egress_status", None)
+        if callable(setter):
+            setter(slug, status, last_ip=ip or None)
+            return
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        with db._connect() as conn:
+            conn.execute(
+                "UPDATE channels SET egress_status = ?, "
+                "egress_last_ip = COALESCE(?, egress_last_ip), "
+                "egress_last_verified_at = CASE WHEN ? = 'up' "
+                "THEN CURRENT_TIMESTAMP ELSE egress_last_verified_at END, "
+                "updated_at = CURRENT_TIMESTAMP WHERE slug = ?",
+                (status, ip or None, status, slug),
+            )
+            conn.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[%s] no se pudo persistir egress_status: %s", slug, exc)
+
+
 def check_all_egress(db=None) -> dict:
-    """Comprueba la salud de la IP residencial de todos los canales gestionados."""
+    """Comprueba la salud de la IP de todos los canales gestionados."""
     if db is None:
         from database.db_extended import ExtendedDatabase
         db = ExtendedDatabase()
 
-    from api.services.egress_delegation import egress_client_for
-    agents = _load_agents()
+    from api.services.egress_client import EgressAgent
+    from api.services.egress_registry import (
+        EgressConfigurationError,
+        get_managed_slugs,
+        get_profile,
+    )
+
+    managed = sorted(get_managed_slugs(db))
     known = _known_channel_slugs(db)
-    results = {}
-    for slug, cfg in agents.items():
+    results: dict[str, dict] = {}
+
+    for slug in managed:
         # Egress huérfano (canal retirado/renombrado): no alertar. Resolvemos
         # cualquier alerta previa para que no quede colgada en el panel.
         if known and slug not in known:
-            logger.debug("[%s] egress agent sin canal en DB — omitido (config obsoleta)", slug)
+            logger.debug("[%s] egress sin canal en DB — omitido (config obsoleta)", slug)
             _resolve_alert(db, slug)
             continue
-        expected = str(cfg.get("expected_ip", "") or "")
-        client = egress_client_for(slug)
-        ok = False
+
+        try:
+            row = None
+            getter = getattr(db, "get_channel_by_slug", None)
+            if callable(getter):
+                row = getter(slug)
+            profile = get_profile(slug, db_row=row)
+        except EgressConfigurationError as exc:
+            key = EGRESS_DOWN_PREFIX + slug
+            db.set_system_state(key, "1")
+            _raise_alert(db, slug, "", "", str(exc))
+            _update_channel_status(db, slug, "error")
+            results[slug] = {"ok": False, "ip": "", "expected": "", "error": str(exc)}
+            logger.warning("[%s] perfil incompleto — fail-closed: %s", slug, exc)
+            continue
+
+        if profile is None:
+            continue
+
+        expected = profile.expected_ip
         ip = ""
-        if client is not None:
-            try:
-                data = client.egress_check()
-                ip = str(data.get("result", {}).get("ip", ""))
-                ok = bool(ip) and (not expected or ip == expected)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("[%s] egress-check unreachable: %s", slug, exc)
-                ok = False
+        ok = False
+        error = ""
+        try:
+            client = EgressAgent(slug, profile.url, profile.token)
+            hz = client.healthz()
+            ip = str(hz.get("egress_ip") or "")
+            agent_expected = str(hz.get("expected_ip") or expected).strip()
+            # La IP esperada del agente y la del registro deben coincidir.
+            expected = agent_expected or expected
+            ok = (
+                bool(hz.get("ok"))
+                and bool(hz.get("egress_ok"))
+                and bool(ip)
+                and bool(expected)
+                and ip == expected
+                and expected == profile.expected_ip
+            )
+            if not ok:
+                error = (
+                    f"healthz ok={hz.get('ok')} egress_ok={hz.get('egress_ok')} "
+                    f"ip={ip or '?'} expected={expected or '?'} "
+                    f"registry_expected={profile.expected_ip}"
+                )
+        except Exception as exc:  # noqa: BLE001
+            error = str(exc)
+
         key = EGRESS_DOWN_PREFIX + slug
         if ok:
             db.set_system_state(key, "0")
             _resolve_alert(db, slug)
+            _update_channel_status(db, slug, "up", ip)
             logger.info("[%s] egress IP OK (%s)", slug, ip)
         else:
             db.set_system_state(key, "1")
-            _raise_alert(db, slug, ip, expected)
-            logger.warning("[%s] egress IP DOWN (ip=%r expected=%r) — fail-closed", slug, ip, expected)
-        results[slug] = {"ok": ok, "ip": ip}
+            _raise_alert(db, slug, ip, expected, error)
+            _update_channel_status(db, slug, "down", ip)
+            logger.warning("[%s] egress DOWN (ip=%r expected=%r) — fail-closed",
+                           slug, ip, expected)
+        results[slug] = {"ok": ok, "ip": ip, "expected": expected}
+
     return results
 
 
@@ -134,7 +208,7 @@ def is_egress_down(db, slug: str) -> bool:
 
 
 def egress_monitor_loop():
-    """Loop síncrono (correr en asyncio.to_thread): comprueba la salud cada 5 min."""
+    """Loop síncrono (correr en asyncio.to_thread): comprueba cada 60 s."""
     import time as _time
     _time.sleep(120)  # deja estabilizar a la API
     while True:
