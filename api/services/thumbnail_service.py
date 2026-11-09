@@ -67,8 +67,15 @@ async def regenerate_thumbnail_for_video(video_id: int):
                            ", ".join(check.reasons))
             return None
 
-        db.update_video(video_id, thumbnail_path=str(thumbnail_path),
-                        updated_at=datetime.utcnow().isoformat())
+        _fields = {
+            "thumbnail_path": str(thumbnail_path),
+            "updated_at": datetime.utcnow().isoformat(),
+            "thumbnail_pipeline_version": "thumb-ctr-2026-11",
+        }
+        _qc = getattr(maker, "last_qc_result", None)
+        if _qc is not None:
+            _fields.update(_qc.as_db_fields())
+        db.update_video(video_id, **_fields)
         return str(thumbnail_path)
     except Exception as e:
         import logging

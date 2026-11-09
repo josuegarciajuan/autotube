@@ -124,12 +124,17 @@ Ahora la miniatura tiene DOS líneas de texto en vez de una:
   • "La prueba que faltaba", "El error del peritaje"
 - PALABRAS PROHIBIDAS (clichés vacíos): OCULTO, OCULTA, REAL, PROHIBIDO, IMPACTANTE, INCREÍBLE, SECRETO, SECRETA, NADIE LO VIO, NADIE LO EXPLICÓ. El texto debe ser específico del tema.
 - Regla de oro: L1 + L2 + título deben contar una mini-historia de 3 frases que obligue a hacer clic. NINGUNA línea repite a las otras ni al título.
+- NUNCA termines L1 o L2 en artículo/preposición/conjunción (DE, DEL, LA, EL, LOS, QUE, SIN, BAJO, CON, POR, Y...): una frase colgando destruye la credibilidad.
+- L1 debe ser un SUSTANTIVO O CIFRA concreta, nunca un verbo (EXPLICAR, CONTARON).
+- L2 debe aportar un DATO NUEVO (cifra, unidad, lugar o consecuencia); si no, déjala vacía.
+- Ejemplos buenos: "20 METROS | ¿QUÉ HAY DETRÁS?" · "K2 | EL CUELLO DE BOTELLA".
+- Ejemplos malos: "CIUDAD BAJO LA" · "3.000 METROS SIN" · "LA QUEJA SILENCIADA".
 
 ═══ COHERENCIA TÍTULO ↔ MINIATURA ═══
 El título, L1 y L2 deben trabajar JUNTOS, sin repetirse:
 - TÍTULO: promete el tema principal + el gancho ("5 médicos vieron esto y NO pudieron explicarlo").
-- L1 (thumbnail): palabra-gancho extraída del título ("5 MÉDICOS" o "SIN EXPLICACIÓN").
-- L2 (thumbnail): el complemento intrigante ("El informe secreto").
+- L1 (thumbnail): sustantivo/cifra ancla del título ("5 MÉDICOS" o "20 METROS").
+- L2 (thumbnail): dato nuevo que el título no revela ("El cuello de botella").
 - Juntos deben contar una mini-historia de 3 actos que obligue a hacer clic.
 
 Responde SIEMPRE en formato JSON con exactamente estas claves:
@@ -138,7 +143,7 @@ Responde SIEMPRE en formato JSON con exactamente estas claves:
   "title_suffix": "SIEMPRE '' (vacío). PROHIBIDO: REAL, CASO REAL, REVELACIÓN, IMPACTANTE, ARCHIVOS CIA, EXPEDIENTE.",
   "description": "CAPÍTULOS CON TIMESTAMPS EN LA PRIMERA LÍNEA + luego 2-3 líneas de resumen + desarrollo + CTAs + 3-5 hashtags al final",
   "tags": ["tag1", "tag2", "tag3", "tag4", "tag5"],
-  "thumbnail_text": "LÍNEA1 IMPACTO MAX 12 CHARS | línea2 complemento max 24 chars (separadas por |)",
+  "thumbnail_text": "LÍNEA1 sustantivo/cifra MAX 14 CHARS | línea2 dato nuevo MAX 24 chars (separadas por |; si L2 no aporta, solo L1)",
   "badge_text": "DOCUMENTAL | '' (sello en la esquina; PROHIBIDOS los sellos de credibilidad sin evidencia: CASO REAL, REAL, ARCHIVO, EXPEDIENTE)"
 }"""
 

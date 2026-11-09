@@ -257,10 +257,18 @@ class ThumbnailArtDirector:
         allow_faces: bool = True,
         preferred_layout: str = "",
         video_id: int = 0,
+        face_role_policy: str = "auto",
     ) -> ArtDirection:
         subject_type = normalize_subject_type(raw_subject_type, title=title,
                                                script=script_text)
         face_role = resolve_face_role(subject_type, allow_faces=allow_faces)
+        policy = str(face_role_policy or "auto").strip().lower()
+        if policy == "person_only" and subject_type != "person":
+            # Nov 2026: aggregate CTR shows generic/secondary faces underperform.
+            # A face is only allowed when the video is about a person.
+            face_role = "none"
+        elif policy in ("no_protagonist", "no_protagonist_faces"):
+            face_role = "none" if face_role == "protagonist" else face_role
         providers = resolve_provider_plan(subject_type, face_role,
                                           explicit_main=raw_main,
                                           explicit_face=raw_face)

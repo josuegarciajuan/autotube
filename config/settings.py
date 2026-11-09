@@ -659,6 +659,13 @@ AB_TEST_MIN_IMPRESSIONS = int(os.getenv("AB_TEST_MIN_IMPRESSIONS", "100"))
 AB_TEST_MAX_STALE_DAYS = int(os.getenv("AB_TEST_MAX_STALE_DAYS", "7"))
 AB_TEST_MIN_IMPRESSIONS_POST_CHANGE = int(os.getenv("AB_TEST_MIN_IMPRESSIONS_POST_CHANGE", "50"))
 
+# Nov 2026 (ronda CTR): la rotación de miniaturas publicadas queda apagada.
+# El pipeline ya elige la mejor variante por QC antes de subir. Se puede
+# reactivar por entorno cuando haya volumen para un A/B con potencia.
+THUMBNAIL_AB_ROTATION_ENABLED = (
+    os.getenv("THUMBNAIL_AB_ROTATION_ENABLED", "false").lower() == "true"
+)
+
 # ── Quota-consuming background services (ago 2026) ─────────────
 # Desactivados por defecto: solo subidas + playlist + stats manual
 # consumen quota de YouTube Data API. Reversibles desde .env.

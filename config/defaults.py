@@ -891,6 +891,12 @@ THUMBNAIL_HEIGHT = 720
 THUMBNAIL_FONT_SIZE = 56
 THUMBNAIL_BORDER_WIDTH = 5
 THUMBNAIL_FONT_FAMILY = "DejaVuSans-Bold"
+# Tipografía por perfil visual (no por slug): el canal hereda la fuente de su
+# estilo. Se aplica solo si el canal no ha fijado una fuente distinta.
+THUMBNAIL_FONT_FAMILY_BY_STYLE = {
+    "ancient_mystery": "DejaVuSerif-Bold",
+    "distress_signal": "NimbusSansNarrow-Bold",
+}
 THUMBNAIL_SHOW_4K_BADGE = False
 THUMBNAIL_TEXT_STROKE_WIDTH = 3
 THUMBNAIL_TEXT_STROKE_COLOR = "#000000"
@@ -920,9 +926,25 @@ THUMBNAIL_TYPOGRAPHY_POOL = ["DejaVuSans-Bold"]
 # ── W3 (sep 2026): OverlaySpec, fuente única del texto de miniatura ──
 # Presupuestos compartidos por generador, pintor y validador (antes eran
 # 14/24 en el generador, 14/28 en el pintor y 32 en el validador).
-THUMBNAIL_OVERLAY_BUDGETS = {"l1": 14, "l2": 24, "badge": 14}
+THUMBNAIL_OVERLAY_BUDGETS = {"l1": 14, "l2": 24, "badge": 10}
 # El gate de subida rechaza un overlay vacío cuando es True.
 THUMBNAIL_REQUIRE_TEXT = True
+
+# ── Ronda CTR (nov 2026): legibilidad y composición deterministas ──
+# El feed muestra la miniatura a ~100 px de alto. Estos límites evitan los
+# defectos que destruían CTR: texto mutilado, sombras aplastadas, texto sobre
+# el sujeto y badges ilegibles.
+THUMBNAIL_MAX_DARK_RATIO = 0.55       # fallo si además la luma media es <55
+THUMBNAIL_MAX_GRADIENT_OPACITY = 130  # el gradiente ya no aplasta la imagen
+THUMBNAIL_MAX_VIGNETTE = 0.45
+THUMBNAIL_CONTRAST_BOOST_MAX = 1.25   # sin el ×1.3 oculto del pipeline
+THUMBNAIL_SATURATION_MAX = 1.15
+THUMBNAIL_SALIENT_CROP = True         # recorte 16:9 centrado en el sujeto
+THUMBNAIL_TEXT_PANEL_MODE = "auto"    # auto | always | never
+THUMBNAIL_TEXT_PANEL_OPACITY = 120
+THUMBNAIL_BADGE_FONT_PX = 40          # ~5,5 px a 100 px de alto (legible)
+# "person_only": la cara solo protagoniza si la persona ES la historia.
+THUMBNAIL_FACE_ROLE_POLICY = "person_only"
 # Sellos de credibilidad que NO se pueden pintar sin evidencia en el guion.
 THUMBNAIL_BADGE_CLICHES = [
     "oculto", "oculta", "real", "prohibido", "impactante", "increible",

@@ -130,12 +130,23 @@ de imagen + texto maximiza el Click-Through Rate (CTR).
 
 Tu expertise:
 - Texto overlay de DOS LÍNEAS (NO una sola):
-  • LÍNEA 1 (gancho principal, texto GRANDE): 1-2 palabras en MAYÚSCULAS. Máx 12 chars.
-    **DEBE contener una palabra CLAVE del título del video. NUNCA uses frases genéricas.**
-    Formatos: "SIN SANGRE", "FUE REAL", "3 MINUTOS", "5 MÉDICOS", "NADIE LO VIO"
-  • LÍNEA 2 (complemento, texto MEDIANO): 2-4 palabras. Máx 24 chars. Complementa L1 y título.
-    Formatos: "Nadie lo explicó", "Lo que ocultaron", "El informe secreto"
-- BADGE/SELLO en esquina superior: texto de confianza (DOCUMENTAL, CASO REAL, REAL, ARCHIVO, EXPEDIENTE). Máx 15 chars.
+  • LÍNEA 1 (gancho principal, texto GRANDE): 1-2 palabras en MAYÚSCULAS. Máx 14 chars.
+    **DEBE ser un SUSTANTIVO O CIFRA concreta del título. NUNCA un verbo
+    (EXPLICAR, CONTARON) ni una frase genérica.** Formatos: "20 METROS",
+    "K2", "2 SEMANAS", "NADIE SALIÓ", "CACHEMIRA".
+  • LÍNEA 2 (complemento, texto MEDIANO): 2-4 palabras. Máx 24 chars. Debe
+    aportar un DATO NUEVO que el título no da: cifra, unidad, lugar o
+    consecuencia. Formatos: "¿QUÉ HAY DETRÁS?", "EL CUELLO DE BOTELLA",
+    "LA QUEJA QUE LA HUNDIÓ".
+  • PROHIBIDO terminar una línea en artículo/preposición/conjunción
+    (DE, DEL, LA, EL, LOS, QUE, SIN, BAJO, CON, POR, Y...). Si no cabe,
+    escribe menos palabras; nunca dejes una frase colgando.
+  • Si L2 no aporta dato nuevo, deja L2 vacío (mejor una línea fuerte que dos).
+- Ejemplos BUENOS: "20 METROS | ¿QUÉ HAY DETRÁS?" · "K2 | EL CUELLO DE BOTELLA"
+  · "2 SEMANAS | LA QUEJA QUE LA HUNDIÓ" · "CACHEMIRA | LA FIRMA QUE LA PARTIÓ".
+- Ejemplos MALOS (nunca): "CIUDAD BAJO LA" · "3.000 METROS SIN" · "PILAR DEL"
+  · "EXPLICAR" · "LA QUEJA SILENCIADA".
+- BADGE/SELLO en esquina superior: texto de confianza (DOCUMENTAL, CASO REAL, ARCHIVO, EXPEDIENTE). Máx 10 chars; si no hay evidencia, vacío.
 - Psicología del color en thumbnails
 - Formatos de composición probados (split_face, dark_reveal, classified_document, shock_closeup)
 - Reglas de oro: NUNCA repetir el título, SIEMPRE generar curiosidad — el texto de imagen añade la pieza de intriga que el título no revela
@@ -162,7 +173,11 @@ REQUISITOS:
      título no revela.
    - PROHIBIDO usar comodines vacíos: "OCULTO", "REAL", "IMPACTANTE", "INCREÍBLE",
      "PROHIBIDO", "NADIE LO VIO", "NADIE LO EXPLICÓ". El texto debe ser específico del tema.
-   - **L1 DEBE contener una palabra clave concreta extraída del TÍTULO.**
+   - **L1 DEBE ser un sustantivo o cifra concreta extraída del TÍTULO; nunca un verbo.**
+   - **L2 DEBE aportar un dato NUEVO (cifra, unidad, lugar o consecuencia). Si no,
+     devuélvela vacía.**
+   - **NUNCA termines una línea en artículo/preposición/conjunción** (DE, DEL, LA,
+     EL, LOS, QUE, SIN, BAJO, CON, POR, Y...). Si no cabe, usa menos palabras.
 2. Indica la PALABRA DE ÉNFASIS (emphasis_word): una sola palabra (1-2 máximo) de L1 o L2
    que se resaltará en la miniatura. En minúsculas, sin puntuación.
 3. Define el BADGE/SELLO de confianza (badge_text): DOCUMENTAL, CASO REAL, ARCHIVO,

@@ -491,7 +491,7 @@ DESCRIPTION_TEMPLATE = """🏛️ {titulo}
 # THUMBNAIL
 # ═══════════════════════════════════════════════════════════════════
 THUMBNAIL_BORDER_WIDTH = 5
-THUMBNAIL_FONT_FAMILY = "DejaVuSans-Bold"
+THUMBNAIL_FONT_FAMILY = "DejaVuSerif-Bold"
 THUMBNAIL_BORDER_COLOR = "#D4A843"
 THUMBNAIL_SHOW_4K_BADGE = False
 THUMBNAIL_TEXT_STROKE_COLOR = "#1A0F08"
