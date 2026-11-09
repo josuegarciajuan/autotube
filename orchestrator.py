@@ -665,6 +665,7 @@ class PipelineOrchestrator:
                     for ci in content_items
                 ]
                 _demand = {lbl: sc for lbl, sc in rank_labels(_labels)}
+                _pillars, _usage = self._pillar_context()
                 _ranked = rank_candidates(
                     content_items,
                     cfg=self.config,
@@ -673,6 +674,8 @@ class PipelineOrchestrator:
                     day_key=self._ranking_day_key(),
                     channel_slug=self.canal,
                     route="original",
+                    pillars=_pillars,
+                    pillar_usage=_usage,
                 )
                 self._last_ranking = _ranked
                 content_items = [r.source_item for r in _ranked]
@@ -913,6 +916,24 @@ class PipelineOrchestrator:
             logger.debug("[%s] recent topics unavailable: %s", self.canal, exc)
             return []
 
+    def _pillar_context(self) -> tuple[list[dict], dict[str, float]]:
+        """Resolve pillars and their recent usage (fail-open)."""
+        try:
+            from config.content_pillars import pillar_usage, resolve_pillars
+            pillars = resolve_pillars(self.config)
+            if not pillars:
+                return [], {}
+            cid = self._get_channel_id()
+            records = (
+                self.db.get_recent_selection_signals(cid, limit=20)
+                if cid is not None and hasattr(self.db, "get_recent_selection_signals")
+                else []
+            )
+            return pillars, pillar_usage(records)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[%s] pillar context unavailable: %s", self.canal, exc)
+            return [], {}
+
     def _record_selection_provenance(self, result, route: str) -> None:
         """F3/F4: registra por qué se eligió el tema (auditable, fail-open)."""
         if not result or self.db is None:
@@ -984,7 +1005,19 @@ class PipelineOrchestrator:
                     pilot_decision as _pilot,
                 )
                 _score = _ed_score(topic, self.config)
-                signals_json = _json.dumps({"editorial": _score}, ensure_ascii=False)
+                _pillar_name, _pillar_score = "", 0.0
+                try:
+                    from config.content_pillars import match_pillar, resolve_pillars
+                    _pillar_name, _pillar_score = match_pillar(
+                        topic, resolve_pillars(self.config)
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                signals_json = _json.dumps({
+                    "editorial": _score,
+                    "pillar": _pillar_name,
+                    "pillar_score": _pillar_score,
+                }, ensure_ascii=False)
                 editorial_label = _ed_label(topic, self.config)
                 pilot_group = _pilot(self.canal, self._ranking_day_key(), self.config)
                 rank_reason = f"rank=n/a; editorial={_score:.2f}"
@@ -1176,6 +1209,7 @@ class PipelineOrchestrator:
             chosen = max(candidates, key=_effective)
             try:
                 from pipeline.topic_ranking import rank_candidates
+                _pillars, _usage = self._pillar_context()
                 self._last_ranking = rank_candidates(
                     [chosen],
                     cfg=self.config,
@@ -1183,6 +1217,8 @@ class PipelineOrchestrator:
                     day_key=self._ranking_day_key(),
                     channel_slug=self.canal,
                     route="viral",
+                    pillars=_pillars,
+                    pillar_usage=_usage,
                 )
             except Exception:  # noqa: BLE001
                 self._last_ranking = []
@@ -1479,6 +1515,7 @@ class PipelineOrchestrator:
             if not is_disabled(self.db, self.config):
                 _labels = [(ci.get("title") or ci.get("text") or "")[:120]
                            for ci in content_items]
+                _pillars, _usage = self._pillar_context()
                 _ranked = rank_candidates(
                     content_items,
                     cfg=self.config,
@@ -1487,6 +1524,8 @@ class PipelineOrchestrator:
                     day_key=self._ranking_day_key(),
                     channel_slug=self.canal,
                     route="viral_fallback",
+                    pillars=_pillars,
+                    pillar_usage=_usage,
                 )
                 self._last_ranking = _ranked
                 content_items = [r.source_item for r in _ranked]

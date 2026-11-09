@@ -91,15 +91,15 @@ canal4 Expediciones sin retorno, canal5 Anomalías Médicas). Datos de alcance
 
 | ID | Hallazgo | Evidencia | Cambio propuesto |
 |---|---|---|---|
-| P1-1 | **Claves inertes**: Insight AI proponía cambios que el pipeline no lee | `CONTENT_PILLARS` no se consume en generación; `script_end_hook` tampoco | **Parcial:** aplicar ahora devuelve 422 y exige `requires_code`; falta cablearlas al generador |
-| P1-2 | Pilares de contenido con dos esquemas distintos | canal2 usa `{pillar,pct,description}`; el resto `{name,ratio,desc}` | Unificar esquema y validarlo al aplicar |
+| P1-1 | **Claves inertes**: Insight AI proponía cambios que el pipeline no lee | `CONTENT_PILLARS` no se consumía; `script_end_hook` no tiene consumidor | **Implementado:** pilares cableados al ranking; `script_end_hook` retirado de la superficie |
+| P1-2 | Pilares con dos esquemas | canal2 usaba `{pillar,pct,description}` | **Implementado:** `config/content_pillars.py` normaliza ambos; script de migración |
 | P1-3 | Deduplicación ocultaba recomendaciones con valores distintos | Compara título + claves, no valores | **Implementado:** conflicto visible, no oculto |
 | P1-4 | Analítica etiquetada “30 días” sin filtro temporal | `get_channel_ctr_summary` agregaba todo el histórico | **Implementado:** ventana real, CTR ponderado, ceros como ausencia |
 | P1-5 | Insight AI solo ve 20 vídeos y 15 puntos de crecimiento | `channel_analyzer.py` LIMIT 20/15 | **Implementado:** agregados últimos 28 días por formato + errores del periodo |
-| P1-6 | Errores de pipeline sin periodo ni denominador | 17 errores `video` en canal3 en 28 días | Errores por periodo y por 100 ejecuciones |
-| P1-7 | Duración real fuera de objetivo | canal4 mediana 22,6 min vs objetivo 10–18 | **Parcial:** gate de outliers extremos; falta alerta de deriva |
-| P1-8 | Títulos en inglés en canal2 | “Dreamt the earthquake before it happened…” entre los más vistos recientes | Validación de idioma en título |
-| P1-9 | Fase `video` concentra fallos | 17 canal3, 8 canal4 en 28 días | Investigar causa antes de aumentar cadencia |
+| P1-6 | Errores sin periodo ni denominador | 17 errores `video` en canal3 en 28 días | **Implementado:** tasa por 100 ejecuciones por fase |
+| P1-7 | Duración real fuera de objetivo | canal4 mediana 22,6 min vs objetivo 10–18 | **Implementado:** gate de outliers + alerta `duration_drift` |
+| P1-8 | Títulos en inglés en canal2 | “Dreamt the earthquake before it happened…” | **Implementado:** guardia de idioma (warning; bloqueo opcional) |
+| P1-9 | Fase `video` concentra fallos | Errores de octubre; 0 en los últimos 7 días | **Implementado:** monitor de regresión 24h; concat estable desde 31-oct |
 | P1-10 | **canal2: largos sin distribución** | 47 subidos, 254 vistas; **1–17 impresiones por vídeo**, todos públicos | **Acción aplicada (2026-11-09):** cadencia de largos a **1/día** y generación a **1/día**; revisar el **2026-11-23**. Sin strikes ni eliminaciones; revisar Studio |
 
 ### P2 — Experimentos de crecimiento (requieren aprobación y plazo)
@@ -134,17 +134,17 @@ ventana de comparación, métrica principal, guardarraíl y criterio de reversi�
 | Prioridad | ID | Cambio | Estado |
 |---|---|---|---|
 | P0 | P0-1…P0-8 | Aplicación fiable, reparación y duración única | **Implementado en este cambio** |
-| P1 | P1-1 | Cablear o invalidar claves inertes | Parcial (rechazo 422) |
-| P1 | P1-2 | Unificar esquema de pilares | Pendiente |
+| P1 | P1-1 | Cablear o invalidar claves inertes | **Implementado** |
+| P1 | P1-2 | Unificar esquema de pilares | **Implementado** |
 | P1 | P1-3 | Dedup por valores | **Implementado** |
 | P1 | P1-4 | Ventana y CTR ponderado en analítica | **Implementado** |
 | P1 | P1-5 | Agregados completos para Insight AI | **Implementado** |
-| P1 | P1-6 | Errores por periodo | Pendiente |
-| P1 | P1-7 | Monitor de duración real | Parcial (gate de outliers) |
-| P1 | P1-8 | Validación de idioma de título | Pendiente |
-| P1 | P1-9 | Causa raíz de fallos de render | Pendiente |
+| P1 | P1-6 | Errores por periodo | **Implementado** |
+| P1 | P1-7 | Monitor de duración real | **Implementado** |
+| P1 | P1-8 | Validación de idioma de título | **Implementado (warning)** |
+| P1 | P1-9 | Causa raíz de fallos de render | **Monitor implementado; estable** |
 | P1 | P1-10 | Distribución de largos canal2 | Cadencia reducida a 1/día (revisar 2026-11-23) |
-| P2 | E1–E5 | Experimentos de crecimiento | Pendiente de aprobación y ejecución |
+| P2 | E1–E5 | Experimentos de crecimiento | Pre-registrados en `docs/experiments/`; ejecución pendiente de ventana |
 
 ---
 

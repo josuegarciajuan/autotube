@@ -474,6 +474,13 @@ def score_title(title: str, script: dict, config, keyword_plan=None) -> tuple[in
         penalties["all_caps"] = -5
     if _CLICKBAIT_SUFFIX_RE.search(text):
         penalties["clickbait_suffix"] = -3
+    # Language guard: avoid English titles on Spanish channels.
+    try:
+        from pipeline.title_language import is_title_language_ok
+        if text and not is_title_language_ok(text, config):
+            penalties["wrong_language"] = -8
+    except Exception:  # noqa: BLE001 — never break scoring
+        pass
 
     final = max(0, criteria_total + sum(penalties.values()))
     breakdown = dict(criteria)
@@ -660,6 +667,37 @@ class TitleEngine:
         )
         chosen = candidates[best_index]
         selected_title = chosen["title"]  # already rendered, complete, in budget
+
+        # Language safety net (blocking only when the operator enables it).
+        try:
+            from pipeline.title_language import is_title_language_ok
+            if (selected_title
+                    and not is_title_language_ok(selected_title, self.config)
+                    and bool(getattr(self.config, "TITLE_LANGUAGE_GUARD_BLOCK", False))):
+                localised = [
+                    c for c in candidates
+                    if is_title_language_ok(c["title"], self.config)
+                ]
+                if localised:
+                    localised.sort(key=lambda c: -c["rubric_score"])
+                    chosen = localised[0]
+                    selected_title = chosen["title"]
+                else:
+                    selected_title = deterministic_fallback_title(
+                        script, self.config, keyword_plan
+                    )
+                    chosen = {
+                        "title": selected_title,
+                        "rubric_score": 0,
+                        "rubric_breakdown": {},
+                        "source": "deterministic_language_fallback",
+                    }
+                rationale = (
+                    "Título sustituido por el guardia de idioma "
+                    "(se detectó inglés y el canal exige español)."
+                )
+        except Exception:  # noqa: BLE001
+            pass
 
         # Final safety net: never ship a banned/incomplete/over-budget title.
         hard_max = int(getattr(self.config, "TITLE_MAX_CHARS", 65) or 65)

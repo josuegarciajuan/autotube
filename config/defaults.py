@@ -932,6 +932,18 @@ THUMBNAIL_BADGE_CLICHES = [
 
 # ── Fase 1 packaging ──
 # El A/B real (3 variantes de miniatura, ganador por CTR) se activa POR CANAL
+# ── Guardia de idioma de títulos (nov 2026) ────────────────────────
+# Evita publicar títulos en inglés en canales en español. Primero en modo
+# warning; TITLE_LANGUAGE_GUARD_BLOCK=True lo convierte en bloqueante.
+TITLE_LANGUAGE_GUARD_ENABLED = True
+TITLE_LANGUAGE_GUARD_BLOCK = False
+TITLE_ALLOWED_LANGUAGES = ("es",)
+
+# ── Pilares de contenido ───────────────────────────────────────────
+# La señal de pilar se activa automáticamente si CONTENT_PILLARS existe.
+# PILLAR_OVERUSE_PENALTY documenta la penalización suave por defecto.
+PILLAR_OVERUSE_PENALTY = 0.15
+
 # vía `ENABLE_AB_TESTING` (definido abajo, en el bloque AB_*); el flag global
 # `config.settings.ENABLE_AB_TESTING` queda como fallback legacy.
 # Saneo determinista de títulos antes del truncado. Opt-in por canal.

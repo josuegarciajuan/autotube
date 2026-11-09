@@ -59,6 +59,28 @@ HEARTBEAT_INTERVAL = 15    # seconds between DB heartbeat updates
 
 # ── Config keys the LLM can propose changes for ──────────────────────
 
+def _phase_error_rows(rows) -> list[dict]:
+    """Pivot (phase, status, count) rows into per-phase error rates."""
+    pivot: dict[str, dict] = {}
+    for row in rows:
+        phase = row["phase"] or "unknown"
+        bucket = pivot.setdefault(phase, {"success": 0, "error": 0})
+        bucket[row["status"]] = bucket.get(row["status"], 0) + int(row["count"] or 0)
+    out = []
+    for phase, counts in sorted(pivot.items()):
+        runs = counts.get("success", 0) + counts.get("error", 0)
+        errors = counts.get("error", 0)
+        out.append({
+            "phase": phase,
+            "success": counts.get("success", 0),
+            "error": errors,
+            "runs": runs,
+            "error_rate_pct": round(errors / runs * 100, 1) if runs else 0.0,
+            "errors_per_100_runs": round(errors / runs * 100, 1) if runs else 0.0,
+        })
+    return out
+
+
 _CONFIG_KEYS = [
     # Duration / production
     "VIDEO_AVERAGE_DURATION_MIN", "VIDEO_DURATION_DISCREPANCY_MIN",
@@ -74,7 +96,7 @@ _CONFIG_KEYS = [
     "SEO_HASHTAGS", "NICHE_KEYWORDS_ENG",
     # Content / structure
     "CONTENT_PILLARS", "canal_tone", "canal_narrative_style",
-    "script_hook_rule", "script_end_hook", "script_emotional_arc",
+    "script_hook_rule", "script_emotional_arc",
     # Titles
     "title_formulas", "title_power_words",
     # Visual
@@ -416,6 +438,11 @@ def _aggregate_channel_data(db: ExtendedDatabase, channel_id: int,
             data["duration_policy"] = _duration_snapshot(config)
         except Exception:
             data["duration_policy"] = None
+        try:
+            from config.content_pillars import resolve_pillars
+            data["current_config"]["CONTENT_PILLARS"] = resolve_pillars(config)
+        except Exception:
+            pass
     except Exception:
         data["current_config"] = {}
         data["duration_policy"] = None
@@ -506,12 +533,15 @@ def _aggregate_channel_data(db: ExtendedDatabase, channel_id: int,
         rows = conn.execute("""
             SELECT phase, status, COUNT(*) as count
             FROM pipeline_log
-            WHERE canal = ? AND status = 'error'
+            WHERE canal = ? AND status IN ('success', 'error')
               AND created_at >= datetime('now', '-28 days')
             GROUP BY phase, status
         """, (slug,)).fetchall()
-        data["pipeline_errors_by_phase"] = [dict(r) for r in rows]
+        by_phase = _phase_error_rows(rows)
+        data["pipeline_errors_by_phase"] = by_phase
         data["pipeline_errors_window_days"] = 28
+        data["pipeline_runs_window"] = sum(r["runs"] for r in by_phase)
+        data["pipeline_errors_window"] = sum(r["error"] for r in by_phase)
 
         rows = conn.execute("""
             SELECT alert_type, severity, title, message, created_at

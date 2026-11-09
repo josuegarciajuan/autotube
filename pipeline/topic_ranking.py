@@ -54,6 +54,7 @@ class RankedTopic:
     editorial_label: str = ""
     pilot_group: str = ""
     reason: str = ""
+    pillar: str = ""
     source_item: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
@@ -64,6 +65,7 @@ class RankedTopic:
             "editorial_label": self.editorial_label,
             "pilot_group": self.pilot_group,
             "reason": self.reason,
+            "pillar": self.pillar,
         }
 
 
@@ -170,6 +172,8 @@ def rank_candidates(
     day_key: str = "",
     channel_slug: str = "",
     route: str = "",
+    pillars: list[dict] | None = None,
+    pillar_usage: dict[str, float] | None = None,
 ) -> list[RankedTopic]:
     """Ordena *items* (dicts de contenido) por score compuesto descendente.
 
@@ -181,6 +185,12 @@ def rank_candidates(
 
     try:
         weights = _weights(cfg)
+        pillars = list(pillars or [])
+        pillar_usage = dict(pillar_usage or {})
+        if pillars:
+            weights.setdefault("pillar", 0.10)
+        else:
+            weights.pop("pillar", None)
         policy = build_policy(cfg)
         demand_scores = demand_scores or {}
         recent_texts = list(recent_texts or [])
@@ -214,6 +224,18 @@ def rank_candidates(
             novelty, max_similarity = novelty_score(label, recent_texts)
             source = source_quality(item)
 
+            pillar_name, pillar_score = "", 0.0
+            pillar_pen = 0.0
+            if pillars:
+                try:
+                    from config.content_pillars import match_pillar, overuse_penalty
+                    pillar_name, pillar_score = match_pillar(label, pillars)
+                    pillar_pen = overuse_penalty(
+                        pillar_name, pillar_usage, pillars
+                    )
+                except Exception:  # noqa: BLE001 — fail-open
+                    pillar_name, pillar_score, pillar_pen = "", 0.0, 0.0
+
             signals = {
                 "demand": round(demand, 4),
                 "niche": round(niche, 4),
@@ -223,6 +245,8 @@ def rank_candidates(
                 "source": round(source, 4),
                 "similarity_max": max_similarity,
                 "tension": dominant_tension(label, cfg),
+                "pillar": pillar_name,
+                "pillar_score": round(pillar_score, 4),
             }
             composite = (
                 weights.get("demand", 0.0) * demand
@@ -231,6 +255,7 @@ def rank_candidates(
                 + weights.get("visual", 0.0) * visual
                 + weights.get("novelty", 0.0) * novelty
                 + weights.get("source", 0.0) * source
+                + weights.get("pillar", 0.0) * pillar_score
             ) / total_weight
 
             # Diversidad: no repetir el tipo de tensión dominante dentro de la
@@ -240,6 +265,8 @@ def rank_candidates(
             )
             if repeat:
                 composite -= repeat_penalty
+            if pillar_pen:
+                composite -= pillar_pen
             score = round(_clamp(composite), 4)
 
             reason_bits = [
@@ -254,6 +281,11 @@ def rank_candidates(
             ]
             if repeat:
                 reason_bits.append(f"repeticion=-{repeat_penalty:.2f}")
+            if pillar_name:
+                reason_bits.append(
+                    f"pilar={pillar_name}({pillar_score:.2f})"
+                    + (f"-{pillar_pen:.2f}" if pillar_pen else "")
+                )
             if route:
                 reason_bits.append(f"ruta={route}")
 
@@ -264,6 +296,7 @@ def rank_candidates(
                 editorial_label=editorial_label(label, cfg),
                 pilot_group=pilot_decision(channel_slug, day_key, cfg) if channel_slug else "",
                 reason="; ".join(reason_bits)[:500],
+                pillar=pillar_name,
                 source_item=item,
             ))
 
@@ -292,6 +325,8 @@ def pick_best(
     day_key: str = "",
     channel_slug: str = "",
     route: str = "",
+    pillars: list[dict] | None = None,
+    pillar_usage: dict[str, float] | None = None,
 ) -> RankedTopic | None:
     """Primer elemento del ranking (``None`` si no hay candidatos)."""
     ranked = rank_candidates(
@@ -302,6 +337,8 @@ def pick_best(
         day_key=day_key,
         channel_slug=channel_slug,
         route=route,
+        pillars=pillars,
+        pillar_usage=pillar_usage,
     )
     return ranked[0] if ranked else None
 

@@ -533,6 +533,34 @@ class VideoValidator:
                 )
             )
 
+        # ── 6b. Title language (Spanish channels) ────────────────
+        try:
+            from pipeline.title_language import is_title_language_ok
+            if updated_title and not is_title_language_ok(updated_title, self.config):
+                msg = (
+                    f"Title language is not allowed for this channel: "
+                    f"'{updated_title[:70]}'"
+                )
+                if bool(getattr(self.config, "TITLE_LANGUAGE_GUARD_BLOCK", False)):
+                    checks.append(
+                        ValidationCheck("title_language", False, msg, "blocking")
+                    )
+                    blocking.append(msg)
+                else:
+                    checks.append(
+                        ValidationCheck("title_language", False, msg, "warning")
+                    )
+                    warnings.append(msg)
+            elif updated_title:
+                checks.append(
+                    ValidationCheck(
+                        "title_language", True,
+                        "Title language allowed", "warning",
+                    )
+                )
+        except Exception:  # noqa: BLE001 — never break upload
+            pass
+
         # ── 7. Description present ────────────────────────────────
         desc = (updated_description or "").strip()
         if not desc:
