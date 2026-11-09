@@ -651,6 +651,9 @@ async def lifespan(app: FastAPI):
     # recolectadas; alimenta la directiva de los prompts de guion.
     retention_feedback_task = _supervised_loop("retention_feedback", _retention_feedback_loop)
 
+    # ── Monitores de calidad (0 cuota): deriva de duración + regresión video ──
+    quality_monitors_task = _supervised_loop("quality_monitors", _quality_monitors_loop)
+
     # ── Red de seguridad del marcado IA (sep 2026) ──
     # Reintenta marcar subidas recientes sin marcar cada 30 min (0 cuota). Cubre
     # el caso en que el hilo daemon post-subida falló; si la sesión de YT Studio
@@ -1070,6 +1073,25 @@ async def _retention_feedback_loop():
         except Exception as exc:  # noqa: BLE001
             logger.exception("Retention feedback loop failed: %s", exc)
         await asyncio.sleep(86400)
+
+
+async def _quality_monitors_loop():
+    """Duration-drift and video-phase regression monitors (0 cuota, 6h)."""
+    import asyncio, logging
+    logger = logging.getLogger("autotube.quality_monitors")
+    await asyncio.sleep(300)
+    while True:
+        try:
+            from api.services.lifecycle_monitor import touch_task_heartbeat
+            from api.services.quality_monitors import run_quality_monitors
+            from database.db_extended import ExtendedDatabase
+            touch_task_heartbeat("quality_monitors")
+            db = ExtendedDatabase()
+            result = await asyncio.to_thread(run_quality_monitors, db)
+            logger.debug("Quality monitors: %s", result)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Quality monitors loop failed: %s", exc)
+        await asyncio.sleep(21600)
 
 
 async def _yt_state_reconcile_loop():

@@ -2317,28 +2317,37 @@ def run_job(
                     )
                     raise  # Fatal — better to crash than lose the YouTube ID
 
-                # ── A/B Testing: create initial test record ──────────
+                # ── A/B Testing: bind the existing test row ──────────
+                # The row is created during generation (yt_video_id unknown).
+                # The upload may run in a different worker/process where
+                # ``ab_test_variant_paths`` is empty, so the binding MUST be
+                # unconditional: otherwise every test stays yt_video_id=NULL
+                # and expires as "insufficient_data" (bug observed nov 2026).
+                title_v1 = (
+                    metadata.get("selected_title") if metadata else
+                    (video_data.get("titulo", titulo) if video_data else titulo)
+                )
                 if ab_test_variant_paths:
                     try:
-                        title_v1 = (
-                            metadata.get("selected_title") if metadata else
-                            (video_data.get("titulo", titulo) if video_data else titulo)
-                        )
-                        # F6: idempotente — la fila puede existir ya desde la
-                        # generación; ahora se fija el yt_video_id.
                         _ensure_ab_row(db, video_id, channel_id, title_v1,
                                        ab_test_variant_paths, ab_test_variant_strategies)
-                        with db._connect() as conn:
-                            conn.execute(
-                                "UPDATE video_ab_tests SET yt_video_id=? "
-                                "WHERE video_id=? AND (yt_video_id IS NULL OR yt_video_id='')",
-                                (yt_video_id, video_id),
-                            )
-                            conn.commit()
-                        logger.info("[AB] A/B test record ready for video %s (%d variants)",
-                                    video_id, len(ab_test_variant_paths))
                     except Exception as ab_record_exc:
                         logger.warning("[AB] Failed to create A/B test record: %s", ab_record_exc)
+                try:
+                    with db._connect() as conn:
+                        conn.execute(
+                            "UPDATE video_ab_tests SET yt_video_id=?, "
+                            "updated_at=CURRENT_TIMESTAMP "
+                            "WHERE video_id=? AND (yt_video_id IS NULL OR yt_video_id='')",
+                            (yt_video_id, video_id),
+                        )
+                        conn.commit()
+                    if ab_test_variant_paths:
+                        logger.info("[AB] A/B test record ready for video %s (%d variants)",
+                                    video_id, len(ab_test_variant_paths))
+                except Exception as ab_bind_exc:
+                    logger.warning("[AB] Failed to bind yt_video_id for video %s: %s",
+                                   video_id, ab_bind_exc)
 
                 # ── Cross-platform video publishing (Facebook, Rumble, TikTok) ──
                 # Uploads the same video file to other monetizable platforms.

@@ -950,35 +950,35 @@ COMMUNITY_TAB_PLAN = {
 
 CONTENT_PILLARS = [
     {
-        "pillar": "Milagros Modernos",
-        "pct": 30,
-        "description": (
+        "name": "Milagros Modernos",
+        "ratio": 30,
+        "desc": (
             "Historias reales de milagros documentados en los últimos 100 años. "
             "Curaciones inexplicables, intervenciones divinas, eventos "
             "imposibles con evidencia médica y testimonial."
         ),
     },
     {
-        "pillar": "Casualidades Imposibles",
-        "pct": 30,
-        "description": (
+        "name": "Casualidades Imposibles",
+        "ratio": 30,
+        "desc": (
             "Coincidencias que desafían toda probabilidad estadística. "
             "Historias de personas que estuvieron en el lugar y momento "
             "exactos para que ocurriera algo extraordinario."
         ),
     },
     {
-        "pillar": "Fenómenos que la Ciencia No Explica",
-        "pct": 25,
-        "description": (
+        "name": "Fenómenos que la Ciencia No Explica",
+        "ratio": 25,
+        "desc": (
             "Fenómenos paranormales, científicos o naturales documentados "
             "que la comunidad científica aún no ha logrado explicar."
         ),
     },
     {
-        "pillar": "Predicciones y Premoniciones",
-        "pct": 15,
-        "description": (
+        "name": "Predicciones y Premoniciones",
+        "ratio": 15,
+        "desc": (
             "Personas que predijeron eventos con precisión asombrosa. "
             "Sueños premonitorios, profecías verificadas, visiones que "
             "se hicieron realidad."

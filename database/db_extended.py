@@ -7062,6 +7062,57 @@ class ExtendedDatabase(Database):
                 conn.rollback()
                 return None
     
+    def create_alert(self, *, entity_type: str = "system", entity_id: int | None = None,
+                     channel_id: int | None = None, alert_type: str,
+                     severity: str = "warning", title: str, message: str = "",
+                     metadata: dict | None = None) -> int | None:
+        """Create (or refresh) an active alert; idempotent per entity/type."""
+        import json
+        with self._connect() as conn:
+            existing = conn.execute(
+                """SELECT id FROM pipeline_alerts
+                   WHERE entity_type = ? AND entity_id IS ?
+                     AND alert_type = ? AND resolved = 0""",
+                (entity_type, entity_id, alert_type),
+            ).fetchone()
+            payload = json.dumps(metadata or {}, ensure_ascii=False)
+            if existing:
+                conn.execute(
+                    "UPDATE pipeline_alerts SET message=?, metadata_json=?, severity=? WHERE id=?",
+                    (message, payload, severity, existing["id"]),
+                )
+                conn.commit()
+                return existing["id"]
+            cur = conn.execute(
+                """INSERT INTO pipeline_alerts
+                   (entity_type, entity_id, channel_id, alert_type, severity,
+                    title, message, metadata_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (entity_type, entity_id, channel_id, alert_type, severity,
+                 title, message, payload),
+            )
+            conn.commit()
+            return cur.lastrowid
+
+    def resolve_alerts(self, *, alert_type: str,
+                       channel_id: int | None = None) -> int:
+        """Resolve active alerts of a type (optionally scoped to a channel)."""
+        with self._connect() as conn:
+            if channel_id is None:
+                cur = conn.execute(
+                    "UPDATE pipeline_alerts SET resolved=1, resolved_at=CURRENT_TIMESTAMP "
+                    "WHERE alert_type=? AND resolved=0",
+                    (alert_type,),
+                )
+            else:
+                cur = conn.execute(
+                    "UPDATE pipeline_alerts SET resolved=1, resolved_at=CURRENT_TIMESTAMP "
+                    "WHERE alert_type=? AND channel_id=? AND resolved=0",
+                    (alert_type, channel_id),
+                )
+            conn.commit()
+            return cur.rowcount
+
     def get_all_channels_latest_stats(self) -> list[dict]:
         """Get the most recent stats snapshot for every channel (one row per channel)."""
         with self._connect() as conn:
@@ -10340,6 +10391,22 @@ class ExtendedDatabase(Database):
         except Exception as exc:  # noqa: BLE001
             logger.debug("record_selection_provenance failed: %s", exc)
             return False
+
+    def get_recent_selection_signals(self, channel_id: int,
+                                     limit: int = 20) -> list[dict]:
+        """Recent provenance rows (signals_json) for pillar-usage tracking."""
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """SELECT signals_json FROM content_selection_provenance
+                       WHERE channel_id = ?
+                       ORDER BY id DESC LIMIT ?""",
+                    (channel_id, int(limit)),
+                ).fetchall()
+            return [{"signals_json": r[0]} for r in rows]
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("get_recent_selection_signals failed: %s", exc)
+            return []
 
     def get_recent_topic_titles(self, channel_id: int, limit: int = 20) -> list[str]:
         """Títulos de los últimos vídeos del canal (novedad/diversidad, F4).
