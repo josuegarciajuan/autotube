@@ -197,6 +197,16 @@ def recover_video_thumbnails(videos: list[tuple], oauth_fallback_slug: Optional[
             logger.warning("OAuth fallback requested but creds invalid for %s", oauth_fallback_slug)
 
     for video_id, yt_video_id, slug, thumb_path in videos:
+        # Canal gestionado: su CDN/API se consulta por el gateway, no aquí.
+        try:
+            from api.services.egress_client import is_egress_managed
+            if is_egress_managed(slug):
+                logger.info("  [skip] %s gestionado — usar el gateway", slug)
+                results["skipped"] += 1
+                continue
+        except Exception:
+            pass
+
         # Determine save path
         slug_dir = THUMB_DIR / slug
         slug_dir.mkdir(parents=True, exist_ok=True)

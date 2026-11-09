@@ -262,6 +262,13 @@ def run_reupload(report_path: Path = None, channel_filter: str = None,
         channels = [c for c in channels if c == channel_filter]
 
     for slug in channels:
+        try:
+            from api.services.egress_client import is_egress_managed
+            if is_egress_managed(slug):
+                logger.info("[%s] Skipping — canal gestionado (usar gateway)", slug)
+                continue
+        except Exception:
+            pass
         ch_data = report["channels"][slug]
         if ch_data.get("error"):
             logger.info("[%s] Skipping — auth error", slug)
