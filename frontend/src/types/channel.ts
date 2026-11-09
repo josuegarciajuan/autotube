@@ -491,6 +491,9 @@ export interface InsightRecommendation {
   cross_channel_similar?: boolean
   cross_channel_name?: string
   similarity_to_previous?: number
+  conflict_with?: string
+  conflict_keys?: string[]
+  conflict_title?: string
 }
 
 export interface ValidationResult {

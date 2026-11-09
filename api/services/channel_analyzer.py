@@ -507,9 +507,11 @@ def _aggregate_channel_data(db: ExtendedDatabase, channel_id: int,
             SELECT phase, status, COUNT(*) as count
             FROM pipeline_log
             WHERE canal = ? AND status = 'error'
+              AND created_at >= datetime('now', '-28 days')
             GROUP BY phase, status
         """, (slug,)).fetchall()
         data["pipeline_errors_by_phase"] = [dict(r) for r in rows]
+        data["pipeline_errors_window_days"] = 28
 
         rows = conn.execute("""
             SELECT alert_type, severity, title, message, created_at
@@ -573,6 +575,88 @@ def _aggregate_channel_data(db: ExtendedDatabase, channel_id: int,
         }
     except Exception:
         data["ctr_retention_summary"] = None
+
+    # ── Last 28 days, split by format (long vs short) ──────────
+    # Insight AI previously saw only 20 individual videos and all-time
+    # aggregates. This gives it a complete, format-aware recent window.
+    try:
+        with db._connect() as conn:
+            end_row = conn.execute(
+                "SELECT MAX(date) d FROM video_reach_daily WHERE channel_id = ?",
+                (channel_id,),
+            ).fetchone()
+            end_date = end_row["d"] if end_row else None
+            if end_date:
+                window = conn.execute(
+                    """SELECT COALESCE(SUM(views), 0) views,
+                              COALESCE(SUM(watch_minutes), 0) watch_minutes,
+                              COALESCE(SUM(subs_gained), 0) subs_gained,
+                              COALESCE(SUM(impressions), 0) impressions,
+                              COALESCE(SUM(CASE WHEN impressions > 0
+                                                THEN impressions * impressions_ctr
+                                                ELSE 0 END), 0) ctr_num
+                       FROM video_reach_daily
+                       WHERE channel_id = ? AND date >= date(?, '-27 days')""",
+                    (channel_id, end_date),
+                ).fetchone()
+                split_rows = conn.execute(
+                    """SELECT CASE
+                                WHEN r.yt_video_id IN (
+                                    SELECT youtube_id FROM shorts WHERE channel_id = :cid
+                                ) THEN 'short'
+                                WHEN r.yt_video_id IN (
+                                    SELECT yt_video_id FROM videos WHERE channel_id = :cid
+                                ) THEN 'long'
+                                ELSE 'other' END fmt,
+                              COUNT(DISTINCT r.yt_video_id) videos,
+                              SUM(r.views) views,
+                              SUM(r.watch_minutes) watch_minutes,
+                              SUM(r.subs_gained) subs_gained,
+                              SUM(r.impressions) impressions,
+                              SUM(CASE WHEN r.impressions > 0
+                                       THEN r.impressions * r.impressions_ctr
+                                       ELSE 0 END) ctr_num
+                       FROM video_reach_daily r
+                       WHERE r.channel_id = :cid
+                         AND r.date >= date(:end, '-27 days')
+                       GROUP BY fmt""",
+                    {"cid": channel_id, "end": end_date},
+                ).fetchall()
+                fmt_split = {}
+                for r in split_rows:
+                    imp = r["impressions"] or 0
+                    fmt_split[r["fmt"]] = {
+                        "videos": r["videos"],
+                        "views": r["views"] or 0,
+                        "watch_minutes": round(r["watch_minutes"] or 0, 1),
+                        "subs_gained": r["subs_gained"] or 0,
+                        "impressions": imp,
+                        "weighted_ctr_pct": (
+                            round((r["ctr_num"] or 0) / imp, 2)
+                            if imp else None
+                        ),
+                    }
+                imp = window["impressions"] or 0
+                data["last_28d"] = {
+                    "window_end": end_date,
+                    "views": window["views"],
+                    "watch_minutes": round(window["watch_minutes"], 1),
+                    "subs_gained": window["subs_gained"],
+                    "impressions": imp,
+                    "weighted_ctr_pct": (
+                        round((window["ctr_num"] or 0) / imp, 2)
+                        if imp else None
+                    ),
+                    "format_split": fmt_split,
+                    "note": (
+                        "CTR de shorts y largos no es comparable; usar "
+                        "weighted_ctr_pct reportado, nunca vistas/impresiones."
+                    ),
+                }
+            else:
+                data["last_28d"] = None
+    except Exception:
+        data["last_28d"] = None
 
     try:
         traffic = db.get_channel_traffic_summary(channel_id)
@@ -822,6 +906,25 @@ def _config_key_overlap(rec_a: dict, rec_b: dict) -> float:
     return len(intersection) / len(union) if union else 0.0
 
 
+def _json_equal(a, b) -> bool:
+    if a == b:
+        return True
+    try:
+        return json.dumps(a, sort_keys=True, ensure_ascii=False) == json.dumps(
+            b, sort_keys=True, ensure_ascii=False
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _conflicting_config_values(rec_a: dict, rec_b: dict) -> list[str]:
+    """Keys present in both recs whose proposed values disagree."""
+    a = _as_dict(rec_a.get("config_changes"))
+    b = _as_dict(rec_b.get("config_changes"))
+    overlap = set(a) & set(b)
+    return sorted(k for k in overlap if not _json_equal(a.get(k), b.get(k)))
+
+
 def _compute_rec_similarity(rec_a: dict, rec_b: dict) -> float:
     """Compute overall similarity score between two recommendations.
 
@@ -866,21 +969,36 @@ def _dedup_recommendations(
             sim = _compute_rec_similarity(new_rec, prev_rec)
             if sim >= similarity_threshold:
                 prev_id = prev_rec.get("id", "unknown")
-                logger.info(
-                    "Dedup: new rec '%s' is similar (%.2f) to prior rec '%s' (%s)",
-                    new_rec.get("title", "")[:60], sim,
-                    prev_rec.get("title", "")[:60], prev_id,
-                )
-                report[rec_id] = {
-                    "duplicate_of": prev_id,
-                    "similarity_score": round(sim, 2),
-                    "prior_title": prev_rec.get("title", "")[:100],
-                    "prior_analysis_date": prev_rec.get("analysis_date", ""),
-                }
+                conflicting_keys = _conflicting_config_values(new_rec, prev_rec)
+                if conflicting_keys:
+                    # Same topic and same keys, but different proposed values:
+                    # hiding this would bury a real contradiction.
+                    logger.info(
+                        "Dedup: new rec '%s' CONFLICTS with prior rec '%s' on %s",
+                        new_rec.get("title", "")[:60], prev_id, conflicting_keys,
+                    )
+                    report[rec_id] = {
+                        "conflict_with": prev_id,
+                        "conflict_keys": conflicting_keys,
+                        "similarity_score": round(sim, 2),
+                        "conflict_title": prev_rec.get("title", "")[:100],
+                    }
+                else:
+                    logger.info(
+                        "Dedup: new rec '%s' is similar (%.2f) to prior rec '%s' (%s)",
+                        new_rec.get("title", "")[:60], sim,
+                        prev_rec.get("title", "")[:60], prev_id,
+                    )
+                    report[rec_id] = {
+                        "duplicate_of": prev_id,
+                        "similarity_score": round(sim, 2),
+                        "prior_title": prev_rec.get("title", "")[:100],
+                        "prior_analysis_date": prev_rec.get("analysis_date", ""),
+                    }
                 break  # Stop at first match
 
         if rec_id in report:
-            continue  # Skip cross-channel check if already intra-channel duplicate
+            continue  # Skip cross-channel check if already duplicate/conflict
 
         # ── Check against cross-channel recommendations ──
         for cc_rec in cross_channel_recs:
@@ -912,6 +1030,13 @@ def _dedup_recommendations(
             new_rec["duplicate_of"] = report[rec_id]["duplicate_of"]
             new_rec["similarity_score"] = report[rec_id]["similarity_score"]
             filtered.append(new_rec)  # Keep but mark as hidden
+        elif rec_id in report and "conflict_with" in report[rec_id]:
+            # Same keys, different values — keep visible and flag the conflict.
+            new_rec["conflict_with"] = report[rec_id]["conflict_with"]
+            new_rec["conflict_keys"] = report[rec_id]["conflict_keys"]
+            new_rec["conflict_title"] = report[rec_id].get("conflict_title", "")
+            new_rec["similarity_score"] = report[rec_id]["similarity_score"]
+            filtered.append(new_rec)
         else:
             # Cross-channel similar — include but flag
             if rec_id in report:

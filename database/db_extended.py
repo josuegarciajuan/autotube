@@ -7288,131 +7288,189 @@ class ExtendedDatabase(Database):
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_channel_ctr_summary(self, channel_id: int) -> dict:
-        """Get aggregated CTR and retention metrics for a channel.
+    def get_channel_ctr_summary(self, channel_id: int, days: int = 30) -> dict:
+        """Windowed CTR and retention summary from the Reporting API.
 
-        Returns avg_ctr, avg_retention, total_impressions across all videos
-        with analytics data from video_analytics_detailed.
+        Uses ``video_reach_daily`` (per-day reach) instead of all-time
+        aggregates. CTR is weighted by impressions and zero-impression rows
+        are treated as absent data, not as 0% CTR. The window ends on the
+        latest day available for the channel, so it stays a complete
+        ``days``-day window even if collection lags.
         """
+        offset = f"-{max(1, int(days)) - 1} days"
         with self._connect() as conn:
-            # Average CTR
-            ctr_row = conn.execute(
-                """SELECT AVG(vad.metric_value) as avg_ctr, COUNT(*) as cnt
-                   FROM video_analytics_detailed vad
-                   JOIN videos v ON v.id = vad.video_id
-                   WHERE v.channel_id = ? AND vad.report_type = 'ctr'
-                     AND vad.metric_value > 0""",
+            bounds = conn.execute(
+                "SELECT MAX(date) AS end FROM video_reach_daily WHERE channel_id = ?",
                 (channel_id,),
             ).fetchone()
-
-            # Average retention
-            ret_row = conn.execute(
-                """SELECT AVG(vad.metric_value) as avg_ret, COUNT(*) as cnt
-                   FROM video_analytics_detailed vad
-                   JOIN videos v ON v.id = vad.video_id
-                   WHERE v.channel_id = ? AND vad.report_type = 'retention_pct'
-                     AND vad.metric_value > 0""",
-                (channel_id,),
+            end_date = bounds["end"] if bounds else None
+            if not end_date:
+                return {
+                    "channel_id": channel_id,
+                    "window_days": days,
+                    "window_start": None,
+                    "window_end": None,
+                    "avg_ctr_30d": 0,
+                    "avg_retention_30d": 0,
+                    "total_impressions_30d": 0,
+                    "ctr_video_count": 0,
+                    "retention_video_count": 0,
+                    "videos": [],
+                }
+            start_row = conn.execute(
+                "SELECT date(?, ?) AS start", (end_date, offset)
             ).fetchone()
-
-            # Total impressions
-            imp_row = conn.execute(
-                """SELECT COALESCE(SUM(vad.metric_value), 0) as total
-                   FROM video_analytics_detailed vad
-                   JOIN videos v ON v.id = vad.video_id
-                   WHERE v.channel_id = ? AND vad.report_type = 'impressions'""",
-                (channel_id,),
+            window_start = start_row["start"] if start_row else None
+            agg = conn.execute(
+                """SELECT MIN(date) data_start, MAX(date) end,
+                          COALESCE(SUM(impressions), 0) impressions,
+                          COALESCE(SUM(views), 0) views,
+                          COALESCE(SUM(CASE WHEN impressions > 0
+                                            THEN impressions * impressions_ctr
+                                            ELSE 0 END), 0) ctr_num,
+                          COUNT(DISTINCT CASE WHEN impressions > 0
+                                              THEN yt_video_id END) ctr_videos
+                   FROM video_reach_daily
+                   WHERE channel_id = ? AND date >= date(?, ?)""",
+                (channel_id, end_date, offset),
             ).fetchone()
-
-            # Per-video CTR + retention
             video_rows = conn.execute(
-                """SELECT v.id, v.titulo_final, v.yt_video_id,
-                          MAX(CASE WHEN vad.report_type = 'ctr' THEN vad.metric_value END) as ctr,
-                          MAX(CASE WHEN vad.report_type = 'retention_pct' THEN vad.metric_value END) as retention,
-                          MAX(CASE WHEN vad.report_type = 'impressions' THEN vad.metric_value END) as impressions
-                   FROM videos v
-                   LEFT JOIN video_analytics_detailed vad ON v.id = vad.video_id
-                   WHERE v.channel_id = ? AND v.yt_video_id IS NOT NULL
-                   GROUP BY v.id, v.titulo_final, v.yt_video_id
-                   HAVING ctr IS NOT NULL OR retention IS NOT NULL OR impressions IS NOT NULL
-                   ORDER BY COALESCE(impressions, 0) DESC
+                """SELECT r.yt_video_id,
+                          COALESCE(MAX(v.titulo_final), MAX(s.title), r.yt_video_id) title,
+                          SUM(r.impressions) impressions,
+                          SUM(r.views) views,
+                          SUM(CASE WHEN r.impressions > 0
+                                   THEN r.impressions * r.impressions_ctr ELSE 0 END) ctr_num
+                   FROM video_reach_daily r
+                   LEFT JOIN videos v
+                     ON v.channel_id = r.channel_id AND v.yt_video_id = r.yt_video_id
+                   LEFT JOIN shorts s
+                     ON s.channel_id = r.channel_id AND s.youtube_id = r.yt_video_id
+                   WHERE r.channel_id = ? AND r.date >= date(?, ?)
+                   GROUP BY r.yt_video_id
+                   HAVING impressions > 0
+                   ORDER BY impressions DESC
                    LIMIT 50""",
+                (channel_id, end_date, offset),
+            ).fetchall()
+            # Retention is NOT taken from video_reach_daily.retention_pct:
+            # that column stores values well above 100 (max 11.862), so it is
+            # not a percentage. Use the latest proper retention snapshot from
+            # video_stats_history (0-100), weighted by views.
+            ret_rows = conn.execute(
+                """WITH ranked AS (
+                       SELECT video_id, retention_pct, views,
+                              ROW_NUMBER() OVER (
+                                  PARTITION BY video_id
+                                  ORDER BY fetched_at DESC, id DESC
+                              ) rn
+                       FROM video_stats_history
+                       WHERE retention_pct > 0 AND retention_pct <= 100
+                   )
+                   SELECT v.yt_video_id, r.retention_pct, r.views
+                   FROM videos v
+                   JOIN ranked r ON r.video_id = v.id AND r.rn = 1
+                   WHERE v.channel_id = ?""",
                 (channel_id,),
             ).fetchall()
 
+        impressions = agg["impressions"] or 0
+        ret_den = sum((r["views"] or 0) for r in ret_rows)
+        ret_num = sum((r["retention_pct"] or 0) * (r["views"] or 0) for r in ret_rows)
+        retention_by_yt = {
+            r["yt_video_id"]: round(r["retention_pct"] or 0, 2) for r in ret_rows
+        }
         return {
             "channel_id": channel_id,
-            "avg_ctr_30d": round(ctr_row["avg_ctr"] or 0, 2),
-            "avg_retention_30d": round(ret_row["avg_ret"] or 0, 2),
-            "total_impressions_30d": int(imp_row["total"] or 0),
-            "ctr_video_count": ctr_row["cnt"] or 0,
-            "retention_video_count": ret_row["cnt"] or 0,
+            "window_days": days,
+            "window_start": window_start,
+            "data_start": agg["data_start"],
+            "window_end": agg["end"],
+            "avg_ctr_30d": (
+                round((agg["ctr_num"] or 0) / impressions, 2)
+                if impressions else 0
+            ),
+            "avg_retention_30d": (
+                round(ret_num / ret_den, 2) if ret_den else 0
+            ),
+            "retention_source": "latest_video_stats_snapshot",
+            "total_impressions_30d": int(impressions),
+            "ctr_video_count": agg["ctr_videos"] or 0,
+            "retention_video_count": len(ret_rows),
             "videos": [
                 {
-                    "id": vr["id"],
-                    "title": vr["titulo_final"],
-                    "ctr": round(vr["ctr"] or 0, 2),
-                    "retention": round(vr["retention"] or 0, 2),
+                    "id": vr["yt_video_id"],
+                    "title": vr["title"],
+                    "ctr": (
+                        round((vr["ctr_num"] or 0) / vr["impressions"] * 100, 2)
+                        if vr["impressions"] else 0
+                    ),
+                    "retention": retention_by_yt.get(vr["yt_video_id"], 0),
                     "impressions": int(vr["impressions"] or 0),
+                    "views": int(vr["views"] or 0),
                 }
                 for vr in video_rows
-            ] if video_rows else [],
+            ],
         }
 
-    def get_all_channels_ctr_summary(self) -> dict:
-        """Batch CTR+retention summary for ALL channels in a single query.
-        
-        Avoids N+1 per-channel queries when the dashboard loads.
-        Returns dict mapping channel_id → { avg_ctr_30d, avg_retention_30d, total_impressions_30d }.
-        """
+    def get_all_channels_ctr_summary(self, days: int = 30) -> dict:
+        """Batch windowed CTR+retention summary for all channels."""
+        offset = f"-{max(1, int(days)) - 1} days"
         with self._connect() as conn:
-            # Batch CTR per channel
-            ctr_rows = conn.execute(
-                """SELECT v.channel_id,
-                          AVG(vad.metric_value) as avg_ctr, COUNT(*) as cnt
-                   FROM video_analytics_detailed vad
-                   JOIN videos v ON v.id = vad.video_id
-                   WHERE vad.report_type = 'ctr' AND vad.metric_value > 0
-                   GROUP BY v.channel_id"""
+            rows = conn.execute(
+                """WITH bounds AS (
+                       SELECT channel_id, MAX(date) end_date
+                       FROM video_reach_daily GROUP BY channel_id
+                   )
+                   SELECT r.channel_id,
+                          SUM(r.impressions) impressions,
+                          SUM(CASE WHEN r.impressions > 0
+                                   THEN r.impressions * r.impressions_ctr ELSE 0 END) ctr_num,
+                          COUNT(DISTINCT CASE WHEN r.impressions > 0
+                                              THEN r.yt_video_id END) ctr_videos
+                   FROM video_reach_daily r
+                   JOIN bounds b ON b.channel_id = r.channel_id
+                   WHERE r.date >= date(b.end_date, ?)
+                   GROUP BY r.channel_id""",
+                (offset,),
             ).fetchall()
-
-            # Batch retention per channel
             ret_rows = conn.execute(
-                """SELECT v.channel_id,
-                          AVG(vad.metric_value) as avg_ret, COUNT(*) as cnt
-                   FROM video_analytics_detailed vad
-                   JOIN videos v ON v.id = vad.video_id
-                   WHERE vad.report_type = 'retention_pct' AND vad.metric_value > 0
+                """WITH ranked AS (
+                       SELECT video_id, retention_pct, views,
+                              ROW_NUMBER() OVER (
+                                  PARTITION BY video_id
+                                  ORDER BY fetched_at DESC, id DESC
+                              ) rn
+                       FROM video_stats_history
+                       WHERE retention_pct > 0 AND retention_pct <= 100
+                   )
+                   SELECT v.channel_id,
+                          SUM(r.retention_pct * r.views) ret_num,
+                          SUM(r.views) ret_den,
+                          COUNT(*) ret_videos
+                   FROM videos v
+                   JOIN ranked r ON r.video_id = v.id AND r.rn = 1
                    GROUP BY v.channel_id"""
             ).fetchall()
-
-            # Batch impressions per channel
-            imp_rows = conn.execute(
-                """SELECT v.channel_id,
-                          COALESCE(SUM(vad.metric_value), 0) as total
-                   FROM video_analytics_detailed vad
-                   JOIN videos v ON v.id = vad.video_id
-                   WHERE vad.report_type = 'impressions'
-                   GROUP BY v.channel_id"""
-            ).fetchall()
+        ret_map = {r["channel_id"]: r for r in ret_rows}
 
         result = {}
-        ctr_map = {r["channel_id"]: r for r in ctr_rows}
-        ret_map = {r["channel_id"]: r for r in ret_rows}
-        imp_map = {r["channel_id"]: r for r in imp_rows}
-
-        # Collect all channel_ids
-        all_ids = set(ctr_map.keys()) | set(ret_map.keys()) | set(imp_map.keys())
-        for ch_id in all_ids:
-            ctr_r = ctr_map.get(ch_id)
-            ret_r = ret_map.get(ch_id)
-            imp_r = imp_map.get(ch_id)
-            result[ch_id] = {
-                "avg_ctr_30d": round(ctr_r["avg_ctr"] or 0, 2) if ctr_r else 0,
-                "avg_retention_30d": round(ret_r["avg_ret"] or 0, 2) if ret_r else 0,
-                "total_impressions_30d": int(imp_r["total"] or 0) if imp_r else 0,
-                "ctr_video_count": ctr_r["cnt"] if ctr_r else 0,
-                "retention_video_count": ret_r["cnt"] if ret_r else 0,
+        for r in rows:
+            impressions = r["impressions"] or 0
+            ret = ret_map.get(r["channel_id"])
+            ret_den = (ret["ret_den"] or 0) if ret else 0
+            result[r["channel_id"]] = {
+                "window_days": days,
+                "avg_ctr_30d": (
+                    round((r["ctr_num"] or 0) / impressions, 2)
+                    if impressions else 0
+                ),
+                "avg_retention_30d": (
+                    round((ret["ret_num"] or 0) / ret_den, 2) if ret_den else 0
+                ),
+                "total_impressions_30d": int(impressions),
+                "ctr_video_count": r["ctr_videos"] or 0,
+                "retention_video_count": (ret["ret_videos"] or 0) if ret else 0,
             }
         return result
 
@@ -7721,7 +7779,7 @@ class ExtendedDatabase(Database):
             imp = int(r["impressions"] or 0)
             clk = float(r["clicks"] or 0)
             bucket["impressions"].append(imp)
-            bucket["ctr"].append(round(clk / imp * 100, 2) if imp else 0)
+            bucket["ctr"].append(round(clk / imp, 2) if imp else 0)
             bucket["views"].append(int(r["views"] or 0))
         return out
 
