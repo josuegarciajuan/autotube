@@ -86,11 +86,22 @@ def main() -> int:
                      AND (scheduled_upload_at IS NULL
                           OR scheduled_upload_at >= datetime('now'))"""
             ).fetchone()[0]
+            # Backlog ACCIONABLE: solo lo que vence en las próximas 48 h. El
+            # total incluye vídeos programados a días vista (buffer normal de
+            # la fábrica) y disparaba un warning permanente aunque no hubiera
+            # nada atascado (nov 2026: 30 awaiting, solo 2 en ventana).
+            actionable_backlog = conn.execute(
+                """SELECT COUNT(*) FROM videos
+                   WHERE status='awaiting_upload'
+                     AND (target_public_at IS NULL
+                          OR datetime(target_public_at) <= datetime('now','+48 hours'))"""
+            ).fetchone()[0]
         _line(f"[2] Backlog: awaiting_upload={backlog} (de ellas {pending_due} pendientes de subir hoy), "
               f"generating/uploading={generating}, ready={ready}")
     except Exception as e:
         backlog = 0
         pending_due = 0
+        actionable_backlog = 0
         _line(f"[2] ERROR: {e}")
 
     # ── 3. Uploads fallidos en 24h ─────────────────────────────
@@ -252,10 +263,11 @@ def main() -> int:
                    "Subidas pendientes para hoy",
                    f"0 subidas aún hoy, pero {pending_due} vídeos de {backlog} en "
                    f"awaiting_upload están programados para más tarde hoy")
-        elif backlog >= 15:
+        elif actionable_backlog >= 15:
             _alert("upload_backlog", "warning",
                    "Backlog de subidas alto",
-                   f"{backlog} vídeos esperando subir")
+                   f"{backlog} vídeos en awaiting_upload, "
+                   f"{actionable_backlog} vencen en ≤48 h")
         else:
             _line("  ✓ subidas/backlog OK")
             _resolve("upload_stalled", "subidas reanudadas")
