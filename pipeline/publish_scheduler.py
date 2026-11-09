@@ -1598,10 +1598,26 @@ def repack_channel_publish_times(
     except Exception:
         # Defensivo: si el probe falla, mantener el comportamiento conservador
         # histórico (1/día) en lugar de abortar el repack.
+        _date_cls = None
         _cap_probe = [1]
-    _rate_per_day = max(1, max(_cap_probe or [1]))
-    _days_needed = (len(rows) + _rate_per_day - 1) // _rate_per_day
-    safety_ahead_hours = max(safety_ahead_hours, (_days_needed + 1) * 24)
+
+    # Días REALES necesarios para colocar toda la cola, recorriendo el cap de
+    # cada fecha (la rotación hace que el cap varíe día a día). Antes se usaba
+    # ``max(cap_probe)`` como tasa: sobrestimaba la capacidad de los días
+    # futuros, el horizonte quedaba corto y los sobrantes se recortaban al
+    # mismo `safety_limit` (gap 0 + cap excedido; canal2/canal3, nov 2026).
+    _days_needed = 0
+    _capacity = 0
+    if _date_cls is not None:
+        _probe_day = _date_cls.today()
+        while _capacity < len(rows) and _days_needed < 400:
+            _capacity += max(0, _cap_for_day(_probe_day))
+            _days_needed += 1
+            _probe_day += _td(days=1)
+    if _days_needed <= 0:
+        _rate_per_day = max(1, max(_cap_probe or [1]))
+        _days_needed = (len(rows) + _rate_per_day - 1) // _rate_per_day
+    safety_ahead_hours = max(safety_ahead_hours, (_days_needed + 2) * 24)
 
     # ── 2. Config de pico para el primer slot ──
     try:
@@ -1888,14 +1904,17 @@ def repack_channel_publish_times(
 
         if slot > safety_limit:
             logger.warning(
-                "[%s] repack: safety bound %dh alcanzado para #%d — se recorta",
-                slug, safety_ahead_hours, video_id,
+                "[%s] repack: safety bound %dh superado para #%d — se conserva "
+                "%s (sin recortar: recortar apilaba varios vídeos en el mismo "
+                "instante → gap 0 y cap excedido)",
+                slug, safety_ahead_hours, video_id, slot.isoformat()[:16],
             )
-            slot = safety_limit
-            # El recorte invalida la preservación: si se dejara `preserved=True`
-            # el plan marcaría `requires_yt_update=False` con un target distinto
-            # al real de YouTube → DB y YouTube quedarían desincronizados.
+            # NO recortar a `safety_limit`: el recorte asignaba el mismo
+            # timestamp a todos los vídeos desbordados y `_validate_repack_plan`
+            # abortaba el canal entero. Se conserva el slot (ya respeta gap y
+            # cap) y se amplía el horizonte para las siguientes filas.
             preserved = False
+            safety_limit = slot
 
         # ── Subida consistente con el target FINAL (#2724) ──────────────
         # Se recalcula con el `slot` definitivo (ya pasados preservación, gap,

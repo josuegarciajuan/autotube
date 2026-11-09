@@ -1583,10 +1583,19 @@ def render_short_hybrid(
                 f"trim=duration={visual_dur:.3f},setpts=PTS-STARTPTS[v{i}]"
             )
         else:
-            # Image: loop + Ken Burns zoompan
-            inputs.extend(["-loop", "1", "-t",
-                          f"{visual_dur:.2f}", "-i", asset_path])
-            frames = int(visual_dur * 30)
+            # Image: Ken Burns zoompan from exactly ONE input frame.
+            #
+            # BUG (nov 2026): se usaba ``-loop 1 -t visual_dur`` sobre un JPEG.
+            # Con ``-loop 1`` ffmpeg emite ~25 fps de frames repetidos durante
+            # ``visual_dur``; como ``zoompan`` aplica ``d=frames`` a CADA frame
+            # de entrada, la duración salía multiplicada (41 s de timeline →
+            # 958 s de vídeo). Se alimenta UN solo frame (``-framerate 1 -t 1``)
+            # para que ``d=frames`` genere la animación una única vez.
+            inputs.extend([
+                "-loop", "1", "-framerate", "1", "-t", "1",
+                "-i", asset_path,
+            ])
+            frames = max(1, int(visual_dur * 30))
             zoompan = (
                 f"zoompan=z='min(zoom+0.0015,1.12)':"
                 f"d={frames}:s=1080x1920:"

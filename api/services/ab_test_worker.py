@@ -676,10 +676,12 @@ class ABTestWorker:
 
         # ── Swap title on YouTube ──────────────────────────────
         try:
-            from pipeline.youtube_uploader import _YouTubeUploaderBackend
-            backend = _YouTubeUploaderBackend(channel_slug)
-            if backend.authenticate():
-                backend._service.videos().update(
+            from pipeline.youtube_uploader import YouTubeUploader
+            uploader = YouTubeUploader(
+                account_name=channel_slug, channel_slug=channel_slug,
+            )
+            if uploader.authenticate():
+                uploader._get_service().videos().update(
                     part="snippet",
                     body={
                         "id": yt_video_id,
@@ -744,10 +746,12 @@ class ABTestWorker:
             return
 
         try:
-            from pipeline.youtube_uploader import _YouTubeUploaderBackend
-            backend = _YouTubeUploaderBackend(channel_slug)
-            if backend.authenticate():
-                backend._service.thumbnails().set(
+            from pipeline.youtube_uploader import YouTubeUploader
+            uploader = YouTubeUploader(
+                account_name=channel_slug, channel_slug=channel_slug,
+            )
+            if uploader.authenticate():
+                uploader._get_service().thumbnails().set(
                     videoId=yt_video_id,
                     media_body=str(new_path),
                 ).execute()
@@ -816,10 +820,12 @@ class ABTestWorker:
         title_v1 = row.get("title_v1", "")
 
         try:
-            from pipeline.youtube_uploader import _YouTubeUploaderBackend
-            backend = _YouTubeUploaderBackend(channel_slug)
-            if backend.authenticate() and title_v1:
-                backend._service.videos().update(
+            from pipeline.youtube_uploader import YouTubeUploader
+            uploader = YouTubeUploader(
+                account_name=channel_slug, channel_slug=channel_slug,
+            )
+            if uploader.authenticate() and title_v1:
+                uploader._get_service().videos().update(
                     part="snippet",
                     body={
                         "id": yt_video_id,

@@ -265,16 +265,29 @@ class PexelsVideoProvider(BaseVideoProvider):
         headers = {"Authorization": self._api_key}
         timeout = int(os.getenv("PEXELS_HTTP_TIMEOUT_SEC", "30"))
         last_exc: Optional[Exception] = None
+        last_status: Optional[int] = None
+        rate_limited = False
         for attempt in range(2):
             try:
                 resp = requests.get(
                     self.BASE_URL, params=params, headers=headers, timeout=timeout,
                 )
+                last_status = resp.status_code
                 if resp.status_code == 429:
-                    retry_after = resp.headers.get("Retry-After", "60")
-                    logger.warning("Pexels rate limit (429). Retry-After=%s", retry_after)
-                    time.sleep(min(int(retry_after), 60))
+                    rate_limited = True
+                    raw = resp.headers.get("Retry-After", "60")
+                    try:
+                        retry_after = max(1, int(float(raw)))
+                    except (TypeError, ValueError):
+                        retry_after = 60
+                    logger.warning(
+                        "Pexels rate limit (429). Retry-After=%ss (attempt %d/2)",
+                        retry_after, attempt + 1,
+                    )
+                    if attempt == 0:
+                        time.sleep(min(retry_after, 60))
                     continue
+                rate_limited = False
                 resp.raise_for_status()
                 return resp
             except requests.RequestException as exc:
@@ -282,7 +295,19 @@ class PexelsVideoProvider(BaseVideoProvider):
                 if attempt == 0:
                     logger.warning("Pexels request failed (retrying once): %s", exc)
                     time.sleep(2.0)
-        logger.error("Pexels API request failed: %s", last_exc)
+        # Un 429 persistente es un límite de cuota temporal (el pipeline sigue
+        # con Pixabay/Unsplash): warning, no error crítico. El error crítico
+        # queda para fallos reales (red, 5xx, auth) con su motivo visible.
+        if rate_limited:
+            logger.warning(
+                "Pexels rate limit exhausted after 2 attempts (HTTP 429); "
+                "continuing with fallback providers"
+            )
+        else:
+            logger.error(
+                "Pexels API request failed: %s (status=%s)",
+                last_exc or "unknown", last_status,
+            )
         return None
 
     @staticmethod

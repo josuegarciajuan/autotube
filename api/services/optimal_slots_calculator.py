@@ -125,6 +125,39 @@ NICHO_KEYWORDS: dict[str, list[str]] = {
 LATAM_PRIME_HOURS_CEST = [23, 0, 1, 2, 3]  # Rough LATAM evening in CEST
 
 
+def resolve_noncolliding_target(
+    when: datetime,
+    hard_occupied: set[str],
+    used_targets: set[str],
+    *,
+    step_minutes: int = 3,
+    max_shifts: int = 200,
+) -> tuple[datetime, str, int]:
+    """Return a target time that does not collide with running/assigned slots.
+
+    ``planned_slots`` has a unique index on
+    ``(channel_id, target_public_at, franja_dup_index)`` for pending/running
+    rows. The franja allocator treats running targets as a *soft* preference,
+    so when a day is fully busy it may reuse a running timestamp and the UPDATE
+    aborts the whole replan. This helper shifts the candidate in fixed
+    increments until it is free from both the hard set (running rows) and the
+    targets already assigned in this replan.
+
+    Returns ``(candidate_dt, iso, shifts_applied)``. If no free slot is found
+    within ``max_shifts``, ``iso`` may still be in ``hard_occupied`` and the
+    caller must skip the row.
+    """
+    base = when
+    candidate = base
+    iso = base.astimezone(dt_timezone.utc).isoformat()
+    shift = 0
+    while (iso in hard_occupied or iso in used_targets) and shift < max_shifts:
+        shift += 1
+        candidate = base + timedelta(minutes=step_minutes * shift)
+        iso = candidate.astimezone(dt_timezone.utc).isoformat()
+    return candidate, iso, shift
+
+
 class OptimalSlotsCalculator:
     """Calculates and persists optimal publish slots per channel."""
 
@@ -812,7 +845,22 @@ class OptimalSlotsCalculator:
                     (channel_id,),
                 ).fetchall()
                 # Targets ya ocupados por generaciones en curso o vídeos.
+                # ``occupied`` es una preferencia (soft) para el allocator.
+                # ``hard_occupied`` son los targets de filas ``running`` que
+                # comparten el índice único uq_active_planned_public_target con
+                # los ``pending``: NUNCA se puede asignar el mismo timestamp.
                 occupied: set[str] = set()
+                hard_occupied: set[str] = set()
+
+                def _norm_target_iso(value) -> str:
+                    try:
+                        v = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                        if v.tzinfo is None:
+                            v = v.replace(tzinfo=dt_timezone.utc)
+                        return v.astimezone(dt_timezone.utc).isoformat()
+                    except Exception:
+                        return str(value)
+
                 try:
                     for row in conn.execute(
                         """SELECT target_public_at FROM planned_slots
@@ -822,6 +870,7 @@ class OptimalSlotsCalculator:
                     ).fetchall():
                         if row["target_public_at"]:
                             occupied.add(str(row["target_public_at"]))
+                            hard_occupied.add(_norm_target_iso(row["target_public_at"]))
                 except Exception:
                     pass
                 try:
@@ -905,11 +954,36 @@ class OptimalSlotsCalculator:
         # caliente chocaba con el target antiguo de otra fila `pending` aún no
         # procesada (UNIQUE index uq_active_planned_public_target) y abortaba
         # el replan completo (bug oct 2026, canal5).
+        #
+        # Fix nov 2026: el allocator solo trata los targets de filas `running`
+        # como `busy` (soft). Si todas las franjas están ocupadas, reutiliza un
+        # timestamp que ya pertenece a un `running` y el UPDATE viola el índice
+        # único (canal4, 2026-11-12 08:00). Aquí se desplaza el destino en
+        # incrementos de 3 min hasta quedar libre tanto de `running` como del
+        # resto de asignaciones de este mismo replan.
         assignments: list[tuple[int, str, datetime, int]] = []
+        used_targets: set[str] = set()
         for row, slot in zip(pending, allocated):
-            iso = slot.when.astimezone(dt_timezone.utc).isoformat()
+            when, iso, shift = resolve_noncolliding_target(
+                slot.when, hard_occupied, used_targets,
+            )
+            if shift:
+                logger.info(
+                    "Long-form replan ch%d: target %s shifted +%dmin to avoid "
+                    "a running/assigned slot (#%s → %s)",
+                    channel_id, slot.when.isoformat(), shift * 3,
+                    row["id"], iso,
+                )
+            if iso in hard_occupied:
+                logger.error(
+                    "Long-form replan ch%d: no free target near %s after %d "
+                    "shifts (running slot collision) — skipping row #%s",
+                    channel_id, slot.when.isoformat(), shift, row["id"],
+                )
+                continue
+            used_targets.add(iso)
             assignments.append((
-                int(row["id"]), iso, slot.when, int(slot.duplicate_index),
+                int(row["id"]), iso, when, int(slot.duplicate_index),
             ))
 
         updated = 0

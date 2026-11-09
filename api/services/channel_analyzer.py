@@ -1115,15 +1115,30 @@ def _extract_json_from_content(content: str) -> dict:
     if parsed is None:
         # Best-effort recovery for truncated responses (token limit).
         try:
-            from pipeline_dist.llm_repair import repair_truncated_json
-            repaired = repair_truncated_json(text)
+            from pipeline_dist.llm_repair import (
+                repair_json_text,
+                repair_truncated_json,
+            )
         except Exception:  # noqa: BLE001 - repair is best-effort only
-            repaired = None
+            repair_truncated_json = repair_json_text = None
+
+        repaired = repair_truncated_json(text) if repair_truncated_json else None
         if isinstance(repaired, dict):
             logger.warning(
                 "JSON parse failed — recovered via repair_truncated_json"
             )
             return repaired
+
+        # Fallback for malformed-but-complete JSON (missing ':' / ',' after a
+        # key, trailing commas, smart quotes). This is the "Expecting ':'
+        # delimiter" case that used to lose the whole analysis.
+        repaired = repair_json_text(text) if repair_json_text else None
+        if isinstance(repaired, dict):
+            logger.warning(
+                "JSON parse failed — recovered via repair_json_text"
+            )
+            return repaired
+
         if parse_error is not None:
             raise parse_error
         raise ValueError("LLM returned unparseable JSON")

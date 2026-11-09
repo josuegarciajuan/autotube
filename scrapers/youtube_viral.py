@@ -2274,7 +2274,7 @@ class YouTubeViralScraper(BaseScraper):
             transcript_en, top["title"]
         )
         if not translated_script:
-            logger.error("[%s] Step 5 FAILED: Translation returned empty — trying next candidate", self.canal)
+            logger.warning("[%s] Step 5: Translation returned empty — trying next candidate", self.canal)
             fallback = self._try_next_candidates(candidates, db, video_url)
             return fallback or items
         else:
@@ -2288,7 +2288,7 @@ class YouTubeViralScraper(BaseScraper):
                     self.canal, self.target_duration_min, self.target_duration_max)
         adapted_script = self._adapt_duration(translated_script)
         if not adapted_script:
-            logger.error("[%s] Step 6 FAILED: Cannot adapt %d-word script to [%d-%d]min target. "
+            logger.warning("[%s] Step 6: Cannot adapt %d-word script to [%d-%d]min target. "
                           "Content gap too large — trying next candidate.",
                           self.canal, len(translated_script.split()),
                           self.target_duration_min, self.target_duration_max)
