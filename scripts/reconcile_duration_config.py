@@ -41,8 +41,24 @@ def main() -> int:
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--slug")
+    ap.add_argument(
+        "--set-range",
+        action="append",
+        default=[],
+        metavar="SLUG=MIN:MAX",
+        help="Force an exact duration range for a channel (e.g. canal3=15:18)",
+    )
     args = ap.parse_args()
     apply = args.apply and not args.dry_run
+
+    forced: dict[str, tuple[float, float]] = {}
+    for spec in args.set_range:
+        try:
+            slug, rng = spec.split("=", 1)
+            lo, hi = rng.split(":", 1)
+            forced[slug] = (float(lo), float(hi))
+        except ValueError:
+            raise SystemExit(f"Invalid --set-range '{spec}' (expected SLUG=MIN:MAX)")
 
     conn = sqlite3.connect(db_path())
     conn.row_factory = sqlite3.Row
@@ -62,7 +78,8 @@ def main() -> int:
         cfg = normalize_config_patch(cfg, row["slug"])
         policy = resolve_duration_range(cfg, row["slug"])
         issues = validate_duration_config(cfg)
-        new_cfg = apply_range_to_config(cfg, policy.min_min, policy.max_min)
+        lo, hi = forced.get(row["slug"], (policy.min_min, policy.max_min))
+        new_cfg = apply_range_to_config(cfg, lo, hi)
         changed = json.dumps(cfg, sort_keys=True) != json.dumps(new_cfg, sort_keys=True)
 
         print(
