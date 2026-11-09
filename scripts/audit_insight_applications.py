@@ -22,6 +22,14 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from config.config_bridge import canonical_config_key  # noqa: E402
+from config.duration_policy import resolve_duration_range  # noqa: E402
+
+DURATION_KEYS = {
+    "VIDEO_AVERAGE_DURATION_MIN",
+    "VIDEO_DURATION_DISCREPANCY_MIN",
+    "PROD_VIDEO_DURATION_MIN",
+    "PROD_VIDEO_DURATION_MAX",
+}
 
 
 def db_path() -> str:
@@ -73,14 +81,53 @@ def audit(conn: sqlite3.Connection, since_id: int, slug: str | None) -> list[dic
             if not changes:
                 continue
             checks = []
+            duration_changes = {
+                canonical_config_key(k, row["slug"]): v
+                for k, v in changes.items()
+                if canonical_config_key(k, row["slug"]) in DURATION_KEYS
+            }
+            if duration_changes:
+                try:
+                    if (
+                        "PROD_VIDEO_DURATION_MIN" in duration_changes
+                        and "PROD_VIDEO_DURATION_MAX" in duration_changes
+                    ):
+                        exp = (
+                            float(duration_changes["PROD_VIDEO_DURATION_MIN"]),
+                            float(duration_changes["PROD_VIDEO_DURATION_MAX"]),
+                        )
+                    else:
+                        mean = float(duration_changes.get("VIDEO_AVERAGE_DURATION_MIN", 0))
+                        disc = float(duration_changes.get("VIDEO_DURATION_DISCREPANCY_MIN", 0))
+                        exp = (mean - disc, mean + disc)
+                    actual_policy = resolve_duration_range(cfg, row["slug"])
+                    actual = (actual_policy.min_min, actual_policy.max_min)
+                    checks.append({
+                        "key": "DURATION_RANGE",
+                        "expected": list(exp),
+                        "actual": list(actual),
+                        "match": abs(exp[0] - actual[0]) < 0.51 and abs(exp[1] - actual[1]) < 0.51,
+                    })
+                except (TypeError, ValueError):
+                    pass
             for key, expected in changes.items():
                 canonical = canonical_config_key(key, row["slug"])
+                if canonical in DURATION_KEYS:
+                    continue
                 actual = _case_get(cfg, canonical)
+                if isinstance(expected, list) and isinstance(actual, list):
+                    # Union merges (canal3) are effective if all accepted items
+                    # are present, even when the stored list is a superset.
+                    match = all(_equal(item, a) for item in expected for a in [actual]) or all(
+                        any(_equal(item, candidate) for candidate in actual) for item in expected
+                    )
+                else:
+                    match = _equal(actual, expected)
                 checks.append({
                     "key": canonical,
                     "expected": expected,
                     "actual": actual,
-                    "match": _equal(actual, expected),
+                    "match": match,
                 })
             matched = sum(1 for c in checks if c["match"])
             carried = bool(

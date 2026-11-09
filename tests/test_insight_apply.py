@@ -181,3 +181,19 @@ def test_case_variant_is_removed_when_canonical_is_written(patch_db):
     saved = json.loads(db.channels[3]["config_json"])
     assert saved["TITLE_FORMULAS"] == ["canonical-new"]
     assert "title_formulas" not in saved
+
+
+def test_contradictory_duration_patch_is_rejected(patch_db):
+    db = patch_db(FakeDB(
+        config={"VIDEO_AVERAGE_DURATION_MIN": 16, "VIDEO_DURATION_DISCREPANCY_MIN": 4},
+        insight=_insight([_rec("r1", {
+            "VIDEO_AVERAGE_DURATION_MIN": 16,
+            "PROD_VIDEO_DURATION_MIN": 15,
+            "PROD_VIDEO_DURATION_MAX": 18,
+        })]),
+    ))
+    with pytest.raises(HTTPException) as exc:
+        insights_router.apply_insight(3, 43, "r1", -1)
+    assert exc.value.status_code == 422
+    assert "Incoherent duration patch" in exc.value.detail
+    assert db.updates == []

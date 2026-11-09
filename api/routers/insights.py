@@ -387,16 +387,20 @@ def apply_insight(channel_id: int, insight_id: int, rec_id: str = Query(""),
                     f"{type(reference).__name__}, got {type(value).__name__}",
                 )
 
-        # Duration coherence: block issues introduced by this patch only.
+        # Duration coherence: a patch that touches duration must leave the
+        # whole block coherent. This rejects recommendations that carry a
+        # mean and a contradictory legacy range (e.g. mean 16 with 15-18 when
+        # the discrepancy implies 12-20).
         if any(k in _DURATION_KEYS for k in changes):
             from config.duration_policy import validate_duration_config
-            before = set(validate_duration_config(current_config))
             candidate = _deep_merge(current_config, changes)
-            new_issues = [i for i in validate_duration_config(candidate) if i not in before]
-            if new_issues:
+            issues = validate_duration_config(candidate)
+            if issues:
                 raise HTTPException(
                     422,
-                    "Incoherent duration patch: " + "; ".join(new_issues),
+                    "Incoherent duration patch: " + "; ".join(issues)
+                    + ". Send either an explicit range (PROD_VIDEO_DURATION_MIN/MAX) "
+                    "or a coherent mean ± discrepancy.",
                 )
 
         previous_config = dict(current_config)
