@@ -411,8 +411,14 @@ def _aggregate_channel_data(db: ExtendedDatabase, channel_id: int,
             for k in _CONFIG_KEYS
             if hasattr(config, k)
         }
+        try:
+            from config.duration_policy import snapshot as _duration_snapshot
+            data["duration_policy"] = _duration_snapshot(config)
+        except Exception:
+            data["duration_policy"] = None
     except Exception:
         data["current_config"] = {}
+        data["duration_policy"] = None
 
     # Title power words inventory
     data["title_power_words"] = data["current_config"].get("title_power_words", [])

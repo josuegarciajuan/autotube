@@ -105,28 +105,17 @@ class VideoValidator:
             w.lower()
             for w in getattr(channel_config, "TITLE_POWER_WORDS", [])
         ]
-        # Rango de duración: el panel "Duración — Objetivo"
-        # (VIDEO_AVERAGE_DURATION_MIN ± VIDEO_DURATION_DISCREPANCY_MIN) es la
-        # fuente autoritativa. PROD_VIDEO_DURATION_* solo se usa como fallback
-        # legacy si el objetivo no está configurado.
-        obj_mean = getattr(channel_config, "VIDEO_AVERAGE_DURATION_MIN", None)
-        obj_disc = getattr(channel_config, "VIDEO_DURATION_DISCREPANCY_MIN", None)
-        if obj_mean is not None:
-            try:
-                obj_mean = float(obj_mean)
-                obj_disc = abs(float(obj_disc)) if obj_disc is not None else 0.0
-            except (TypeError, ValueError):
-                obj_mean, obj_disc = None, None
-        if obj_mean is not None and obj_mean > 0:
-            self.duration_min_sec: int = int(max(0.5, obj_mean - obj_disc) * 60)
-            self.duration_max_sec: int = int(max(0.5, obj_mean + obj_disc) * 60)
-        else:
-            self.duration_min_sec: int = (
-                getattr(channel_config, "PROD_VIDEO_DURATION_MIN", 10) * 60
-            )
-            self.duration_max_sec: int = (
-                getattr(channel_config, "PROD_VIDEO_DURATION_MAX", 14) * 60
-            )
+        # Rango de duración: la resolución vive en config/duration_policy.py
+        # (VIDEO_AVERAGE_DURATION_MIN ± VIDEO_DURATION_DISCREPANCY_MIN, con
+        # fallback legacy solo si falta el objetivo). Ningún consumidor debe
+        # reimplementar esta aritmética.
+        from config.duration_policy import resolve_duration_range
+
+        self.duration_policy = resolve_duration_range(
+            channel_config, getattr(channel_config, "CANAL_NAME", None)
+        )
+        self.duration_min_sec: int = self.duration_policy.min_sec
+        self.duration_max_sec: int = self.duration_policy.max_sec
         self.title_max_chars: int = resolve_title_max_chars(channel_config)
 
     # ── Pre-validation (after script, before TTS) ──────────────────

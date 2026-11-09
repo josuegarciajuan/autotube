@@ -2576,21 +2576,14 @@ Responde JSON: {{"bloques": [{{"texto": "..."}}]}}{source}{context}"""
             duration_target = getattr(cfg, "TEST_VIDEO_DURATION_TARGET", 2)
         else:
             # El panel "Duración — Objetivo" es la única fuente de verdad de
-            # la duración: los vídeos apuntan a
-            # VIDEO_AVERAGE_DURATION_MIN ± VIDEO_DURATION_DISCREPANCY_MIN.
-            # NO se aplica el clamp legacy PROD_VIDEO_DURATION_MAX (lo recortaba
-            # a 9 min e ignoraba el objetivo configurado en el panel).
-            mean = getattr(cfg, "VIDEO_AVERAGE_DURATION_MIN", 15)
-            disc = getattr(cfg, "VIDEO_DURATION_DISCREPANCY_MIN", 3)
-            try:
-                mean = float(mean)
-                disc = abs(float(disc))
-            except (TypeError, ValueError):
-                mean, disc = 15.0, 3.0
-            if mean <= 0:
-                mean = 15.0
+            # la duración. La resolución vive en config/duration_policy.py:
+            # VIDEO_AVERAGE_DURATION_MIN ± VIDEO_DURATION_DISCREPANCY_MIN,
+            # con fallback legacy solo si falta el objetivo.
+            from config.duration_policy import resolve_duration_range
+
+            policy = resolve_duration_range(cfg, getattr(cfg, "CANAL_NAME", None))
             duration_target = round(
-                random.uniform(max(0.5, mean - disc), max(0.5, mean + disc)), 1
+                random.uniform(policy.min_min, policy.max_min), 1
             )
 
         return self._compute_word_target(duration_target)

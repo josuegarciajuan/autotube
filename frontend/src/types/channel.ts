@@ -472,6 +472,15 @@ export interface InsightRecommendation {
   rationale_for_reuse?: string
   applied?: boolean
   discarded?: boolean
+  // ── v20.2: application traceability ──
+  applied_status?: 'effective' | 'partial' | 'superseded' | 'error'
+  applied_at?: string
+  applied_version_index?: number
+  applied_changes?: Record<string, any>
+  effective_changes?: Record<string, any>
+  superseded_by?: string
+  superseded_keys?: string[]
+  warnings?: string[]
   // ── v20.1: validation & refinement ──
   validation?: ValidationResult
   refined_versions?: RefinedVersion[]
