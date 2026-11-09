@@ -131,8 +131,9 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now "egress-$SLUG.service"
-sleep 3
+systemctl enable "egress-$SLUG.service"
+systemctl restart "egress-$SLUG.service"
+sleep 4
 
 CHECK_HOST="$BIND_IP"
 [ "$CHECK_HOST" = "0.0.0.0" ] && CHECK_HOST="127.0.0.1"
