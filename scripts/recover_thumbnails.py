@@ -474,6 +474,12 @@ def main():
     )
     args = parser.parse_args()
 
+    # Egress: este script usa CDN/API local; no debe correr para un canal
+    # gestionado (su thumbnail se recupera por el gateway).
+    if args.slug:
+        from api.services.egress_delegation import fail_closed_if_managed
+        fail_closed_if_managed(args.slug, "recover_thumbnails")
+
     # Determine mode
     single_video_mode = args.video_id is not None
 
