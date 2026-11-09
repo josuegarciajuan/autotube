@@ -23,6 +23,8 @@ from typing import Optional
 import edge_tts
 from pydub import AudioSegment
 
+from pipeline.audio_utils import trim_trailing_silence
+
 from config.settings import AUDIO_DIR
 
 logger = logging.getLogger(__name__)
@@ -55,6 +57,15 @@ def _run_async_with_timeout(coro, timeout: float = 120.0):
     except concurrent.futures.TimeoutError:
         future.cancel()
         raise TimeoutError(f"TTS operation timed out after {timeout}s")
+
+def _fail_on_block_error() -> bool:
+    """True = a failed segment aborts synthesis (never publish missing audio)."""
+    try:
+        from config.settings import TTS_FAIL_ON_BLOCK_ERROR
+        return bool(TTS_FAIL_ON_BLOCK_ERROR)
+    except Exception:  # noqa: BLE001
+        return True
+
 
 class TTSEngineAbort(RuntimeError):
     """Fallo del PROVEEDOR completo (no de un segmento): aborta la síntesis.
@@ -186,7 +197,10 @@ class TTSEngine:
                         "síntesis para pasar a Kokoro local", exc2,
                     )
                     raise TTSEngineAbort(str(exc2)) from exc2
-                logger.error("Segment retry also failed: %s — skipping", exc2)
+                logger.error("Segment retry also failed: %s", exc2)
+                if _fail_on_block_error():
+                    raise RuntimeError(f"TTS segment failed: {exc2}") from exc2
+                logger.warning("Segment skipped (TTS_FAIL_ON_BLOCK_ERROR=false)")
                 return [], []
 
     def _voice_for_tipo(self, tipo: str) -> tuple[str, str]:
@@ -445,6 +459,10 @@ class TTSEngine:
                 # and MP3 encoder padding (~1s per block). Using actual pydub
                 # duration prevents cumulative desync in marathons with 90+ blocks.
                 block_seg = AudioSegment.from_mp3(tmp.name)
+                # edge-tts appends ~1s of silence/encoder padding per segment.
+                # Keep it out of the timeline so inter-block pauses are only the
+                # configured expressive pause (and the body matches narration).
+                block_seg = trim_trailing_silence(block_seg)
                 actual_dur_ms = len(block_seg)
                 temp_segments.append(block_seg)
                 os.unlink(tmp.name)  # loaded into memory, temp file no longer needed

@@ -61,6 +61,15 @@ DEFAULT_BLOCK_SPEEDS: dict[str, float] = {
 }
 
 AVAILABLE_VOICES = ["ef_dora", "em_alex", "em_santa"]
+def _fail_on_block_error() -> bool:
+    """True = a failed Kokoro segment aborts synthesis (never publish gaps)."""
+    try:
+        from config.settings import TTS_FAIL_ON_BLOCK_ERROR
+        return bool(TTS_FAIL_ON_BLOCK_ERROR)
+    except Exception:  # noqa: BLE001
+        return True
+
+
 
 
 class KokoroTTSEngine:
@@ -483,16 +492,30 @@ class KokoroTTSEngine:
                         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _exec:
                             _future = _exec.submit(_run_block, clean, self.kokoro_voice, speed)
                             audio_chunks = _future.result(timeout=_BLOCK_TIMEOUT)
-                except concurrent.futures.TimeoutError:
-                    logger.error("Kokoro seg %d.%d timed out after %ds — skipping",
-                                 i, si, _BLOCK_TIMEOUT)
+                except concurrent.futures.TimeoutError as exc:
+                    logger.error(
+                        "Kokoro seg %d.%d timed out after %ds",
+                        i, si, _BLOCK_TIMEOUT,
+                    )
+                    if _fail_on_block_error():
+                        raise RuntimeError(
+                            f"Kokoro segment {i}.{si} timed out after {_BLOCK_TIMEOUT}s"
+                        ) from exc
+                    logger.warning("Seg %d.%d skipped (kill-switch)", i, si)
                     continue
                 except Exception as exc:
-                    logger.error("Kokoro seg %d.%d failed: %s — skipping", i, si, exc)
+                    logger.error("Kokoro seg %d.%d failed: %s", i, si, exc)
+                    if _fail_on_block_error():
+                        raise RuntimeError(
+                            f"Kokoro segment {i}.{si} failed: {exc}"
+                        ) from exc
+                    logger.warning("Seg %d.%d skipped (kill-switch)", i, si)
                     continue
 
                 if not audio_chunks:
-                    logger.warning("Seg %d.%d produced no audio", i, si)
+                    if _fail_on_block_error():
+                        raise RuntimeError(f"Kokoro segment {i}.{si} produced no audio")
+                    logger.warning("Seg %d.%d produced no audio (kill-switch)", i, si)
                     continue
 
                 block_audio = (

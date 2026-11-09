@@ -12,6 +12,7 @@ to be cut off mid-phrase when the text was too long.
 import asyncio
 import logging
 import os
+import re
 import threading
 import tempfile
 from pathlib import Path
@@ -19,6 +20,8 @@ from typing import Optional
 
 import edge_tts
 from pydub import AudioSegment
+
+from pipeline.audio_utils import media_duration, trim_trailing_silence
 
 logger = logging.getLogger(__name__)
 
@@ -191,46 +194,146 @@ def prosody_budget_params(ch_config) -> tuple[float | None, float | None]:
     return floor, avg_pause
 
 
+TRIM_ORDER = ["desarrollo3", "desarrollo2", "desarrollo1", "climax", "cierre", "hook"]
+_SENTENCE_RE = re.compile(r"(?<=[.!?…])\s+")
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Split narration text into complete sentences (punctuation kept)."""
+    return [part.strip() for part in _SENTENCE_RE.split((text or "").strip()) if part.strip()]
+
+
+def _total_words(bloques: list[dict]) -> int:
+    return sum(len(coerce_short_text(b.get("texto", "")).split()) for b in bloques)
+
+
+def trim_blocks_sentences(
+    bloques: list[dict],
+    max_words: int = 90,
+    min_sentences_per_block: int = 1,
+    allow_word_fallback: bool = False,
+    min_words_per_block: int = 5,
+) -> tuple[list[dict], dict]:
+    """Trim narration to ``max_words`` **without cutting sentences in half**.
+
+    Strategy (in order):
+      1. Drop the optional ``desarrollo3`` block entirely when safe.
+      2. Remove complete trailing sentences from blocks in ``TRIM_ORDER``.
+      3. If still over budget: mark ``needs_regeneration`` (production) or use
+         the legacy word chop (tests/back-compat only).
+
+    Returns ``(bloques, report)``; mutates ``bloques`` in place like the old
+    helper did.
+    """
+    total_before = _total_words(bloques)
+    report = {
+        "initial_words": total_before,
+        "final_words": total_before,
+        "max_words": max_words,
+        "removed_sentences": [],
+        "dropped_blocks": [],
+        "needs_regeneration": False,
+        "word_fallback": False,
+    }
+    if total_before <= max_words:
+        return bloques, report
+
+    total = total_before
+
+    # ── Phase 1: drop the optional desarrollo3 block whole ──
+    # (never leave a 5-word stub of it behind).
+    if total > max_words:
+        for b in list(bloques):
+            if b.get("tipo") != "desarrollo3":
+                continue
+            if len(bloques) <= 5:
+                break
+            words = len(coerce_short_text(b.get("texto", "")).split())
+            if total - words >= MIN_WORD_COUNT:
+                total -= words
+                report["dropped_blocks"].append(
+                    {"tipo": "desarrollo3", "words": words,
+                     "texto": coerce_short_text(b.get("texto", ""))[:80]}
+                )
+                bloques.remove(b)
+            break
+
+    # ── Phase 2: remove complete trailing sentences ──
+    for block_type in TRIM_ORDER:
+        if total <= max_words:
+            break
+        for b in bloques:
+            if total <= max_words:
+                break
+            if b.get("tipo") != block_type:
+                continue
+            sentences = _split_sentences(coerce_short_text(b.get("texto", "")))
+            while total > max_words and len(sentences) > min_sentences_per_block:
+                removed = sentences.pop()
+                removed_words = len(removed.split())
+                total -= removed_words
+                report["removed_sentences"].append(
+                    {"tipo": block_type, "texto": removed[:120],
+                     "words": removed_words}
+                )
+            if sentences:
+                b["texto"] = " ".join(sentences).strip()
+
+    # ── Phase 3: legacy word fallback (only when explicitly allowed) ──
+    if total > max_words and allow_word_fallback:
+        report["word_fallback"] = True
+        words_to_remove = total - max_words
+        for block_type in TRIM_ORDER:
+            if words_to_remove <= 0:
+                break
+            for b in bloques:
+                if words_to_remove <= 0:
+                    break
+                if b.get("tipo") != block_type:
+                    continue
+                words = coerce_short_text(b.get("texto", "")).split()
+                if len(words) > min_words_per_block:
+                    remove = min(words_to_remove, len(words) - min_words_per_block)
+                    b["texto"] = " ".join(words[: len(words) - remove])
+                    words_to_remove -= remove
+        total = _total_words(bloques)
+
+    report["final_words"] = total
+    report["needs_regeneration"] = total > max_words
+    if report["needs_regeneration"]:
+        logger.warning(
+            "Sentence-aware trim could not reach %d words (%d left) — "
+            "the script must be regenerated (never cut mid-sentence)",
+            max_words, total,
+        )
+    else:
+        logger.info(
+            "Trimmed short script (sentences): %d → %d words (budget %d, "
+            "%d sentence(s) removed, %d block(s) dropped)",
+            total_before, total, max_words,
+            len(report["removed_sentences"]), len(report["dropped_blocks"]),
+        )
+    return bloques, report
+
+
 def trim_blocks_to_word_budget(
     bloques: list[dict],
     max_words: int = 90,
     min_words_per_block: int = 5,
 ) -> list[dict]:
-    """Trim narration blocks to ~``max_words`` total before TTS.
+    """Backwards-compatible wrapper used by tests/legacy callers.
 
-    Audio length is roughly 0.50 s/word worst case, so 90 words ≈ 45 s,
-    safely under ``SHORTS_MAX_DURATION_SEC`` (58 s). Words are removed from
-    the END of later blocks first (desarrollo3 → hook) to keep the hook and
-    climax intact.
-
-    Mutates and returns the same ``bloques`` list.
-
-    Args:
-        bloques: [{"tipo": "hook", "texto": "...", ...}, ...]
-        max_words: target total word count.
-        min_words_per_block: floor per block (a block is never emptied).
+    Production short paths use :func:`prepare_short_script`, which keeps
+    sentence integrity and requests regeneration instead of word-chopping.
     """
-    total = sum(len(coerce_short_text(b.get("texto", "")).split()) for b in bloques)
-    if total <= max_words:
-        return bloques
+    result, _report = trim_blocks_sentences(
+        bloques,
+        max_words=max_words,
+        allow_word_fallback=True,
+        min_words_per_block=min_words_per_block,
+    )
+    return result
 
-    to_remove = total - max_words
-    order = ["desarrollo3", "desarrollo2", "desarrollo1", "climax", "cierre", "hook"]
-    for block_type in order:
-        if to_remove <= 0:
-            break
-        for b in bloques:
-            if b.get("tipo") != block_type:
-                continue
-            words = coerce_short_text(b.get("texto", "")).split()
-            if len(words) > min_words_per_block:
-                remove = min(to_remove, len(words) - min_words_per_block)
-                b["texto"] = " ".join(words[: len(words) - remove])
-                to_remove -= remove
-
-    new_total = sum(len(coerce_short_text(b.get("texto", "")).split()) for b in bloques)
-    logger.info("Trimmed short script: %d → %d words (budget %d)", total, new_total, max_words)
-    return bloques
 
 # Fallback per-block voice settings when channel config has none
 _DEFAULT_RATES: dict[str, str] = {
@@ -457,6 +560,52 @@ def validate_short_script(script: dict) -> list[str]:
     return errors
 
 
+def _fail_on_block_error() -> bool:
+    """True = a failed TTS block aborts the Short (never publish missing audio)."""
+    try:
+        from config.settings import TTS_FAIL_ON_BLOCK_ERROR
+        return bool(TTS_FAIL_ON_BLOCK_ERROR)
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def prepare_short_script(
+    script: dict,
+    ch_config,
+    max_words: Optional[int] = None,
+) -> tuple[dict, list[str], dict]:
+    """Normalise + sentence-aware trim + validate a Short script.
+
+    Single entry point for every Short producer (scheduler, standalone, native,
+    API/manual, planning) so they all share the same prosody-aware budget and
+    never chop words mid-sentence.
+    """
+    script = normalize_short_script(script)
+    bloques = script.get("bloques")
+    if not isinstance(bloques, list):
+        bloques = []
+        script["bloques"] = bloques
+
+    if max_words is None:
+        rate = (getattr(ch_config, "TTS_STRATEGY", {}) or {}).get("rate_base", "0%")
+        floor, avg_pause = prosody_budget_params(ch_config)
+        max_words = voice_aware_word_budget(
+            getattr(ch_config, "SHORTS_MAX_DURATION_SEC", SHORTS_MAX_DURATION_SEC),
+            rate=rate,
+            block_count=max(len(bloques), 1),
+            prosody_floor_pct=floor,
+            avg_pause_ms=avg_pause,
+        )
+
+    bloques, report = trim_blocks_sentences(
+        bloques, max_words=max_words, allow_word_fallback=False,
+    )
+    script["bloques"] = bloques
+    errors = validate_short_script(script)
+    report["errors"] = errors
+    return script, errors, report
+
+
 def _force_kokoro_config(ch_config):
     """Devuelve una copia de ``ch_config`` con ``TTS_ENGINE='kokoro'``.
 
@@ -578,6 +727,13 @@ def _synthesize_shorts_blocks_impl(
         output_srt_path.write_text(srt_content, encoding="utf-8")
         # Get duration from audio file
         dur = len(AudioSegment.from_mp3(str(output_audio_path))) / 1000.0
+        ts_end = (all_timestamps[-1]["end_ms"] / 1000.0) if all_timestamps else 0.0
+        if ts_end and dur - ts_end > 2.0:
+            logger.warning(
+                "Short TTS timestamp drift (Kokoro): ts_end=%.2fs audio=%.2fs "
+                "(audio will NOT be truncated; check scene ranges)",
+                ts_end, dur,
+            )
         total_words = len(all_timestamps)
         if dur > max_duration_sec:
             # Unload model before raising to prevent memory leak on error path
@@ -666,35 +822,59 @@ def _synthesize_shorts_blocks_impl(
                     _synthesize_block(block_text, voice, "-10%", "+0Hz")
                 )
             except Exception as exc2:
-                logger.error(
-                    "Block [%s] retry also failed: %s — skipping",
-                    block_type, exc2
-                )
+                logger.error("Block [%s] retry also failed: %s", block_type, exc2)
+                if _fail_on_block_error():
+                    raise RuntimeError(
+                        f"Block [{block_type}] TTS failed: {exc2}"
+                    ) from exc2
+                logger.warning("Block [%s] skipped (TTS_FAIL_ON_BLOCK_ERROR=false)", block_type)
                 continue
 
         if not audio_chunks:
-            logger.warning("Block [%s] produced no audio — skipping", block_type)
+            if _fail_on_block_error():
+                raise RuntimeError(f"Block [{block_type}] produced no audio")
+            logger.warning("Block [%s] produced no audio — skipping (kill-switch)", block_type)
             continue
 
-        # Save block audio to temp file
+        # Save block audio, trim edge-tts trailing padding and measure the REAL
+        # duration.  The old code advanced the cumulative offset with the last
+        # WordBoundary, which excludes ~1s/block of encoder padding -> the SRT
+        # and scene timeline drifted ~6s behind the audio and -shortest cut the
+        # closing narration.  Never do that again.
         tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
         tmp.write(b"".join(audio_chunks))
         tmp.close()
+        actual_dur_ms = 0
+        try:
+            original_seg = AudioSegment.from_mp3(tmp.name)
+            block_seg = trim_trailing_silence(original_seg)
+            if len(block_seg) < len(original_seg) - 100:
+                block_seg.export(tmp.name, format="mp3", bitrate="192k")
+                measured = media_duration(tmp.name)
+                actual_dur_ms = int(measured * 1000) if measured else len(block_seg)
+            else:
+                actual_dur_ms = len(block_seg)
+        except Exception as exc:  # noqa: BLE001 — never lose the block over a trim
+            logger.warning(
+                "Block [%s]: could not trim/measure audio (%s) — using word timestamps",
+                block_type, exc,
+            )
+            actual_dur_ms = int(media_duration(tmp.name) * 1000) if media_duration(tmp.name) else 0
+        if actual_dur_ms <= 0:
+            actual_dur_ms = int(word_ts[-1]["end_ms"]) if word_ts else 0
+
         temp_files.append(tmp.name)
         pause_after_list.append(block_pause)
 
-        # Offset timestamps and accumulate
+        # Offset timestamps and accumulate using the real audio duration.
         for ts in word_ts:
             ts["start_ms"] = round(ts["start_ms"] + cumulative_offset_ms, 1)
             ts["end_ms"]   = round(ts["end_ms"]   + cumulative_offset_ms, 1)
         all_timestamps.extend(word_ts)
 
-        if word_ts:
-            cumulative_offset_ms = word_ts[-1]["end_ms"]
-            # Inter-block pause: offset subsequent blocks' timestamps
-            # so SRT subtitles reflect the silence between narrative blocks
-            if i < len(valid) - 1:
-                cumulative_offset_ms += block_pause
+        cumulative_offset_ms = round(cumulative_offset_ms + actual_dur_ms, 1)
+        if i < len(valid) - 1:
+            cumulative_offset_ms += block_pause
 
         # ── v3: progress callback per block ──
         if progress_cb is not None:
@@ -719,6 +899,13 @@ def _synthesize_shorts_blocks_impl(
 
     duration_sec = len(combined) / 1000.0
     combined.export(str(output_audio_path), format="mp3", bitrate="192k")
+    ts_end = (all_timestamps[-1]["end_ms"] / 1000.0) if all_timestamps else 0.0
+    if ts_end and duration_sec - ts_end > 2.0:
+        logger.error(
+            "Short TTS timestamp drift (edge): ts_end=%.2fs audio=%.2fs — "
+            "scene ranges would truncate the render",
+            ts_end, duration_sec,
+        )
     logger.info("Exported: %s (%.1f s)", output_audio_path, duration_sec)
 
     # Clean temp files
