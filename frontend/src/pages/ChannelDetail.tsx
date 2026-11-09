@@ -218,6 +218,8 @@ export default function ChannelDetail() {
   const [generating, setGenerating] = useState(false)
   const [editingProfile, setEditingProfile] = useState(false)
   const [profileForm, setProfileForm] = useState({ name: '', description: '', banner_url: '', avatar_url: '', yt_channel_url: '', google_account: '', yt_studio_url: '' })
+  const [profileVariants, setProfileVariants] = useState<any>(null)
+  const [applyingVariant, setApplyingVariant] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [videoStats, setVideoStats] = useState<Record<string, any>>({})
   const [videoSocialStats, setVideoSocialStats] = useState<Record<number, any[]>>({})
@@ -370,6 +372,10 @@ export default function ChannelDetail() {
     }
     load()
   }, [channelId])
+
+  useEffect(() => {
+    if (editingProfile) loadProfileVariants()
+  }, [editingProfile, channelId])
 
   // Restore generating state from context on mount / when activeJobs change
   useEffect(() => {
@@ -678,6 +684,30 @@ export default function ChannelDetail() {
       setEditingProfile(false)
     } catch (e: any) { alert('Error: ' + e.message) }
     setSaving(false)
+  }
+
+  async function loadProfileVariants() {
+    try {
+      setProfileVariants(await api.getProfileVariants(channelId))
+    } catch { /* sin variantes todavía */ }
+  }
+
+  async function handleApplyVariant(kind: string, file: string) {
+    setApplyingVariant(file)
+    try {
+      await api.applyProfileVariant(channelId, { kind, file })
+      const ch = await api.getChannel(channelId)
+      setChannel(ch)
+      setProfileForm(prev => ({
+        ...prev,
+        banner_url: ch.banner_url || prev.banner_url,
+        avatar_url: ch.avatar_url || prev.avatar_url,
+      }))
+      await loadProfileVariants()
+    } catch (e: any) {
+      alert('Error al aplicar la variante: ' + e.message)
+    }
+    setApplyingVariant(null)
   }
 
   async function handleSyncYouTube() {
@@ -2177,6 +2207,34 @@ export default function ChannelDetail() {
               <div><label className="block text-xs text-gray-400 mb-1">URL de YouTube Studio</label>
                 <input type="text" value={profileForm.yt_studio_url || ''} onChange={e => setProfileForm({ ...profileForm, yt_studio_url: e.target.value })}
                   className="w-full px-3 py-2 bg-dark-700 border border-surface-border rounded-lg text-white text-sm focus:outline-none focus:border-neon-red" placeholder="https://studio.youtube.com/channel/..." /></div>
+              <div className="border-t border-surface-border pt-3 space-y-2">
+                <label className="block text-xs text-gray-400">Variantes de banner / avatar</label>
+                {profileVariants?.current?.length ? (
+                  <div className="grid grid-cols-2 gap-2">
+                    {profileVariants.current.map((v: any) => (
+                      <div key={v.url} className="bg-dark-800 rounded-lg p-2">
+                        <img src={channelAssetUrl(v.url)} alt={v.label} className="w-full h-20 object-cover rounded mb-1" />
+                        <div className="text-[10px] text-gray-500 capitalize">Actual · {v.kind}</div>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                <div className="grid grid-cols-2 gap-2">
+                  {(profileVariants?.variants || []).map((v: any) => (
+                    <div key={v.url} className="bg-dark-800 rounded-lg p-2">
+                      <img src={channelAssetUrl(v.url)} alt={v.label} className="w-full h-20 object-cover rounded mb-1" />
+                      <div className="text-[10px] text-gray-400 mb-1 truncate">{v.label || v.file}</div>
+                      <button onClick={() => handleApplyVariant(v.kind, v.file)} disabled={applyingVariant === v.file}
+                        className="w-full px-2 py-1 rounded bg-neon-cyan/10 border border-neon-cyan/30 text-neon-cyan text-[10px] font-bold hover:bg-neon-cyan/20 disabled:opacity-50">
+                        {applyingVariant === v.file ? 'Aplicando...' : 'Usar esta'}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                {!profileVariants?.variants?.length && (
+                  <p className="text-[10px] text-gray-500">Aún no hay variantes IA generadas.</p>
+                )}
+              </div>
               <div className="flex gap-2 pt-2">
                 <button onClick={handleSaveProfile} disabled={saving}
                   className="flex-1 flex items-center justify-center gap-1.5 px-4 py-2 bg-neon-red text-white rounded-lg font-bold text-sm hover:bg-neon-red/80 disabled:opacity-50">

@@ -131,6 +131,12 @@ THUMBNAIL_BORDER_WIDTH = 6
 THUMBNAIL_FONT_FAMILY = "DejaVuSans-Bold"
 THUMBNAIL_SHOW_4K_BADGE = False
 
+# ── Prompts Pollo AI (banner/logo) ───────────────────────────────
+AI_NEGATIVE_PROMPT = 'text, letters, words, typography, watermark, logo, signature, blurry, low quality, deformed, extra limbs, cluttered'
+AI_BANNER_PROMPT = 'Dramatic cinematic YouTube channel banner background, 16:9, intense red and yellow palette, close-up of a clock and a lightning bolt, high contrast, sense of urgency, cinematic depth, center safe area for title, no text, no letters, no watermark.'
+AI_AVATAR_PROMPT = 'Minimalist emblem for a microdrama channel, stylized broken clock combined with a lightning bolt, red and yellow on dark purple, bold geometric, centered, no text, no letters, no watermark, vector-like logo.'
+AI_LOGO_STYLE = 'red/yellow, broken clock, lightning, urgency, dramatic, bold geometric'
+
 # ── Intro / CTA / outro ──────────────────────────────────────────
 INTRO_FONT_SIZE = 68
 INTRO_BG_COLOR = (25, 10, 40)

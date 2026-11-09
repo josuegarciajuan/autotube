@@ -136,6 +136,12 @@ THUMBNAIL_BORDER_WIDTH = 6
 THUMBNAIL_FONT_FAMILY = "DejaVuSans-Bold"
 THUMBNAIL_SHOW_4K_BADGE = False
 
+# ── Prompts Pollo AI (banner/logo) ───────────────────────────────
+AI_NEGATIVE_PROMPT = 'text, letters, words, typography, watermark, logo, signature, blurry, low quality, deformed, extra limbs, cluttered'
+AI_BANNER_PROMPT = 'Cinematic YouTube channel banner background, 16:9, dramatic split composition red versus cyan, a large magnifying glass over fragmented news screens, evidence markers, subtle digital glitch, clean newsroom atmosphere, high contrast, professional documentary style, no text, no letters, no watermark, center safe area for title.'
+AI_AVATAR_PROMPT = 'Minimalist emblem for a fact-checking channel, a stylized magnifying glass combined with a check mark and an X, red and cyan palette, dark navy background, bold geometric shapes, high contrast, centered, no text, no letters, no watermark, clean vector-like logo.'
+AI_LOGO_STYLE = 'red/cyan split, evidence, magnifying glass, check/cross, newsroom, bold geometric'
+
 # ── Intro / CTA / outro ──────────────────────────────────────────
 INTRO_FONT_SIZE = 64
 INTRO_BG_COLOR = (12, 20, 38)
