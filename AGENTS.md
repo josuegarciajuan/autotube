@@ -665,7 +665,7 @@ tocar las subidas. Es el interruptor operativo para liberar potencia de cálculo
   long/día) en vez del override del panel + bonus de rotación y cancelan el plan
   del día cada 5 min. `sync_midday` compara contra GENERACIÓN de hoy
   (`count_videos_generated_today + pending`), no contra publicados.
-- **Maratones = "rueda" con separación mínima de 48h/canal**: mientras el
+- **Maratones = "rueda" con separación mínima de 36h/canal**: mientras el
   backlog **real** supere el umbral, se encola **un maratón a la vez** siguiendo
   el round-robin de canales. El check corre cada 10 min (`api/main.py`).
   - **Backlog real** = solo **no-maratones en `awaiting_upload`** (pendientes de
@@ -676,9 +676,9 @@ tocar las subidas. Es el interruptor operativo para liberar potencia de cálculo
     con `MARATHON_ENABLED=True` (canal3 no cuenta). Hoy: 4×3 = 12.
   - **Separación por canal**: intervalo efectivo =
     `max(MARATHON_COOLDOWN_HOURS, MARATHON_MIN_CHANNEL_INTERVAL_HOURS)`, con
-    `MARATHON_MIN_CHANNEL_INTERVAL_HOURS=48` como **suelo duro** siempre activo
+    `MARATHON_MIN_CHANNEL_INTERVAL_HOURS=36` como **suelo duro** siempre activo
     (no evitable con `MARATHON_COOLDOWN_HOURS=0`). Máximo ~1 maratón por canal cada
-    48h. El reloj corre desde que el maratón termina/falla (`record_marathon`).
+    36h. El reloj corre desde que el maratón termina/falla (`record_marathon`).
 
 ## 🍃 Frescura en publicación (fábrica continua)
 Vídeos con > `FRESHNESS_REFRESH_DAYS` (7) en `awaiting_upload` se consideran

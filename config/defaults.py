@@ -1059,9 +1059,11 @@ MARATHON_COOLDOWN_HOURS = 0
 # Suelo duro de separación entre maratones del MISMO canal (horas). Se aplica
 # SIEMPRE (no es evitable con MARATHON_COOLDOWN_HOURS=0): el intervalo efectivo
 # es max(MARATHON_COOLDOWN_HOURS, MARATHON_MIN_CHANNEL_INTERVAL_HOURS). Fija la
-# cadencia máxima real a ~1 maratón por canal cada 48h. Se reescribe al terminar
+# cadencia máxima real a ~1 maratón por canal cada 36h. Se reescribe al terminar
 # o fallar el maratón (record_marathon), así el reloj cuenta desde la finalización.
-MARATHON_MIN_CHANNEL_INTERVAL_HOURS = 48
+# 36h (antes 48h) mantiene la protección anti-ráfaga pero acelera ~33% el drenaje
+# de cola cuando hay backlog: 3 canales → ~2 maratones/día en vez de 1.5.
+MARATHON_MIN_CHANNEL_INTERVAL_HOURS = 36
 
 # ── MARATHON TITLE STRATEGY ──
 

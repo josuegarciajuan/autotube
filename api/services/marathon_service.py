@@ -10,8 +10,8 @@ Excluir los maratones del backlog rompe el bucle de realimentación (un maratón
 generado contaba como backlog y justificaba generar el siguiente).
 
 Separación por canal: el intervalo efectivo es
-    max(MARATHON_COOLDOWN_HOURS(canal), MARATHON_MIN_CHANNEL_INTERVAL_HOURS=48h)
-de modo que existe un suelo duro de ~1 maratón por canal cada 48h aunque el
+    max(MARATHON_COOLDOWN_HOURS(canal), MARATHON_MIN_CHANNEL_INTERVAL_HOURS=36h)
+de modo que existe un suelo duro de ~1 maratón por canal cada 36h aunque el
 cooldown por canal sea 0. La rotación round-robin salta los canales bloqueados
 (select_marathon_channel). El reloj arranca al terminar/fallar el maratón
 (record_marathon se reescribe a "completed"/"failed").
@@ -59,12 +59,12 @@ def _marathon_min_interval_hours(cfg: dict) -> float:
     """Suelo duro de separación entre maratones del mismo canal (horas).
 
     Se lee de ``MARATHON_MIN_CHANNEL_INTERVAL_HOURS`` del config_json con fallback
-    al default (48h). ``0`` es válido (= sin suelo) para tests/override manual.
+    al default (36h). ``0`` es válido (= sin suelo) para tests/override manual.
     """
     try:
         from config.defaults import MARATHON_MIN_CHANNEL_INTERVAL_HOURS as _DEFAULT_MIN_H
     except ImportError:
-        _DEFAULT_MIN_H = 48
+        _DEFAULT_MIN_H = 36
     try:
         raw = cfg.get("MARATHON_MIN_CHANNEL_INTERVAL_HOURS", _DEFAULT_MIN_H)
         if raw is None or str(raw).strip() == "":
@@ -78,9 +78,9 @@ def _channel_in_marathon_cooldown(db, channel_id: int, cfg: dict, now: datetime 
     """True si el canal maratoneó hace menos que su intervalo mínimo efectivo.
 
     Intervalo efectivo = ``max(MARATHON_COOLDOWN_HOURS, MARATHON_MIN_CHANNEL_INTERVAL_HOURS)``.
-    El suelo de 48h (default) se aplica SIEMPRE: con ``MARATHON_COOLDOWN_HOURS=0``
-    un canal que acaba de maratonear sigue bloqueado ~48h, de modo que la cadencia
-    real es como máximo ~1 maratón por canal cada 2 días.
+    El suelo de 36h (default) se aplica SIEMPRE: con ``MARATHON_COOLDOWN_HOURS=0``
+    un canal que acaba de maratonear sigue bloqueado ~36h, de modo que la cadencia
+    real es como máximo ~1 maratón por canal cada 1.5 días.
     """
     try:
         cooldown_h = max(
@@ -236,7 +236,7 @@ def select_marathon_channel(db) -> tuple[str, int, dict] | None:
     Uses a deterministic rotation that gets shuffled on each new iteration.
     Channels are eligible if MARATHON_ENABLED=True. Los canales dentro de su
     intervalo mínimo efectivo (``max(cooldown, MARATHON_MIN_CHANNEL_INTERVAL_HOURS)``,
-    suelo 48h) se saltan — la rotación round-robin los omite sin romper el orden.
+    suelo 36h) se saltan — la rotación round-robin los omite sin romper el orden.
 
     Returns:
         (slug, channel_id, config_json) or None if no channel eligible.
@@ -245,7 +245,7 @@ def select_marathon_channel(db) -> tuple[str, int, dict] | None:
     if not all_eligible:
         return None
 
-    # ── Filtro de separación por canal (cooldown + suelo duro 48h) ──
+    # ── Filtro de separación por canal (cooldown + suelo duro 36h) ──
     eligible = [
         item for item in all_eligible
         if not _channel_in_marathon_cooldown(db, item[1], item[2])

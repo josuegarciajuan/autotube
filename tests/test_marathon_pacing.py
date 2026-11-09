@@ -56,6 +56,11 @@ def test_backlog_threshold_default_is_strike_4(tmp_path):
     assert ms._marathon_backlog_per_channel(db) == 4
 
 
+def test_default_min_interval_is_36h():
+    """El suelo duro por canal baja a 36h para acelerar el drenaje de cola."""
+    assert ms._marathon_min_interval_hours({}) == 36
+
+
 def test_backlog_threshold_is_conservative_across_profiles(tmp_path):
     """Los maratones ya no se amplifican por perfil: umbral 4/con canal."""
     from api.services import pacing_profile
@@ -168,8 +173,8 @@ def test_select_marathon_channel_none_when_all_disabled(tmp_path):
     assert ms.select_marathon_channel(db) is None
 
 
-def test_min_interval_48h_blocks_recent_marathon_even_with_cooldown_zero(tmp_path):
-    """Suelo duro de 48h: cooldown=0 NO permite repetir canal al instante."""
+def test_min_interval_36h_blocks_recent_marathon_even_with_cooldown_zero(tmp_path):
+    """Suelo duro de 36h: cooldown=0 NO permite repetir canal al instante."""
     db = _db(tmp_path)
     db.create_channel("A", "canalA", {"MARATHON_ENABLED": True, "MARATHON_COOLDOWN_HOURS": 0})
     db.record_marathon(1, "completed")  # recién maratoneado
@@ -178,7 +183,7 @@ def test_min_interval_48h_blocks_recent_marathon_even_with_cooldown_zero(tmp_pat
 
 
 def test_min_interval_expires_allows_channel(tmp_path):
-    """Pasado el suelo de 48h el canal vuelve a ser elegible."""
+    """Pasado el suelo de 36h el canal vuelve a ser elegible."""
     import json as _json
     from datetime import datetime as _dt, timedelta as _td
     db = _db(tmp_path)
