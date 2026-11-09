@@ -12,6 +12,7 @@ import argparse
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -84,20 +85,30 @@ def main() -> int:
             print(f"❌ {slug}: restart falló: {r.stderr[-300:]}", file=sys.stderr)
             failed += 1
             continue
-        # Verificación de IP real con el token del registro.
-        try:
-            import requests
-            url = str(cfg["url"]).rstrip("/") + "/healthz"
-            resp = requests.get(url, headers={"X-Agent-Token": str(cfg.get("token", ""))},
-                                timeout=30)
-            data = resp.json()
-            ok = bool(data.get("ok")) and bool(data.get("egress_ok"))
-            print(f"{'✅' if ok else '❌'} {slug}: {data.get('egress_ip')} "
-                  f"(esperada {data.get('expected_ip')})")
-            if not ok:
-                failed += 1
-        except Exception as exc:  # noqa: BLE001
-            print(f"❌ {slug}: healthz no accesible: {exc}", file=sys.stderr)
+        # Verificación de IP real con reintentos: systemd tarda unos segundos.
+        import requests
+        url = str(cfg["url"]).rstrip("/") + "/healthz"
+        data = {}
+        ok = False
+        last_err = ""
+        for _ in range(12):
+            try:
+                resp = requests.get(
+                    url, headers={"X-Agent-Token": str(cfg.get("token", ""))},
+                    timeout=10,
+                )
+                data = resp.json()
+                ok = bool(data.get("ok")) and bool(data.get("egress_ok"))
+                if ok:
+                    break
+            except Exception as exc:  # noqa: BLE001
+                last_err = str(exc)
+            time.sleep(5)
+        print(f"{'✅' if ok else '❌'} {slug}: {data.get('egress_ip')} "
+              f"(esperada {data.get('expected_ip')})")
+        if not ok:
+            if last_err:
+                print(f"   último error: {last_err}", file=sys.stderr)
             failed += 1
 
     return 1 if failed else 0
