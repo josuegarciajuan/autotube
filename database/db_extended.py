@@ -8314,25 +8314,24 @@ class ExtendedDatabase(Database):
             sparkline_impressions: list = []
             sparkline_ctr: list = []
             reach_where = "AND channel_id = ?" if channel_id else ""
-            reach_by_date: dict = {}
+            reach_spark_rows: list = []
             total_impressions = 0
             reach_ctr = 0.0
             impressions_prev = 0
             reach_ctr_prev = 0.0
             try:
+                # Últimos 8 días CON datos reales del Reporting API. El informe
+                # puede llegar con 1-3 días de latencia; rellenar por fecha fija
+                # dejaba una cola de ceros que el frontend pintaba como caída.
                 reach_spark_rows = conn.execute(
                     f"""SELECT date,
                                SUM(impressions) AS imp,
                                SUM(impressions * impressions_ctr / 100.0) AS clicks
                         FROM video_reach_daily
-                        WHERE date >= date('now', '-8 days') {reach_where}
-                        GROUP BY date ORDER BY date""",
+                        WHERE 1=1 {reach_where}
+                        GROUP BY date ORDER BY date DESC LIMIT 8""",
                     ch_params,
                 ).fetchall()
-                reach_by_date = {
-                    r["date"]: (int(r["imp"] or 0), float(r["clicks"] or 0))
-                    for r in reach_spark_rows
-                }
                 reach_tot = conn.execute(
                     f"""SELECT COALESCE(SUM(impressions), 0) AS imp,
                                COALESCE(SUM(impressions * impressions_ctr / 100.0), 0) AS clicks
@@ -8363,7 +8362,6 @@ class ExtendedDatabase(Database):
             except sqlite3.OperationalError:
                 # Migración v60 pendiente: el dashboard degrada a ceros sin romper.
                 pass
-            _now_utc = datetime.now(_dt_timezone.utc)
 
             for days_ago in range(7, -1, -1):
                 sd = spark_data.get(days_ago, {})
@@ -8375,8 +8373,11 @@ class ExtendedDatabase(Database):
                 sparkline_watch_hours.append(
                     round(sd.get("watch_minutes", 0) / 60.0, 1)
                 )
-                _reach_day = (_now_utc - timedelta(days=days_ago)).strftime("%Y-%m-%d")
-                _imp, _clk = reach_by_date.get(_reach_day, (0, 0))
+
+            # Serie de reach: solo los días que tienen datos (más antiguo → más reciente).
+            for _r in reversed(reach_spark_rows):
+                _imp = int(_r["imp"] or 0)
+                _clk = float(_r["clicks"] or 0)
                 sparkline_impressions.append(_imp)
                 sparkline_ctr.append(round(_clk / _imp * 100, 2) if _imp else 0)
 
