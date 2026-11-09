@@ -1171,7 +1171,8 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
 
     with db._connect() as conn:
         rows = conn.execute(
-            """SELECT v.id, v.channel_id, v.canal, v.video_path, v.thumbnail_path,
+            """SELECT v.id, v.channel_id, v.canal, v.video_path, v.audio_path,
+                       v.thumbnail_path,
                        v.titulo_final, v.thumbnail_text, v.thumbnail_badge_text,
                        v.description, v.tags_json, v.target_public_at,
                        v.scheduled_upload_at, v.publish_mode, c.slug as channel_slug, c.config_json
@@ -1578,6 +1579,46 @@ def dispatch_due_uploads(loop=None, db=None) -> dict | None:
                 )
     except Exception as exc:
         logger.debug("Freshness refresh skipped (%s): %s", slug, exc)
+
+    # ── Narration integrity gate (nov 2026) ────────────────────
+    # Existing long-form renders produced before the contiguous-scene fix can
+    # have an MP4 shorter than the TTS narration (the body lost 8-26 s of
+    # inter-block pauses). Never upload those: hold + alert for re-render.
+    try:
+        _audio_path = video.get("audio_path")
+        if _audio_path:
+            from pipeline.audio_utils import media_duration as _media_duration
+            _narration_dur = _media_duration(_audio_path)
+            _render_dur = _media_duration(vp)
+            if _narration_dur and _render_dur and _render_dur + 2.0 < _narration_dur:
+                logger.error(
+                    "[%s] Video #%d held: render shorter than narration "
+                    "(mp4=%.1fs < mp3=%.1fs) — refusing to publish truncated audio",
+                    slug, video_id, _render_dur, _narration_dur,
+                )
+                db.update_video(video_id, status="validation_failed",
+                                progress_phase="upload")
+                try:
+                    from api.services.lifecycle_monitor import emit_alert
+                    emit_alert(
+                        db, entity_type="video", entity_id=video_id,
+                        channel_id=channel_id, alert_type="narration_truncated",
+                        severity="critical",
+                        title=f"Narración truncada — {slug}",
+                        message="Render más corto que el audio TTS; retenido para re-render",
+                        metadata={
+                            "mp4_duration": round(_render_dur, 2),
+                            "narration_duration": round(_narration_dur, 2),
+                        },
+                    )
+                except Exception as _al_exc:
+                    logger.warning("narration_truncated alert failed: %s", _al_exc)
+                return None
+    except Exception as exc:  # noqa: BLE001 — do not block uploads on probe errors
+        logger.warning(
+            "[%s] Narration integrity check skipped for #%d: %s",
+            slug, video_id, exc,
+        )
 
     # Final fail-closed packaging gate immediately before upload dispatch.
     try:
