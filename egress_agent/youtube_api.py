@@ -297,6 +297,35 @@ def update_video_metadata(cfg: AgentConfig, video_id: str, title: str = None,
 
 
 # ── Channel metadata (channels.update) ─────────────────────────
+def set_title(cfg: AgentConfig, video_id: str, title: str) -> dict:
+    """Actualiza solo el título (preserva el resto del snippet)."""
+    clean = " ".join(str(title or "").split())[:100]
+    if not clean:
+        return {"ok": False, "error": "title vacío"}
+    return update_video_metadata(cfg, video_id, title=clean)
+
+
+def get_video_status(cfg: AgentConfig, video_id: str) -> dict:
+    """Estado actual del vídeo (status+snippet) desde la IP del gateway."""
+    svc = _service(cfg)
+    resp = svc.videos().list(part="status,snippet", id=video_id).execute()
+    items = resp.get("items") or []
+    if not items:
+        return {"ok": False, "error": f"video {video_id} no encontrado"}
+    it = items[0]
+    st = it.get("status", {})
+    sn = it.get("snippet", {})
+    return {"ok": True, "result": {
+        "video_id": it.get("id"),
+        "title": sn.get("title", ""),
+        "privacy_status": st.get("privacyStatus", ""),
+        "upload_status": st.get("uploadStatus", ""),
+        "processing_status": st.get("processingStatus", ""),
+        "processing_failure_reason": st.get("processingFailureReason", ""),
+        "publish_at": st.get("publishAt"),
+    }}
+
+
 def update_channel_metadata(cfg: AgentConfig, description: str = None,
                             keywords: list = None, country: str = None,
                             language: str = None) -> dict:
@@ -481,6 +510,9 @@ def collect_stats(cfg: AgentConfig, video_ids: list = None,
 # ── Registro de operaciones genéricas para /api/call ────────────
 _OP_REGISTRY = {
     "get_channel_info": get_channel_info,
+    "get_video_status": get_video_status,
+    "set_title": set_title,
+    "set_thumbnail": set_thumbnail,
     "set_publish_at": set_publish_at,
     "set_privacy": set_privacy,
     "update_description": update_description,
@@ -503,7 +535,11 @@ def run_api_operation(cfg: AgentConfig, op: str, params: dict) -> dict:
     if fn is None:
         return {"ok": False, "error": f"operación desconocida: {op}"}
     try:
-        return fn(cfg, **params.get("kwargs", {}))
+        # Acepta el contrato nuevo {"kwargs": {...}} y el antiguo (params planos).
+        kwargs = params.get("kwargs")
+        if not isinstance(kwargs, dict):
+            kwargs = params
+        return fn(cfg, **kwargs)
     except Exception as exc:  # noqa: BLE001
         logger.exception("api op %s failed", op)
         return {"ok": False, "error": str(exc)[:1000]}

@@ -47,7 +47,8 @@ def verify_module(monkeypatch):
         return {slug: {"url": "http://x"} for slug in agents}
 
     monkeypatch.setattr(mod, "get_egress_client", fake_get_egress_client)
-    monkeypatch.setattr(mod, "_load_agents", fake_load_agents)
+    monkeypatch.setattr(mod, "get_managed_slugs", lambda db=None: set(agents.keys()))
+    monkeypatch.setattr(mod, "find_local_credentials", lambda slug, profile=None: [])
     mod.agents = agents
     return mod
 

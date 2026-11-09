@@ -158,26 +158,34 @@ class SEOResearcher:
             return self._cache[cache_key]
 
         try:
-            resp = requests.get(
-                self._AUTOCOMPLETE_URL,
-                params={
-                    "client": "youtube",
-                    "ds": "yt",
-                    "q": query,
-                },
-                timeout=5.0,
-                headers={
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/120.0.0.0 Safari/537.36"
-                    ),
-                },
-            )
-            resp.raise_for_status()
+            from api.services.egress_client import is_egress_managed
+            if is_egress_managed(self.slug):
+                from urllib.parse import urlencode
+                from api.services import youtube_gateway
+                url = (f"{self._AUTOCOMPLETE_URL}?"
+                       f"{urlencode({'client': 'youtube', 'ds': 'yt', 'q': query})}")
+                text = youtube_gateway.fetch_google(self.slug, url)
+            else:
+                resp = requests.get(
+                    self._AUTOCOMPLETE_URL,
+                    params={
+                        "client": "youtube",
+                        "ds": "yt",
+                        "q": query,
+                    },
+                    timeout=5.0,
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/120.0.0.0 Safari/537.36"
+                        ),
+                    },
+                )
+                resp.raise_for_status()
 
-            # Response is JSONP: window.google.ac.h(["query", [...], ...])
-            text = resp.text
+                # Response is JSONP: window.google.ac.h(["query", [...], ...])
+                text = resp.text
             # Extract the JSON array from inside the callback
             # Pattern: window.google.ac.h( [...] )
             match = re.search(r"window\.google\.ac\.h\((.*)\)\s*$", text, re.DOTALL)

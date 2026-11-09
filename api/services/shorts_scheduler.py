@@ -880,6 +880,27 @@ def _wait_until_processed(channel_slug: str, yt_id: str, timeout: int = 300) -> 
 
         # ── Try YouTube Data API ────────────────────────────────
         try:
+            # Canal gestionado: consultar el estado vía su gateway.
+            from api.services.egress_client import get_egress_client
+            _egress = get_egress_client(channel_slug)
+            if _egress is not None:
+                try:
+                    st = _egress.get_video_status(yt_id)
+                except Exception as _eg_exc:  # noqa: BLE001
+                    api_failures += 1
+                    logger.warning("[%s] gateway get_video_status falló: %s",
+                                   channel_slug, _eg_exc)
+                    _time.sleep(min(15, 2 + api_failures))
+                    continue
+                ps = st.get("processing_status") or st.get("upload_status") or ""
+                if ps == "failed":
+                    return False
+                if ps in ("succeeded", "processed"):
+                    return True
+                api_attempts += 1
+                _time.sleep(5)
+                continue
+
             from pipeline.youtube_uploader import YouTubeUploader
             uploader = YouTubeUploader(account_name=channel_slug, channel_slug=channel_slug)
             if not uploader.authenticate():
@@ -5964,11 +5985,13 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
 
     # 5. Upload
     from pipeline.youtube_uploader import YouTubeUploader
+    from api.services.egress_client import is_egress_managed
     uploader = YouTubeUploader(account_name=channel_slug, channel_slug=channel_slug)
-    if not uploader.authenticate():
-        logger.error("YouTube auth failed for %s", channel_slug)
-        _native_fail(slot_id, job_id, "autenticación YouTube falló")
-        return None
+    if not is_egress_managed(channel_slug):
+        if not uploader.authenticate():
+            logger.error("YouTube auth failed for %s", channel_slug)
+            _native_fail(slot_id, job_id, "autenticación YouTube falló")
+            return None
 
     # Cross-promotion
     from pipeline.shorts_cross_promote import (
@@ -6386,10 +6409,12 @@ def _upload_queued_short(short_record: dict, db=None, force_immediate: bool = Fa
             )
             return False
 
+        from api.services.egress_client import is_egress_managed
         uploader = YouTubeUploader(account_name=slug, channel_slug=slug)
-        if not uploader.authenticate():
-            logger.error("[%s] YouTube auth failed (queued short #%d)", slug, short_id)
-            return False
+        if not is_egress_managed(slug):
+            if not uploader.authenticate():
+                logger.error("[%s] YouTube auth failed (queued short #%d)", slug, short_id)
+                return False
 
         title = (short_record.get("title") or short_record.get("hook_title") or "Short")[:100]
         # Slot targets are retained for planning/analytics, never sent to YouTube.
@@ -7726,6 +7751,30 @@ def _resolve_source_video(video: dict, clip_start: float, clip_end: float):
     section_start = max(0, clip_start - padding)
     section_end = clip_end + padding
     section_spec = f"*{section_start:.1f}-{section_end:.1f}"
+
+    # 2. Canal gestionado: la descarga va SIEMPRE por su gateway.
+    _slug = video.get("channel_slug")
+    if not _slug and video.get("channel_id"):
+        try:
+            from database.db_extended import ExtendedDatabase
+            _ch = ExtendedDatabase().get_channel(int(video["channel_id"]))
+            _slug = _ch.get("slug") if _ch else None
+        except Exception:
+            _slug = None
+    if _slug:
+        from api.services.egress_client import is_egress_managed
+        if is_egress_managed(_slug):
+            from api.services import youtube_gateway
+            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as _gtmp:
+                _gpath = _gtmp.name
+            try:
+                youtube_gateway.download_clip(_slug, yt_url, section_spec, _gpath)
+                logger.info("[%s] clip source vía gateway: %s", _slug, _gpath)
+                return Path(_gpath), padding
+            except Exception as _gexc:  # noqa: BLE001
+                logger.error("[%s] clip vía gateway falló (%s) — se difiere", _slug, _gexc)
+                Path(_gpath).unlink(missing_ok=True)
+                return None, None
 
     # 2a. Delegación a nodos residenciales (la casa recibe 403 de YouTube).
     try:

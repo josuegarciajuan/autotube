@@ -114,6 +114,10 @@ async def run_thumbnail_verification_cycle(db=None):
     for row in rows:
         video_id, channel_id, canal, yt_video_id, thumbnail_path, publish_mode = row
 
+        # Canal gestionado: todas las lecturas/escrituras van por su gateway.
+        from api.services.egress_client import get_egress_client
+        _egress = get_egress_client(canal)
+
         # ── Quota guard: skip if channel >50% consumed ──────────────
         if track_quota_exceeded_for_cycle(canal):
             logger.debug(
@@ -156,7 +160,16 @@ async def run_thumbnail_verification_cycle(db=None):
             logger.debug("Thumbnail verify: variant lookup failed for #%d: %s", video_id, exc)
 
         # ── 0-quota check: does YouTube already serve one of ours? ──
-        served = fetch_served_thumbnail(yt_video_id)
+        if _egress is not None:
+            from io import BytesIO
+            from PIL import Image
+            from api.services import youtube_gateway
+            data = youtube_gateway.fetch_bytes(
+                canal, f"https://i.ytimg.com/vi/{yt_video_id}/maxresdefault.jpg"
+            )
+            served = Image.open(BytesIO(data)) if data else None
+        else:
+            served = fetch_served_thumbnail(yt_video_id)
         if served is None:
             # Private / not yet indexed — retry next cycle, never re-set blindly.
             logger.debug(
@@ -173,6 +186,40 @@ async def run_thumbnail_verification_cycle(db=None):
 
         # ── Mismatch: re-upload the active thumbnail and confirm ────
         try:
+            logger.info(
+                "[%s] 🔄 Re-uploading thumbnail for video #%d (%s)",
+                canal, video_id, yt_video_id,
+            )
+
+            if _egress is not None:
+                from io import BytesIO
+                from PIL import Image
+                from api.services import youtube_gateway
+                res = youtube_gateway.set_thumbnail(canal, yt_video_id, str(active_path))
+                if not res.get("ok"):
+                    logger.warning(
+                        "[%s] ❌ Thumbnail re-upload vía gateway falló para #%d — retry",
+                        canal, video_id,
+                    )
+                    continue
+                data2 = youtube_gateway.fetch_bytes(
+                    canal, f"https://i.ytimg.com/vi/{yt_video_id}/maxresdefault.jpg"
+                )
+                served2 = Image.open(BytesIO(data2)) if data2 else None
+                ok = served2 is not None and any(
+                    thumbnails_match(cand, yt_video_id, served_image=served2) is True
+                    for cand in candidates
+                )
+                if ok and _persist_verified(db, video_id):
+                    recovered += 1
+                    logger.info("[%s] ✅ Thumbnail repaired for video #%d (%s)", canal, video_id, yt_video_id)
+                else:
+                    logger.warning(
+                        "[%s] ❌ Thumbnail aceptado pero no confirmado para #%d — retry",
+                        canal, video_id,
+                    )
+                continue
+
             from pipeline.youtube_uploader import YouTubeUploader
             uploader = YouTubeUploader(canal)
             if not uploader.authenticate():
@@ -180,10 +227,6 @@ async def run_thumbnail_verification_cycle(db=None):
                 continue
 
             service = uploader._get_service()
-            logger.info(
-                "[%s] 🔄 Re-uploading thumbnail for video #%d (%s)",
-                canal, video_id, yt_video_id,
-            )
             if not uploader._set_thumbnail(service, yt_video_id, active_path):
                 logger.warning(
                     "[%s] ❌ Thumbnail re-upload FAILED for video #%d — retry next cycle",

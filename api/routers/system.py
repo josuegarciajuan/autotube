@@ -1081,3 +1081,36 @@ def get_playwright_drivers():
         logger.warning("playwright-drivers endpoint failed: %s", exc)
         return {"error": str(exc)}
 
+
+@router.get("/system/egress-status")
+def get_egress_status():
+    """Estado por canal del egress aislado (DB + registro + monitor)."""
+    from api.services.egress_registry import get_managed_slugs, get_profile
+    db = get_db()
+    out = []
+    for slug in sorted(get_managed_slugs(db)):
+        item = {"slug": slug, "managed": True}
+        try:
+            p = get_profile(slug)
+            if p is not None:
+                item.update({
+                    "url": p.url,
+                    "expected_ip": p.expected_ip,
+                    "label": p.label,
+                    "source": p.source,
+                })
+        except Exception as exc:  # noqa: BLE001
+            item["error"] = str(exc)
+        try:
+            ch = db.get_channel_by_slug(slug) or {}
+            item.update({
+                "status": ch.get("egress_status"),
+                "last_ip": ch.get("egress_last_ip"),
+                "last_verified_at": str(ch.get("egress_last_verified_at") or ""),
+                "egress_down": db.get_system_state(f"egress_down_{slug}") == "1",
+            })
+        except Exception:  # noqa: BLE001
+            pass
+        out.append(item)
+    return {"ok": True, "channels": out}
+

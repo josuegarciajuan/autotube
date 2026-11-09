@@ -234,6 +234,24 @@ class YouTubeUploader:
             return getattr(self.config, name, fallback)
         return fallback
 
+    def _egress_client(self):
+        """Cliente del gateway si el canal es gestionado; None si no."""
+        if not self.channel_slug:
+            return None
+        from api.services.egress_client import get_egress_client
+        return get_egress_client(self.channel_slug)
+
+    def _build_upload_ref(self, video_path: Path, original_video_path: Path) -> str:
+        """Identidad idempotente de una subida (misma entrada -> mismo ref)."""
+        import hashlib
+        try:
+            st = Path(video_path).stat()
+            raw = (f"{self.channel_slug}|{original_video_path}|"
+                   f"{st.st_size}|{int(st.st_mtime)}")
+        except Exception:
+            raw = f"{self.channel_slug}|{original_video_path}|{time.time()}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
     def _get_token_lock(self) -> threading.Lock:
         """Obtain (and possibly create) the mutex for this account's token file."""
         with _TOKEN_LOCKS_GUARD:
@@ -1235,6 +1253,7 @@ class YouTubeUploader:
                     "self_declared_made_for_kids": body["status"].get("selfDeclaredMadeForKids", False),
                     "embeddable": body["status"].get("embeddable", True),
                     "public_stats_viewable": body["status"].get("publicStatsViewable", True),
+                    "upload_ref": self._build_upload_ref(video_path, original_video_path),
                 }
                 _thumb = str(thumbnail_path) if thumbnail_path and Path(thumbnail_path).is_file() else None
                 self._update_egress_transfer_state(video_path, "transferring")
@@ -1246,8 +1265,12 @@ class YouTubeUploader:
                 _staged_path = _stage.get("staged_path", "")
                 self._update_egress_transfer_state(video_path, "staged",
                                                    vps_staged_path=_staged_path)
-                if _thumb:
-                    _meta["thumbnail_path"] = _thumb
+                # El thumbnail debe ser la ruta REMOTA que devolvió /stage.
+                # Pasar la ruta local del servidor hacía que el VPS no la
+                # encontrara y la subida quedara sin thumbnail.
+                _staged_thumb = _stage.get("thumbnail_path")
+                if _staged_thumb:
+                    _meta["thumbnail_path"] = _staged_thumb
                 logger.info("[%s] etapa 2/2: subiendo desde el VPS (staged=%s)", self.channel_slug, _staged_path)
                 agent_res = _egress_client.upload(_staged_path, _meta)
                 if not agent_res.get("ok"):
@@ -1466,6 +1489,13 @@ class YouTubeUploader:
         clean = " ".join(str(title or "").split())[:100]
         if not clean:
             raise ValueError("title cannot be empty")
+        client = self._egress_client()
+        if client is not None:
+            res = client.api_call("set_title", {"kwargs": {
+                "video_id": video_id, "title": clean}})
+            if not res.get("ok"):
+                raise RuntimeError(res.get("error", "set_title vía gateway falló"))
+            return {"updated": True, "yt_video_id": video_id, "title": clean}
         service = self._get_service()
 
         try:
@@ -1523,6 +1553,13 @@ class YouTubeUploader:
 
         Returns {updated: True, yt_video_id: str} or raises HttpError.
         """
+        client = self._egress_client()
+        if client is not None:
+            res = client.api_call("update_description", {"kwargs": {
+                "video_id": video_id, "description": description}})
+            if not res.get("ok"):
+                raise RuntimeError(res.get("error", "update_description vía gateway falló"))
+            return {"updated": True, "yt_video_id": video_id}
         service = self._get_service()
 
         # Fetch current title — YouTube API requires `title` on snippet updates
@@ -1590,6 +1627,13 @@ class YouTubeUploader:
         if privacy not in ("public", "unlisted", "private"):
             raise ValueError(f"Invalid privacy status: {privacy}. Must be 'public', 'unlisted', or 'private'.")
 
+        client = self._egress_client()
+        if client is not None:
+            res = client.api_call("set_privacy", {"kwargs": {
+                "video_id": video_id, "privacy": privacy}})
+            if not res.get("ok"):
+                raise RuntimeError(res.get("error", "set_privacy vía gateway falló"))
+            return {"updated": True, "yt_video_id": video_id, "privacy": privacy}
         service = self._get_service()
 
         body = {
@@ -1644,6 +1688,19 @@ class YouTubeUploader:
                 "updated": True, "yt_video_id": video_id,
                 "publish_at": publish_at, "skipped_recent": True,
                 "attempts": 0,
+            }
+
+        client = self._egress_client()
+        if client is not None:
+            res = client.api_call("set_publish_at", {"kwargs": {
+                "video_id": video_id, "publish_at": publish_at}})
+            if not res.get("ok"):
+                raise RuntimeError(res.get("error", "set_publish_at vía gateway falló"))
+            self._stamp_publish_at(video_id, publish_at)
+            return {
+                "updated": True, "yt_video_id": video_id,
+                "publish_at": publish_at, "attempts": 0,
+                "via": "gateway",
             }
 
         service = self._get_service()
@@ -1750,6 +1807,11 @@ class YouTubeUploader:
         (it can silently keep the auto frame). Callers that need certainty must
         follow up with :meth:`_verify_thumbnail_applied`.
         """
+        client = self._egress_client()
+        if client is not None:
+            res = client.set_thumbnail(video_id, str(thumbnail_path))
+            return bool(res.get("ok"))
+
         try:
             service.thumbnails().set(
                 videoId=video_id,

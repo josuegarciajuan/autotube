@@ -56,10 +56,33 @@ def _parse_suggestions(raw: str) -> list[str]:
     return out
 
 
+_active_slug: str | None = None
+
+
+def set_active_channel(slug: str | None) -> None:
+    """Fija el canal del worker actual (para el guard de egress)."""
+    global _active_slug
+    _active_slug = slug
+
+
+def _managed_active() -> bool:
+    if not _active_slug:
+        return False
+    try:
+        from api.services.egress_client import is_egress_managed
+        return is_egress_managed(_active_slug)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def fetch_suggestions(query: str, timeout: float = 4.0) -> list[str]:
     """Sugerencias públicas de YouTube para ``query`` (0 cuota). ``[]`` si falla."""
     query = (query or "").strip()
     if not query:
+        return []
+    if _managed_active():
+        # Google Suggest aún no está delegado; no filtrar la IP del servidor.
+        logger.debug("autocomplete deshabilitado para canal gestionado %s", _active_slug)
         return []
     now = time.time()
     cached = _cache.get(query)

@@ -38,6 +38,15 @@ logger = logging.getLogger(__name__)
 # ── Constants ─────────────────────────────────────────────────────────
 
 _YTDLP_BIN = "yt-dlp"
+
+
+def _is_managed_channel(slug) -> bool:
+    """True si el canal debe delegar su egress (nunca yt-dlp local)."""
+    try:
+        from api.services.egress_client import is_egress_managed
+        return bool(slug) and is_egress_managed(slug)
+    except Exception:  # noqa: BLE001
+        return False
 _OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output"
 _TEMP_DIR = _OUTPUT_DIR / "temp"
 _VIRAL_AUDIO_DIR = _TEMP_DIR / "viral_audio"
@@ -497,6 +506,13 @@ class YouTubeViralScraper(BaseScraper):
 
     def _search_youtube(self, query: str, max_results: int = 15) -> list[dict]:
         """Search YouTube with yt-dlp and extract metadata. No API quota used."""
+        _slug = getattr(self, "slug", None) or getattr(self, "canal", None)
+        if _is_managed_channel(_slug):
+            self.logger.warning(
+                "[%s] Búsqueda viral deshabilitada para canal gestionado: "
+                "debe delegarse al gateway (no se usa yt-dlp local)", _slug,
+            )
+            return []
         ytdl_query = f"ytsearch{max_results}:{query}"
         results = []
 
@@ -808,7 +824,17 @@ class YouTubeViralScraper(BaseScraper):
             return None
 
     def _fetch_real_upload_date(self, video_url: str) -> datetime | None:
-        """Fetch the real upload date for a single video using yt-dlp without --flat-playlist.
+        """Fetch the real upload date for a single video using yt-dlp without --flat-playlist."""
+        _slug = getattr(self, "slug", None) or getattr(self, "canal", None)
+        if _is_managed_channel(_slug):
+            self.logger.warning(
+                "[%s] upload_date viral deshabilitado (canal gestionado)", _slug,
+            )
+            return None
+        return self._fetch_real_upload_date_local(video_url)
+
+    def _fetch_real_upload_date_local(self, video_url: str) -> datetime | None:
+        """Implementación local (solo canales NO gestionados).
 
         --flat-playlist searches skip upload_date metadata. This method does a
         dedicated yt-dlp call for a specific video URL to get the real date.
@@ -1540,7 +1566,17 @@ class YouTubeViralScraper(BaseScraper):
     # ── Video download + transcription ──────────────────────────
 
     def _fetch_subtitles(self, video_url: str, video_id: str) -> str | None:
-        """Descarga subtítulos (auto o manuales) en inglés SIN bajar el media.
+        """Descarga subtítulos (auto o manuales) en inglés SIN bajar el media."""
+        _slug = getattr(self, "slug", None) or getattr(self, "canal", None)
+        if _is_managed_channel(_slug):
+            self.logger.warning(
+                "[%s] subtítulos virales deshabilitados (canal gestionado)", _slug,
+            )
+            return None
+        return self._fetch_subtitles_local(video_url, video_id)
+
+    def _fetch_subtitles_local(self, video_url: str, video_id: str) -> str | None:
+        """Implementación local (solo canales NO gestionados).
 
         Usa ``yt-dlp --skip-download``, que resuelve a nivel de metadata (igual
         que la búsqueda, que sí funciona desde datacenter). Evita el bloqueo que

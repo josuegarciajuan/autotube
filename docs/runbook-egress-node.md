@@ -209,3 +209,57 @@ Replicar en otro nodo:
 | Disco alto | `docker system df`, purgar staging, revisar TTL. |
 | Chromium/VNC no arranca | `docker logs`; reconstruir imagen; reiniciar servicio. |
 | Cambio de IP | Actualizar `expected_ip` en el nodo y en `egress_agents.json`; reiniciar. |
+
+## 14. Alta asistida con software
+
+El alta de un canal nuevo se reduce a un comando (desde el servidor principal):
+
+```sh
+python3 scripts/provision_egress_channel.py \
+  --slug canal7 \
+  --name "Canal 7" \
+  --ssh-host 100.90.30.60 \
+  --expected-ip 151.80.142.93 \
+  --agent-port 9107 \
+  --vnc-port 5957 \
+  --google-account canal7
+```
+
+Hace:
+
+- crea/marca el canal con `egress_managed=1`;
+- instala/actualiza `egress-canal7.service` en el nodo;
+- escribe la entrada en `config/egress_agents.json` (0600);
+- guarda el password VNC en `/root/.config/autotube/egress-canal7-vnc.txt`;
+- imprime el túnel SSH y el checklist.
+
+Después, el operador entra por TightVNC y crea Gmail/YouTube/GCP. Cuando tenga
+el `client_secret`:
+
+```sh
+python3 scripts/deploy_channel_oauth.py \
+  --slug canal7 --file client_secret_canal7.json
+```
+
+Y completa OAuth/Studio siguiendo la sección 7-8.
+
+## 15. Actualización de todos los gateways
+
+Tras un cambio de código:
+
+```sh
+python3 scripts/sync_egress_gateways.py
+```
+
+Reconstruye la imagen, la transfiere a cada nodo, reinicia `egress-<slug>` y
+verifica `healthz`/IP. Si falla un gateway, no se considera actualizado.
+
+## 16. Gate antes de operar
+
+```sh
+python3 scripts/audit_egress_coverage.py
+python3 scripts/verify_egress.py --slug canal7 --deep
+```
+
+Ambos deben estar en verde. `--deep` además prueba `get_channel_info` vía
+gateway y comprueba que no hay credenciales locales del canal en el servidor.

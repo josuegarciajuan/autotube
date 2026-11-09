@@ -50,6 +50,7 @@ class AgentConfig:
     staging_max_gb: float = 5.0        # cuota por canal
     staging_ttl_hours: int = 6         # purga de ficheros huérfanos
     min_free_gb: float = 2.0           # no aceptar staging por debajo de esto
+    state_dir: str = ""                # ledger idempotente (default: <staging>/../state)
 
     # ── Proxy Playwright opcional (si NO se usa túnel a nivel de SO) ──
     # Si la VPS enruta su salida a nivel de sistema, esto debe dejarse vacío.
@@ -73,6 +74,10 @@ class AgentConfig:
         self.browser_profile_dir = str(_abs(self.browser_profile_dir, f"tokens/{self.google_account or self.slug}_browser_profile"))
         self.browser_session_path = str(_abs(self.browser_session_path, f"tokens/{self.google_account or self.slug}_browser_session.json"))
         self.staging_dir = str(_abs(self.staging_dir, "output/vps_staging"))
+        if self.state_dir:
+            self.state_dir = str(_abs(self.state_dir, "state"))
+        else:
+            self.state_dir = str(Path(self.staging_dir).parent / "state")
         self.project_root = str(base)
         return self
 
@@ -127,6 +132,7 @@ class AgentConfig:
             staging_max_gb=float(_g("AGENT_STAGING_MAX_GB", "5")),
             staging_ttl_hours=int(_g("AGENT_STAGING_TTL_HOURS", "6")),
             min_free_gb=float(_g("AGENT_MIN_FREE_GB", "2")),
+            state_dir=_g("AGENT_STATE_DIR"),
             playwright_proxy=proxy,
         )
         return cfg.resolve_paths()
