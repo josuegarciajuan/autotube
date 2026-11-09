@@ -2033,6 +2033,7 @@ def run_job(
                 # (AB_TEST_THUMBNAIL_VARIANTS). Antes estaba fijado a 3.
                 _num_variants = int(getattr(config, "AB_TEST_THUMBNAIL_VARIANTS", 3) or 3)
                 _num_variants = max(2, min(5, _num_variants))
+                _primary_spec = (metadata or {}).get("thumbnail_spec")
                 ab_test_variant_paths = maker.make_variant_thumbnails(
                     title=title_for_thumb,
                     script_text=script_text,
@@ -2044,6 +2045,7 @@ def run_job(
                     video_id=video_id,
                     num_variants=_num_variants,
                     scene_images=_scene_images or None,
+                    primary_overlay_spec=_primary_spec,
                 )
                 
                 if ab_test_variant_paths:
@@ -2051,11 +2053,17 @@ def run_job(
                     ab_test_variant_strategies = list(
                         getattr(maker, "last_variant_strategies", []) or []
                     )
-                    # Update thumbnail_path to the first variant (will be uploaded)
-                    video_data["thumbnail_path"] = str(ab_test_variant_paths[0])
+                    # Deterministic winner: make_variant_thumbnails already
+                    # sorts by QC score, so [0] is the best candidate.
+                    _selected_path = str(ab_test_variant_paths[0])
+                    _qc = getattr(maker, "last_variant_qc", None) or {}
+                    video_data["thumbnail_path"] = _selected_path
                     db.update_video(
                         video_id,
-                        thumbnail_path=str(ab_test_variant_paths[0]),
+                        thumbnail_path=_selected_path,
+                        thumbnail_qc_score=int(_qc.get("score", 0) or 0),
+                        thumbnail_qc_issues=",".join(_qc.get("issues") or []),
+                        thumbnail_pipeline_version="thumb-ctr-2026-11",
                     )
                     logger.info(
                         "[AB] Generated %d thumbnail variants for video %s",

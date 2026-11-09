@@ -1505,6 +1505,9 @@ def migrate_v2(db_path: str = None):
     # ── v73: soft niche — score/decisión por vídeo (exploración acotada) ──
     _migrate_v73(conn, logger)
 
+    # ── v74: thumbnail QC — legibilidad/packaging por vídeo (nov 2026) ──
+    _migrate_v74(conn, logger)
+
     conn.commit()
     conn.close()
     
@@ -4522,7 +4525,11 @@ class ExtendedDatabase(Database):
                     # video and the upload gate's overlay check was a no-op.
                     "thumbnail_text", "thumbnail_badge_text",
                     "thumbnail_emphasis", "thumbnail_variant_strategy",
-                    "thumbnail_overlay_source"]
+                    "thumbnail_overlay_source",
+                    # ── Thumbnail QC (v74) ──
+                    "thumbnail_qc_score", "thumbnail_qc_issues",
+                    "thumbnail_pipeline_version",
+                    "thumbnail_overlay_l1", "thumbnail_overlay_l2"]
         
         # ── Guard: never overwrite status to 'error' if video was already uploaded ──
         # A video with a YouTube ID was successfully published. Pipeline failures
@@ -13475,6 +13482,37 @@ def _migrate_v70(conn, logger):
 
     conn.commit()
     logger.info("Migration v70: franja-first duplicate index ready")
+
+
+def _migrate_v74(conn, logger):
+    """Idempotent v74: deterministic thumbnail QC + rendered overlay lines.
+
+    The QC score/issues are persisted so the panel and the packaging audit can
+    rank thumbnails without re-opening every image. ``thumbnail_overlay_l1/l2``
+    store exactly what was painted (the canonical OverlaySpec), which is what
+    the CTR model should attribute against — not the raw title.
+    """
+    cols = (
+        ("thumbnail_qc_score", "INTEGER"),
+        ("thumbnail_qc_issues", "TEXT DEFAULT ''"),
+        ("thumbnail_pipeline_version", "TEXT DEFAULT ''"),
+        ("thumbnail_overlay_l1", "TEXT DEFAULT ''"),
+        ("thumbnail_overlay_l2", "TEXT DEFAULT ''"),
+    )
+    try:
+        existing = {row[1] for row in conn.execute("PRAGMA table_info('videos')")}
+        for name, typ in cols:
+            if name in existing:
+                continue
+            try:
+                conn.execute(f"ALTER TABLE videos ADD COLUMN {name} {typ}")
+                logger.info("Migration v74: videos.%s added", name)
+            except sqlite3.OperationalError as exc:
+                logger.debug("Migration v74 videos.%s: %s", name, exc)
+    except sqlite3.OperationalError as exc:
+        logger.debug("Migration v74: videos not present yet (%s)", exc)
+    conn.commit()
+    logger.info("Migration v74: thumbnail QC metadata ready")
 
 
 def _migrate_v73(conn, logger):

@@ -2833,6 +2833,17 @@ class PipelineOrchestrator:
                     )
                     video_data["thumbnail_path"] = str(new_thumb)
                     video_data["titulo"] = metadata["selected_title"]
+                    _qc = getattr(self.thumbnail_maker, "last_qc_result", None)
+                    _vid = video_data.get("video_id")
+                    if _vid and _qc is not None:
+                        _fields = _qc.as_db_fields()
+                        _fields["thumbnail_pipeline_version"] = "thumb-ctr-2026-11"
+                        _spec = metadata.get("thumbnail_spec") or {}
+                        if _spec.get("l1"):
+                            _fields["thumbnail_overlay_l1"] = _spec.get("l1", "")
+                        if _spec.get("l2"):
+                            _fields["thumbnail_overlay_l2"] = _spec.get("l2", "")
+                        self.db.update_video(_vid, **_fields)
                     logger.info(f"[{self.canal}] Enhanced viral thumbnail: {new_thumb}")
                 except Exception as e:
                     logger.warning(f"[{self.canal}] Thumbnail regeneration failed: {e} — keeping original")

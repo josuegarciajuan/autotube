@@ -49,6 +49,12 @@ _FONT_REGISTRY: dict[str, list[str]] = {
     "LiberationSerif-Bold": [
         "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
     ],
+    "DejaVuSansCondensed-Bold": [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf",
+    ],
+    "NimbusSansNarrow-Bold": [
+        "/usr/share/fonts/opentype/urw-base35/NimbusSansNarrow-Bold.otf",
+    ],
 }
 
 # Default sans-serif candidates (used when font_name is not in registry)
@@ -160,6 +166,14 @@ class ThumbnailMaker:
 
         # ── Per-channel thumbnail customisation (v2.1) ──────────
         self.font_family = getattr(config, "THUMBNAIL_FONT_FAMILY", "DejaVuSans-Bold")
+        # Style-driven typography: ancient_mystery → serif, distress_signal →
+        # condensed. Config-driven (not slug-hardcoded) so a new channel of the
+        # same visual profile inherits the right voice automatically.
+        _by_style = getattr(config, "THUMBNAIL_FONT_FAMILY_BY_STYLE", None) or {}
+        _visual_style = str(getattr(config, "THUMBNAIL_VISUAL_STYLE", "") or "")
+        if (_visual_style in _by_style
+                and self.font_family in ("", "DejaVuSans-Bold", None)):
+            self.font_family = _by_style[_visual_style]
         self.border_color = self._parse_color(
             getattr(config, "THUMBNAIL_BORDER_COLOR", "#CC0000")
         )
@@ -203,6 +217,34 @@ class ThumbnailMaker:
         self.last_overlay_spec = None
         # W6: strategy labels of the last A/B variant batch (for attribution).
         self.last_variant_strategies: list[str] = []
+        # Nov 2026 (CTR round): deterministic QC of the last composed image.
+        self.last_qc_result = None
+        self.last_text_meta: dict = {}
+        # Composition safety caps: the old ×1.3 double-boost crushed shadows.
+        self.max_dark_ratio = float(getattr(config, "THUMBNAIL_MAX_DARK_RATIO", 0.35))
+        self.max_gradient_opacity = int(
+            getattr(config, "THUMBNAIL_MAX_GRADIENT_OPACITY", 130)
+        )
+        self.max_vignette = float(getattr(config, "THUMBNAIL_MAX_VIGNETTE", 0.45))
+        self.contrast_boost_max = float(
+            getattr(config, "THUMBNAIL_CONTRAST_BOOST_MAX", 1.25)
+        )
+        self.saturation_max = float(getattr(config, "THUMBNAIL_SATURATION_MAX", 1.15))
+        self.salient_crop_enabled = bool(
+            getattr(config, "THUMBNAIL_SALIENT_CROP", True)
+        )
+        self.text_panel_mode = str(
+            getattr(config, "THUMBNAIL_TEXT_PANEL_MODE", "auto")
+        ).lower()
+        self.text_panel_opacity = int(
+            getattr(config, "THUMBNAIL_TEXT_PANEL_OPACITY", 120)
+        )
+        self.badge_font_px = int(
+            getattr(config, "THUMBNAIL_BADGE_FONT_PX", 40)
+        )
+        self.face_role_policy = str(
+            getattr(config, "THUMBNAIL_FACE_ROLE_POLICY", "person_only")
+        ).lower()
 
         self.font = _find_font(self.font_size, bold=True,
                                font_name=self.font_family)
@@ -548,6 +590,7 @@ class ThumbnailMaker:
                 allow_faces=allow_faces,
                 preferred_layout=getattr(brief, "layout", "") or "",
                 video_id=video_id,
+                face_role_policy=self.face_role_policy,
             )
         # Make the chosen layout authoritative for the recompose.
         brief.layout = art_direction.layout
@@ -699,6 +742,7 @@ class ThumbnailMaker:
         variant_briefs: list | None = None,
         num_variants: int = 3,
         scene_images: list | None = None,
+        primary_overlay_spec: dict | None = None,
     ) -> list[Path]:
         """Generate multiple thumbnail variants for A/B testing.
         
@@ -791,10 +835,11 @@ class ThumbnailMaker:
             allow_faces=allow_faces,
             preferred_layout=getattr(variant_briefs[0], "layout", "") or "",
             video_id=video_id,
+            face_role_policy=self.face_role_policy,
         )
         self._last_art_direction = art
         base_image = self._generate_subject_image(
-            brief=variant_briefs[0], style=style, slug=slug, art=art,
+            brief=variant_briefs[0], style=style, slug=slug, art=art, title=title,
         )
         # Store for metadata recompose
         self._last_raw_base = base_image
@@ -816,7 +861,9 @@ class ThumbnailMaker:
 
         variant_paths: list[Path] = []
         self.last_variant_strategies = []
+        self.last_variant_qc = None
         variant_specs: list = []
+        variant_qc: list[dict] = []
         used_layouts: list[str] = list(recent_context.get("layouts", []) or [])
         for i, brief in enumerate(variant_briefs):
             strategy_key = getattr(brief, "variant_strategy", "") or f"variant_{i+1}"
@@ -826,19 +873,46 @@ class ThumbnailMaker:
                 from pipeline.packaging_brief import split_overlay_text
                 l1, l2 = split_overlay_text(getattr(brief, 'text_overlay', '') or '')
             badge = getattr(brief, 'badge_text', '') or ''
-            from pipeline.packaging_brief import build_overlay_spec, render_overlay
-            spec = build_overlay_spec(
-                title=title,
-                cfg=self._channel_cfg,
-                script_text=script_text,
-                raw_l1=l1,
-                raw_l2=l2,
-                raw_badge=badge,
-                emphasis=getattr(brief, 'emphasis_word', '') or art.emphasis_word,
-                subject_noun=art.primary_subject,
-                variant_strategy=strategy_key,
-                source="brainstorm",
+            from pipeline.packaging_brief import (
+                OverlaySpec, build_overlay_spec, render_overlay,
             )
+            if i == 0 and primary_overlay_spec:
+                # The curated packaging spec (metadata phase) is the primary
+                # arm. Before nov 2026 the worker uploaded variant 1 from a
+                # second brainstorm, so the persisted overlay was never the
+                # one painted — and the painted copy could be truncated.
+                spec = OverlaySpec.from_dict(primary_overlay_spec)
+                spec = build_overlay_spec(
+                    title=title,
+                    cfg=self._channel_cfg,
+                    script_text=script_text,
+                    raw_l1=spec.l1,
+                    raw_l2=spec.l2,
+                    raw_badge=spec.badge,
+                    emphasis=spec.emphasis,
+                    subject_noun=spec.subject_noun or art.primary_subject,
+                    variant_strategy=strategy_key,
+                    source=spec.source or "metadata",
+                )
+            else:
+                spec = build_overlay_spec(
+                    title=title,
+                    cfg=self._channel_cfg,
+                    script_text=script_text,
+                    raw_l1=l1,
+                    raw_l2=l2,
+                    raw_badge=badge,
+                    emphasis=getattr(brief, 'emphasis_word', '') or art.emphasis_word,
+                    subject_noun=art.primary_subject,
+                    variant_strategy=strategy_key,
+                    source="brainstorm",
+                )
+            # Keep the brief in sync with the reconciled spec so the painter
+            # and the persisted overlay can never diverge.
+            brief.text_gancho = spec.l1
+            brief.text_complemento = spec.l2
+            brief.badge_text = spec.badge
+            brief.emphasis_word = spec.emphasis
             # Rotation: variant i never reuses a layout already used here.
             # Prefer the strategy's own layout pool when it has one.
             strategy_pool = VARIANT_STRATEGIES.get(strategy_key, {}).get("layouts")
@@ -853,6 +927,7 @@ class ThumbnailMaker:
                 allow_faces=allow_faces,
                 preferred_layout=getattr(brief, 'layout', '') or "",
                 video_id=video_id,
+                face_role_policy=self.face_role_policy,
             ).layout
             used_layouts.insert(0, layout)
             brief.layout = layout
@@ -886,21 +961,49 @@ class ThumbnailMaker:
                 output_suffix=f"_v{i + 1}",
             )
             variant_paths.append(thumb_path)
+            qc = getattr(self, "last_qc_result", None)
+            variant_qc.append({
+                "path": str(thumb_path),
+                "strategy": strategy_key,
+                "score": int(getattr(qc, "score", 0) or 0),
+                "issues": list(getattr(qc, "issues", []) or []),
+                "spec": spec,
+                "layout": layout,
+            })
             logger.info(
-                "[Thumbnail v2] ✅ Variant %d/%d complete (%s): %s",
+                "[Thumbnail v2] ✅ Variant %d/%d complete (%s): %s (QC=%s)",
                 i + 1, len(variant_briefs), strategy_key, thumb_path,
+                getattr(qc, "score", "?"),
             )
 
-        # ── P1 + W3/W6: registrar estilo, overlay y estrategia de la variante 1 ──
+        # ── Deterministic winner: best QC score, never blindly variant 1 ──
+        # A/B rotation is intentionally disabled (nov 2026). The first element
+        # returned is the one the worker uploads, so it must be the best-scored
+        # candidate. Ties keep the generation order (primary spec first).
+        if len(variant_qc) > 1:
+            ordered = sorted(
+                enumerate(variant_qc),
+                key=lambda pair: (-pair[1]["score"], pair[0]),
+            )
+            variant_paths = [Path(item["path"]) for _, item in ordered]
+            variant_specs = [item["spec"] for _, item in ordered]
+            self.last_variant_strategies = [item["strategy"] for _, item in ordered]
+            self.last_variant_qc = ordered[0][1]
+        elif variant_qc:
+            self.last_variant_qc = variant_qc[0]
+        winner_spec = variant_specs[0] if variant_specs else None
+
+        # ── P1 + W3/W6: registrar estilo, overlay y estrategia de la ganadora ──
         if video_id:
             try:
                 from database.db_extended import ExtendedDatabase
                 db = ExtendedDatabase()
-                first_spec = variant_specs[0] if variant_specs else None
+                first_spec = winner_spec
                 db.update_video_thumbnail_style(
                     video_id,
                     str(style.get("visual_style", "") or ""),
-                    str(getattr(variant_briefs[0], 'layout', '') or ''),
+                    str((self.last_variant_qc or {}).get("layout", "")
+                        or getattr(variant_briefs[0], 'layout', '') or ''),
                     color_key=str(color_plan.get("color_key", "") or ""),
                     face_role=art.face_role,
                     subject=art.primary_subject[:120],
@@ -909,7 +1012,7 @@ class ThumbnailMaker:
                     emphasis=first_spec.emphasis if first_spec else "",
                     variant_strategy=(self.last_variant_strategies[0]
                                       if self.last_variant_strategies else ""),
-                    overlay_source="brainstorm",
+                    overlay_source=(first_spec.source if first_spec else "brainstorm"),
                 )
             except Exception as exc:
                 logger.warning("[Thumbnail v2] thumbnail_style persist failed (variants): %s", exc)
@@ -1318,11 +1421,37 @@ class ThumbnailMaker:
         style: dict,
         slug: str,
         art: ArtDirection,
+        title: str = "",
     ) -> Path:
         """Generate/fetch the main subject image honouring the provider plan."""
+        from pipeline.thumbnail_relevance import (
+            check_relevance, enforce_subject_relevance,
+        )
+        # Never paint the wrong country: harden the concept with the title
+        # entity before any model sees it.
+        brief.image_concept = enforce_subject_relevance(
+            brief.image_concept, title,
+            art.primary_subject or brief.primary_subject,
+        )
+        rel = check_relevance(title, art.primary_subject or brief.primary_subject,
+                              brief.image_concept)
+        if rel.mismatched_places:
+            logger.warning(
+                "[Thumbnail v3] relevance repair: title=%s subject=%s wrong=%s",
+                rel.title_places, rel.subject_places, rel.mismatched_places,
+            )
+        elif rel.missing_place:
+            logger.info(
+                "[Thumbnail v3] subject does not name the title place %s — "
+                "prompt now requires it", rel.title_places,
+            )
+
         if art.provider_main == "stock":
             query = (art.primary_subject or brief.primary_subject
                      or brief.image_concept or "")
+            if query and rel.title_places:
+                if not any(p in rel.subject_places for p in rel.title_places):
+                    query = f"{query} {rel.title_places[0]}"
             if query:
                 stock = self._fetch_stock_image(query, slug, tag="subject", n=3)
                 if stock:
@@ -1491,35 +1620,42 @@ class ThumbnailMaker:
             text_color = self._hex_to_rgb(color_palette.get("text", "#F5F0E8"))
             shadow_color = self._hex_to_rgb(color_palette.get("shadow", "#0A0A0A"))
 
-        # ── Load and resize ─────────────────────────────────────
+        # ── Load and resize (saliency-aware crop keeps the subject) ──
         img = Image.open(base_image).convert("RGB")
-        img = self._resize_center_crop(img)
+        if self.salient_crop_enabled:
+            img = self._resize_salient_crop(img)
+        else:
+            img = self._resize_center_crop(img)
 
-        # ── Color grading per style (1.3x viral boost) ──────────
+        # ── Color grading (no hidden ×1.3 boost: it crushed shadows) ──
         effects = style.get("effects", {})
-        contrast_boost = float(effects.get("contrast_boost", 1.3)) * 1.3
-        saturation = float(effects.get("saturation", 0.85)) * 1.3
+        contrast_boost = min(
+            float(effects.get("contrast_boost", 1.15)), self.contrast_boost_max
+        )
+        saturation = min(
+            float(effects.get("saturation", 0.9)), self.saturation_max
+        )
         enhancer = ImageEnhance.Contrast(img)
         img = enhancer.enhance(contrast_boost)
         enhancer = ImageEnhance.Color(img)
         img = enhancer.enhance(saturation)
         enhancer = ImageEnhance.Sharpness(img)
-        img = enhancer.enhance(2.0)
+        img = enhancer.enhance(min(float(effects.get("sharpness", 1.4)), 1.6))
 
         # ── Brightness boost (per-style overrideable, gentle global default) ──
-        brightness_boost = float(effects.get("brightness_boost", 1.15))
+        brightness_boost = float(effects.get("brightness_boost", 1.08))
         enhancer = ImageEnhance.Brightness(img)
         img = enhancer.enhance(brightness_boost)
 
-        # ── Focus vignette (strength from layout profile) ───────
+        # ── Focus vignette (capped so the subject keeps mid-tones) ───────
         img = self._apply_focus_vignette(
-            img, strength=comp["vignette_strength"]
+            img, strength=min(comp["vignette_strength"], self.max_vignette)
         )
 
         # ── Dark gradient overlay ───────────────────────────────
         overlay = Image.new("RGBA", (self.width, self.height), (0, 0, 0, 0))
         draw_overlay = ImageDraw.Draw(overlay)
-        gradient_opacity = comp["gradient_opacity"]
+        gradient_opacity = min(comp["gradient_opacity"], self.max_gradient_opacity)
         gradient_start = comp["gradient_start_pct"]
         if comp.get("gradient_inverted"):
             # Dark band at the TOP (text sits at the top).
@@ -1552,7 +1688,8 @@ class ThumbnailMaker:
                 inset_image_path=inset_image_path,
             )
 
-        # ── Text overlay (1 or 2 lines per layout) ──────────────
+        # ── Text overlay (L2 is never discarded just because the layout
+        # profile was authored for one line) ──────────────────
         text_gancho_v = text_gancho.strip() if text_gancho else ""
         text_complemento_v = text_complemento.strip() if text_complemento else ""
 
@@ -1572,83 +1709,160 @@ class ThumbnailMaker:
                 text_gancho_v = parts[0].strip()
                 text_complemento_v = parts[1].strip()
             else:
-                text_gancho_v = brief.text_overlay[:12]
+                text_gancho_v = brief.text_overlay[:14]
 
         if use_uppercase:
             text_gancho_v = text_gancho_v.upper()
             text_complemento_v = text_complemento_v.upper()
 
-        # Truncate to the shared OverlaySpec budgets (W3) — always at a word
-        # boundary, never mid-word (Fase 2: the spec already truncates at word
-        # boundaries; this is a last-resort safety net for legacy paths).
-        from pipeline.packaging_brief import overlay_budgets, _truncate_words
+        # Fit to the shared OverlaySpec budgets without cutting a sentence.
+        from pipeline.packaging_brief import (
+            overlay_budgets, _truncate_words, line_is_dangling,
+        )
         _budgets = overlay_budgets(self._channel_cfg)
         text_gancho_v = _truncate_words(text_gancho_v, _budgets["l1"])
         text_complemento_v = _truncate_words(text_complemento_v, _budgets["l2"])
+        if not text_gancho_v:
+            text_gancho_v = _truncate_words(
+                (brief.text_overlay or title or "").upper(), _budgets["l1"]
+            )
+        # A dangling L2 is worse than no L2.
+        if line_is_dangling(text_complemento_v):
+            text_complemento_v = ""
 
         stroke_w = max(3, self.text_stroke_width + 2)
+        _max_text_w = self.width - 2 * max(40, int(self.width * 0.04))
+        has_l2 = bool(text_complemento_v)
 
-        # ── L1 (gancho) — larger for 1-line layouts ─────────
-        # P6 (ago 2026): texto más grande para legibilidad en móvil (miniaturas
-        # pequeñas). Regla psicología: 25-35% del alto; 17-19% es el máximo
-        # legible sin recortes con _fit_text_to_box. Antes 13-17%.
+        # ── Pick the text zone: never park text over the subject ──
         text_position = comp.get("text_position", "bottom")
+        subject_bbox = self._salient_bbox(img)
+        face_bbox = self._face_bbox(img)
+        if subject_bbox:
+            subject_cy = (subject_bbox[1] + subject_bbox[3]) / 2.0 / self.height
+            # If the subject already occupies the intended text band, flip.
+            if text_position == "bottom" and subject_bbox[3] > self.height * 0.55:
+                text_position = "top"
+            elif text_position == "top" and subject_bbox[1] < self.height * 0.45:
+                text_position = "bottom"
+            elif text_position == "bottom" and subject_cy > 0.56:
+                text_position = "top"
+            elif text_position == "top" and subject_cy < 0.44:
+                text_position = "bottom"
+
+        if text_position == "top":
+            l1_y_pct = 0.055
+        elif text_position == "center":
+            l1_y_pct = 0.30 if has_l2 else 0.36
+        else:  # bottom: lower third, never the centre
+            l1_y_pct = 0.50 if has_l2 else 0.68
+
+        l1_font = l2_font = None
+        l1_size = l2_size = 0
+        l1_x = l1_y = l1_w = l1_h = 0
+        l2_x = l2_y = l2_w = l2_h = 0
+
         if text_gancho_v:
-            # Bigger font when there is only one text line
-            if comp["text_lines"] == 1:
-                gancho_font_size = max(80, int(self.height * 0.19))
-            else:
-                gancho_font_size = max(72, int(self.height * 0.16))
-            if text_position == "top":
-                l1_y_pct = 0.06
-            elif text_position == "center":
-                l1_y_pct = 0.38
-            else:  # bottom
-                l1_y_pct = 0.38 if comp["text_lines"] == 1 else 0.52
-            # Fase 2 (curiosidad oscura): ajustar el tamaño al ancho real del
-            # lienzo con margen seguro — antes era fijo por altura y un L1
-            # dentro de presupuesto podía desbordar el canvas.
-            _max_text_w = self.width - 2 * max(40, int(self.width * 0.04))
-            gancho_font_size, gancho_font = _fit_font_size(
-                draw, text_gancho_v, gancho_font_size, _max_text_w,
-                min_size=56, bold=True, font_name=self.font_family)
-            if gancho_font:
-                bbox_l1 = draw.textbbox((0, 0), text_gancho_v, font=gancho_font)
+            # At 720p the canvas font must be ≥16% tall to stay ≥16 px at the
+            # 100 px feed size. Long copy shrinks, so the overlay stays short.
+            l1_size = max(80, int(self.height * (0.19 if not has_l2 else 0.16)))
+            min_l1 = max(96, int(self.height * 0.155))
+            l1_size, l1_font = _fit_font_size(
+                draw, text_gancho_v, l1_size, _max_text_w,
+                min_size=min_l1, bold=True, font_name=self.font_family,
+            )
+            if l1_font:
+                bbox_l1 = draw.textbbox((0, 0), text_gancho_v, font=l1_font)
                 l1_w = bbox_l1[2] - bbox_l1[0]
                 l1_h = bbox_l1[3] - bbox_l1[1]
                 l1_x = (self.width - l1_w) // 2
                 l1_y = int(self.height * l1_y_pct)
 
-                self._draw_text_line(
-                    draw, text_gancho_v, l1_x, l1_y, gancho_font,
-                    text_color=text_color, shadow_color=shadow_color,
-                    stroke_w=stroke_w, accent_rgb=accent_rgb,
-                    emphasis_word=emphasis_word if self.emphasis_enabled else "",
-                )
-
-        # ── L2 (complemento) — only when 2-line layout ─────
-        if comp["text_lines"] >= 2 and text_complemento_v:
-            comp_font_size = max(44, int(self.height * 0.09))
-            _max_text_w2 = self.width - 2 * max(40, int(self.width * 0.04))
-            comp_font_size, comp_font = _fit_font_size(
-                draw, text_complemento_v, comp_font_size, _max_text_w2,
-                min_size=32, bold=True, font_name=self.font_family)
-            if comp_font and 'l1_y' in locals():
-                bbox_l2 = draw.textbbox((0, 0), text_complemento_v, font=comp_font)
+        if has_l2 and l1_font:
+            l2_size = max(64, int(self.height * 0.115))
+            min_l2 = max(64, int(self.height * 0.10))
+            l2_size, l2_font = _fit_font_size(
+                draw, text_complemento_v, l2_size, _max_text_w,
+                min_size=min_l2, bold=True, font_name=self.font_family,
+            )
+            if l2_font:
+                bbox_l2 = draw.textbbox((0, 0), text_complemento_v, font=l2_font)
                 l2_w = bbox_l2[2] - bbox_l2[0]
+                l2_h = bbox_l2[3] - bbox_l2[1]
                 l2_x = (self.width - l2_w) // 2
-                l2_y = l1_y + l1_h + 12
+                l2_y = l1_y + l1_h + max(8, int(self.height * 0.014))
+                overflow = (l2_y + l2_h) - int(self.height * 0.965)
+                if overflow > 0:
+                    l1_y -= overflow
+                    l2_y -= overflow
+                l1_y = max(int(self.height * 0.02), l1_y)
 
-                for sx, sy in [(-stroke_w, 0), (stroke_w, 0), (0, -stroke_w), (0, stroke_w),
-                               (-stroke_w, -stroke_w), (stroke_w, stroke_w)]:
-                    draw.text((l2_x + sx, l2_y + sy), text_complemento_v, fill=shadow_color, font=comp_font)
-                draw.text((l2_x, l2_y), text_complemento_v, fill=text_color, font=comp_font,
-                          stroke_width=self.text_stroke_width, stroke_fill=self.text_stroke_color)
+        text_boxes = []
+        if l1_font:
+            text_boxes.append([l1_x, l1_y, l1_x + l1_w, l1_y + l1_h])
+        if l2_font:
+            text_boxes.append([l2_x, l2_y, l2_x + l2_w, l2_y + l2_h])
+
+        # Final safety: if the block still overlaps the salient subject, shift
+        # it to the opposite half of the canvas before painting.
+        if subject_bbox and text_boxes:
+            union = (min(b[0] for b in text_boxes), min(b[1] for b in text_boxes),
+                     max(b[2] for b in text_boxes), max(b[3] for b in text_boxes))
+            if self._box_overlap_ratio(union, subject_bbox) > 0.10:
+                union_h = union[3] - union[1]
+                top_box = (union[0], int(self.height * 0.055),
+                           union[2], int(self.height * 0.055) + union_h)
+                bottom_box = (union[0], int(self.height * 0.965) - union_h,
+                              union[2], int(self.height * 0.965))
+                top_overlap = self._box_overlap_ratio(top_box, subject_bbox)
+                bottom_overlap = self._box_overlap_ratio(bottom_box, subject_bbox)
+                new_y0 = (top_box[1] if top_overlap <= bottom_overlap
+                          else bottom_box[1])
+                shift = new_y0 - union[1]
+                l1_y += shift
+                if l2_font:
+                    l2_y += shift
+                text_boxes = []
+                if l1_font:
+                    text_boxes.append([l1_x, l1_y, l1_x + l1_w, l1_y + l1_h])
+                if l2_font:
+                    text_boxes.append([l2_x, l2_y, l2_x + l2_w, l2_y + l2_h])
+
+        # ── Optional text panel behind the block (auto: low contrast) ──
+        if text_boxes and self._should_draw_text_panel(img, text_boxes):
+            draw = self._draw_text_panel(img, text_boxes, accent_rgb)
+
+        if l1_font:
+            self._draw_text_line(
+                draw, text_gancho_v, l1_x, l1_y, l1_font,
+                text_color=text_color, shadow_color=shadow_color,
+                stroke_w=stroke_w, accent_rgb=accent_rgb,
+                emphasis_word=emphasis_word if self.emphasis_enabled else "",
+            )
+
+        if l2_font:
+            for sx, sy in [(-stroke_w, 0), (stroke_w, 0), (0, -stroke_w), (0, stroke_w),
+                           (-stroke_w, -stroke_w), (stroke_w, stroke_w)]:
+                draw.text((l2_x + sx, l2_y + sy), text_complemento_v,
+                          fill=shadow_color, font=l2_font)
+            draw.text((l2_x, l2_y), text_complemento_v, fill=text_color, font=l2_font,
+                      stroke_width=self.text_stroke_width,
+                      stroke_fill=self.text_stroke_color)
+
+        self.last_text_meta = {
+            "boxes": text_boxes,
+            "font_px": {"l1": l1_size or None, "l2": l2_size or None},
+            "subject_bbox": subject_bbox,
+            "face_bbox": face_bbox,
+        }
 
         # ── Badge stamp (top-right, conditional on layout) ───────
-        badge_text_v = badge_text if badge_text else ""
+        badge_text_v = (badge_text or "").strip()
         if comp["show_badge"] and badge_text_v:
-            self._draw_badge_stamp(draw, badge_text_v, accent_rgb)
+            self._draw_badge_stamp(
+                draw, badge_text_v, accent_rgb, font_px=self.badge_font_px,
+            )
+            self.last_text_meta.setdefault("font_px", {})["badge"] = self.badge_font_px
         elif comp["show_badge"] and self.show_4k_badge:
             self._draw_4k_badge(draw)
 
@@ -1690,6 +1904,33 @@ class ThumbnailMaker:
                 self._draw_medical_cross_stamp(draw)
             if self.medical_diagnosis:
                 self._draw_diagnosis_badge(draw)
+
+        # ── Deterministic QC (feed legibility → DB score) ─────
+        try:
+            from pipeline.thumbnail_qc import run_qc
+            self.last_qc_result = run_qc(
+                img,
+                l1=text_gancho_v,
+                l2=text_complemento_v,
+                badge=badge_text_v,
+                title=title,
+                text_boxes=self.last_text_meta.get("boxes"),
+                text_font_px=self.last_text_meta.get("font_px"),
+                subject_bbox=face_bbox or self.last_text_meta.get("face_bbox"),
+                accent_colors=[self.border_color, accent_rgb],
+                require_text=bool(
+                    getattr(self._channel_cfg, "THUMBNAIL_REQUIRE_TEXT", True)
+                ),
+            )
+            logger.info(
+                "[Thumbnail QC] score=%d issues=%s metrics=%s",
+                self.last_qc_result.score,
+                self.last_qc_result.issues or "none",
+                self.last_qc_result.metrics,
+            )
+        except Exception as qc_exc:  # noqa: BLE001
+            logger.warning("[Thumbnail QC] failed (non-fatal): %s", qc_exc)
+            self.last_qc_result = None
 
         # ── Save ─────────────────────────────────────────────
         if video_id and canal_slug:
@@ -2042,9 +2283,14 @@ class ThumbnailMaker:
         ty = y + (badge_h - th) // 2 - 2
         draw.text((tx, ty), text, font=badge_font, fill=(255, 255, 255))
 
-    def _draw_badge_stamp(self, draw: ImageDraw.ImageDraw, text: str, accent_rgb: tuple) -> None:
-        """Draw a confidence badge/stamp in the top-right corner (replaces/extends 4K)."""
-        badge_font = _find_font(26, bold=True, font_name=self.font_family)
+    def _draw_badge_stamp(self, draw: ImageDraw.ImageDraw, text: str,
+                          accent_rgb: tuple, font_px: int | None = None) -> None:
+        """Draw a confidence badge/stamp in the top-right corner (replaces/extends 4K).
+
+        Nov 2026: the old 26 px badge was ~2 px at feed size (illegible). It now
+        uses a configurable canvas font (default 40 px → ~5.5 px at 100 px).
+        """
+        badge_font = _find_font(font_px or 40, bold=True, font_name=self.font_family)
         if not badge_font:
             return
         
@@ -2544,6 +2790,159 @@ class ThumbnailMaker:
         draw.text((tx, ty), label, font=badge_font, fill=(255, 255, 255))
 
     # ── helpers ──────────────────────────────────────────────────
+
+    def _resize_salient_crop(self, img: Image.Image) -> Image.Image:
+        """Crop to 16:9 around the highest edge-energy region (subject-first).
+
+        ``THUMBNAIL_SALIENT_CROP=False`` restores the old centred crop. The
+        saliency map is a cheap Canny+Gaussian energy field at 96x54, so no
+        model download and no GPU are required.
+        """
+        w, h = img.size
+        target_ratio = self.width / self.height
+        current_ratio = w / h
+        if current_ratio > target_ratio:
+            crop_w, crop_h = int(h * target_ratio), h
+        else:
+            crop_w, crop_h = w, int(w / target_ratio)
+        crop_w = min(w, max(1, crop_w))
+        crop_h = min(h, max(1, crop_h))
+        if crop_w == w and crop_h == h:
+            return img.resize((self.width, self.height), Image.LANCZOS)
+
+        cx_pct, cy_pct = 0.5, 0.5
+        try:
+            import cv2
+            arr = np.asarray(img.convert("L").resize((96, 54)))
+            edges = cv2.Canny(arr, 50, 150).astype(np.float32)
+            energy = cv2.GaussianBlur(edges, (0, 0), 3)
+            total = float(energy.sum())
+            if total > 1e-6:
+                ys, xs = np.indices(energy.shape)
+                cx_pct = float((energy * xs).sum() / total) / 95.0
+                cy_pct = float((energy * ys).sum() / total) / 53.0
+        except Exception:  # noqa: BLE001
+            cx_pct, cy_pct = 0.5, 0.5
+
+        left = int(cx_pct * w - crop_w / 2)
+        top = int(cy_pct * h - crop_h / 2)
+        left = max(0, min(left, w - crop_w))
+        top = max(0, min(top, h - crop_h))
+        img = img.crop((left, top, left + crop_w, top + crop_h))
+        return img.resize((self.width, self.height), Image.LANCZOS)
+
+    @staticmethod
+    def _box_overlap_ratio(a, b) -> float:
+        ax0, ay0, ax1, ay1 = (int(v) for v in a[:4])
+        bx0, by0, bx1, by1 = (int(v) for v in b[:4])
+        ix0, iy0 = max(ax0, bx0), max(ay0, by0)
+        ix1, iy1 = min(ax1, bx1), min(ay1, by1)
+        if ix1 <= ix0 or iy1 <= iy0:
+            return 0.0
+        inter = (ix1 - ix0) * (iy1 - iy0)
+        area = max(1, (ax1 - ax0) * (ay1 - ay0))
+        return inter / area
+
+    def _face_bbox(self, img: Image.Image) -> tuple[int, int, int, int] | None:
+        """Bounding box of the largest frontal face (canvas coordinates).
+
+        Text-over-subject QC uses faces, not generic edge blobs: covering a
+        face is the failure that costs clicks, while text over a large object
+        is often intentional and readable with a panel.
+        """
+        try:
+            import cv2
+            gray = np.asarray(img.convert("L"))
+            cascade = cv2.CascadeClassifier(
+                cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            )
+            faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5,
+                                             minSize=(60, 60))
+            if len(faces) == 0:
+                return None
+            x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
+            return (int(x), int(y), int(x + w), int(y + h))
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _salient_bbox(self, img: Image.Image) -> tuple[int, int, int, int] | None:
+        """Bounding box of the strongest edges in canvas coordinates.
+
+        Used to keep the text out of the subject. Returns ``None`` when the
+        image has no clear energy concentration (then the layout decides).
+        """
+        try:
+            import cv2
+            arr = np.asarray(img.convert("L").resize((96, 54)))
+            edges = cv2.Canny(arr, 50, 150).astype(np.float32)
+            energy = cv2.GaussianBlur(edges, (0, 0), 3)
+            threshold = float(np.percentile(energy, 80))
+            ys, xs = np.where(energy >= threshold)
+            if len(xs) < 12:
+                return None
+            sx = self.width / 95.0
+            sy = self.height / 53.0
+            box = (int(xs.min() * sx), int(ys.min() * sy),
+                   int((xs.max() + 1) * sx), int((ys.max() + 1) * sy))
+            # Reject a box that covers almost the whole frame: it carries no
+            # location information and would flip the text zone randomly.
+            if (box[2] - box[0]) * (box[3] - box[1]) > 0.55 * self.width * self.height:
+                return None
+            return box
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _should_draw_text_panel(self, img: Image.Image,
+                                boxes: list[list[int]]) -> bool:
+        """Panel only when the text region is not readable on its own."""
+        mode = self.text_panel_mode
+        if mode in ("false", "off", "never"):
+            return False
+        if mode in ("true", "on", "always"):
+            return True
+        try:
+            luma = np.asarray(img.convert("L"), dtype=np.float32)
+            means = []
+            for box in boxes:
+                x0, y0, x1, y1 = (int(v) for v in box)
+                x0, y0 = max(0, x0), max(0, y0)
+                x1, y1 = min(self.width, x1), min(self.height, y1)
+                if x1 <= x0 or y1 <= y0:
+                    continue
+                means.append(float(luma[y0:y1, x0:x1].mean()))
+            if not means:
+                return False
+            # White text on a bright background needs a panel; on a dark
+            # background it is already readable (and a panel would flatten it).
+            return (sum(means) / len(means)) > 110
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _draw_text_panel(self, img: Image.Image, boxes: list[list[int]],
+                         accent_rgb: tuple) -> ImageDraw.ImageDraw:
+        """Composite a subtle dark panel + accent bar behind the text block."""
+        x0 = min(int(b[0]) for b in boxes)
+        y0 = min(int(b[1]) for b in boxes)
+        x1 = max(int(b[2]) for b in boxes)
+        y1 = max(int(b[3]) for b in boxes)
+        pad_x = max(18, int(self.width * 0.015))
+        pad_y = max(12, int(self.height * 0.015))
+        x0 = max(0, x0 - pad_x)
+        y0 = max(0, y0 - pad_y)
+        x1 = min(self.width, x1 + pad_x)
+        y1 = min(self.height, y1 + pad_y)
+        overlay = Image.new("RGBA", (self.width, self.height), (0, 0, 0, 0))
+        odraw = ImageDraw.Draw(overlay)
+        odraw.rounded_rectangle(
+            [x0, y0, x1, y1],
+            radius=max(10, int(self.height * 0.02)),
+            fill=(0, 0, 0, max(0, min(220, self.text_panel_opacity))),
+        )
+        bar_w = max(4, int(self.width * 0.006))
+        odraw.rectangle([x0, y0, x0 + bar_w, y1], fill=(*accent_rgb, 230))
+        img.paste(Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB"),
+                  (0, 0))
+        return ImageDraw.Draw(img)
 
     def _resize_center_crop(self, img: Image.Image) -> Image.Image:
         w, h = img.size

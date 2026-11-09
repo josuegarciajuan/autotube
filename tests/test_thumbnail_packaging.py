@@ -112,7 +112,11 @@ def test_config_4k_badge_off_y_sans():
         m = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(m)
         assert m.THUMBNAIL_SHOW_4K_BADGE is False, f"{slug} 4K badge on"
-        assert "Sans" in m.THUMBNAIL_FONT_FAMILY, f"{slug} no es sans-serif"
+        # Nov 2026: canal3 usa una serif editorial (DejaVuSerif-Bold) para
+        # diferenciar el nicho de civilizaciones; el resto sigue sans.
+        assert ("Sans" in m.THUMBNAIL_FONT_FAMILY
+                or "Serif" in m.THUMBNAIL_FONT_FAMILY), (
+            f"{slug} usa una fuente no soportada: {m.THUMBNAIL_FONT_FAMILY}")
 
 
 # ── P1: persistencia + agregación CTR por estilo ────────────────

@@ -42,6 +42,7 @@ def audit_channel(con, channel: dict, limit: int) -> dict:
     wanted = [c for c in (
         "id", "titulo_final", "thumbnail_text", "thumbnail_overlay_source",
         "thumbnail_variant_strategy", "thumbnail_layout", "status",
+        "thumbnail_qc_score", "thumbnail_qc_issues",
     ) if c in cols]
     channel_id = channel["id"]
     query_cols = ", ".join(wanted)
@@ -63,6 +64,8 @@ def audit_channel(con, channel: dict, limit: int) -> dict:
     off_niche = []
     with_overlay = 0
     with_source = 0
+    qc_scores: list[int] = []
+    qc_issues: dict[str, int] = {}
     for row in rows:
         title = (row["titulo_final"] if "titulo_final" in row.keys() else "") or ""
         complete, reason = is_complete_title(title)
@@ -75,6 +78,16 @@ def audit_channel(con, channel: dict, limit: int) -> dict:
             with_overlay += 1
         if "thumbnail_overlay_source" in row.keys() and (row["thumbnail_overlay_source"] or "").strip():
             with_source += 1
+        if "thumbnail_qc_score" in row.keys() and row["thumbnail_qc_score"] is not None:
+            try:
+                qc_scores.append(int(row["thumbnail_qc_score"]))
+            except (TypeError, ValueError):
+                pass
+        if "thumbnail_qc_issues" in row.keys():
+            for issue in (row["thumbnail_qc_issues"] or "").split(","):
+                issue = issue.strip()
+                if issue:
+                    qc_issues[issue] = qc_issues.get(issue, 0) + 1
 
     return {
         "channel_id": channel_id,
@@ -89,6 +102,12 @@ def audit_channel(con, channel: dict, limit: int) -> dict:
         "overlay_persisted": with_overlay,
         "overlay_persisted_ratio": round(with_overlay / total, 3) if total else 0.0,
         "overlay_source_set": with_source,
+        "thumbnail_qc_samples": len(qc_scores),
+        "thumbnail_qc_mean": round(sum(qc_scores) / len(qc_scores), 1)
+        if qc_scores else None,
+        "thumbnail_qc_issue_counts": dict(sorted(
+            qc_issues.items(), key=lambda kv: -kv[1]
+        )),
     }
 
 
@@ -162,6 +181,9 @@ def main() -> int:
             print(f"      · [{ex['id']}] {ex['title'][:70]!r}")
         print(f"  overlay persistido:     {result['overlay_persisted']}/{result['sampled']} "
               f"({result['overlay_persisted_ratio']*100:.0f}%)")
+        if result["thumbnail_qc_samples"]:
+            print(f"  QC miniatura:           media {result['thumbnail_qc_mean']} "
+                  f"({result['thumbnail_qc_samples']} muestras) issues={result['thumbnail_qc_issue_counts']}")
         if args.alerts:
             if _emit_alert(dict(channel), result):
                 print("  → alerta packaging_quality emitida")

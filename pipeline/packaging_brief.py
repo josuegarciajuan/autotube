@@ -26,7 +26,8 @@ _TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
 _STOPWORDS = frozenset(normalize(w) for w in (
     "el", "la", "los", "las", "un", "una", "unos", "unas", "de", "del",
     "que", "y", "o", "a", "en", "con", "por", "para", "sin", "sobre",
-    "entre", "desde", "hacia", "su", "sus", "al", "se", "lo", "ni",
+    "entre", "desde", "hacia", "hasta", "ante", "contra", "segun", "durante",
+    "mediante", "bajo", "tras", "su", "sus", "al", "se", "lo", "ni",
     "pero", "porque", "cuando", "donde", "si", "no", "mas", "muy", "tan",
     "como", "the", "of", "to", "in", "and", "or", "es", "fue", "son",
     # Fase 2 (curiosidad oscura): interrogativos y adverbios NUNCA son
@@ -100,15 +101,81 @@ def overlay_cliches(cfg) -> frozenset[str]:
 
 
 def _truncate_words(text: str, limit: int) -> str:
-    if len(text) <= limit:
-        return text
-    out = ""
+    """Fit *text* to *limit* chars without ever cutting a word or a sentence.
+
+    Nov 2026 (CTR round): the old version cut at the character budget and could
+    leave a dangling connector ("... BAJO LA", "... METROS SIN"), which reads
+    as broken copy in the feed. This version:
+
+    * only keeps whole words;
+    * drops a trailing article/preposition/conjunction even when the full text
+      already fits the budget (a short broken line is still broken);
+    * returns ``""`` when nothing meaningful fits (the caller falls back to a
+      shorter anchor instead of painting garbage).
+    """
+    text = " ".join(str(text or "").split())
+    if not text:
+        return ""
+
+    words: list[str] = []
     for word in text.split():
-        cand = (out + " " + word).strip()
-        if out and len(cand) > limit:
+        candidate = " ".join(words + [word])
+        if len(candidate) > limit:
             break
-        out = cand
-    return out or text[:limit]
+        words.append(word)
+    while words and normalize(words[-1].strip(".,;:!?¿¡()[]«»\"'")) in _DANGLING_TAIL:
+        words.pop()
+    return " ".join(words).strip()
+
+
+# Tokens that sound informative but add nothing concrete. When the only new
+# word of L2 is one of these, the line is cosmetic and is dropped.
+_VAGUE_L2_TOKENS = frozenset(normalize(w) for w in (
+    "silencio", "silenciada", "silenciado", "ocultaron", "oculto", "oculta",
+    "secreto", "secreta", "real", "reales", "prohibido", "prohibida",
+    "impactante", "increible", "increíble", "inesperado", "inesperada",
+    "misterioso", "misteriosa", "inexplicable", "inexplicables", "nadie",
+    "shock", "impensable", "exclusivo", "exclusiva", "verdad", "terrible",
+    "aterrador", "aterradora", "sorprendente", "alucinante",
+))
+
+# Consequence/measure markers that make an L2 line worth painting.
+_CONSEQUENCE_MARKERS = frozenset(normalize(w) for w in (
+    "murio", "murió", "muerte", "desaparecio", "desapareció", "sobrevivio",
+    "sobrevivió", "rescatado", "rescatada", "condenado", "condenada",
+    "prohibido", "clausurado", "abandonado", "hundido", "derretido",
+    "encontrado", "hallado", "descubierto", "revelado", "cura", "curó",
+    "diagnostico", "diagnóstico", "sindrome", "síndrome", "enfermedad",
+    "anos", "años", "metros", "kilometros", "kilómetros", "dias", "días",
+    "horas", "minutos", "siglos", "personas", "victimas", "víctimas",
+))
+
+
+def _has_new_information(line: str, title: str) -> bool:
+    """True when *line* contributes something the title does not already say."""
+    text = str(line or "")
+    if not text.strip():
+        return False
+    if any(ch.isdigit() for ch in text):
+        return True
+    content = [t for t in _tokens(text) if t not in _STOPWORDS]
+    if not content:
+        return False
+    title_set = set(title_terms(title))
+    new = [t for t in content if t not in title_set]
+    if not new:
+        return False
+    return any(t not in _VAGUE_L2_TOKENS or t in _CONSEQUENCE_MARKERS
+               for t in new)
+
+
+def line_is_dangling(text: str) -> bool:
+    """True when *text* ends in an article/preposition/conjunction."""
+    words = str(text or "").split()
+    if not words:
+        return False
+    last = words[-1].strip(".,;:!?¿¡()[]«»\"'")
+    return normalize(last) in _DANGLING_TAIL
 
 
 def _tokens(text: str) -> list[str]:
@@ -119,7 +186,9 @@ def title_terms(title: str) -> list[str]:
     """Content words of *title* (normalized, stopwords removed), deduped."""
     out: list[str] = []
     for tok in _tokens(title):
-        if len(tok) < 3 or tok in _STOPWORDS:
+        if tok in _STOPWORDS:
+            continue
+        if len(tok) < 3 and not any(ch.isdigit() for ch in tok):
             continue
         if tok not in out:
             out.append(tok)
@@ -254,6 +323,11 @@ def build_overlay_spec(
                 or (norm_l2 and norm_l2 == normalize(l1)) \
                 or overlap > 0.6:
             l2 = ""
+        elif not _has_new_information(l2, title):
+            # Cosmetic line ("LA QUEJA SILENCIADA"): it repeats the title and
+            # adds no number, unit, place or consequence. Painting it only
+            # steals space from the subject, so L1 carries the hook alone.
+            l2 = ""
 
     if not emphasis:
         joined = _tokens(f"{l1} {l2}")
@@ -284,6 +358,8 @@ def spec_to_db_fields(spec: OverlaySpec) -> dict:
         "thumbnail_emphasis": spec.emphasis,
         "thumbnail_variant_strategy": spec.variant_strategy,
         "thumbnail_overlay_source": spec.source,
+        "thumbnail_overlay_l1": spec.l1,
+        "thumbnail_overlay_l2": spec.l2,
     }
 
 
@@ -315,6 +391,13 @@ def validate_overlay_spec(spec: OverlaySpec, title: str, cfg) -> tuple[list[str]
     if spec.l2 and len(spec.l2) >= 8 and normalize(spec.l2) in norm_title:
         reasons.append("overlay_repeats_title")
 
+    if line_is_dangling(spec.l1):
+        warnings.append("overlay_dangling_l1")
+    if line_is_dangling(spec.l2):
+        warnings.append("overlay_dangling_l2")
+    if spec.l2 and not _has_new_information(spec.l2, title):
+        warnings.append("overlay_l2_no_new_info")
+
     if spec.emphasis:
         if normalize(spec.emphasis) not in set(_tokens(f"{spec.l1} {spec.l2}")):
             warnings.append("emphasis_not_in_overlay")
@@ -338,11 +421,12 @@ def validate_overlay_spec(spec: OverlaySpec, title: str, cfg) -> tuple[list[str]
 _DANGLING_TAIL = frozenset(normalize(w) for w in (
     "de", "del", "la", "el", "los", "las", "un", "una", "unos", "unas",
     "que", "y", "o", "a", "en", "con", "por", "para", "sin", "sobre",
-    "entre", "desde", "hacia", "al", "su", "sus", "como", "mas", "muy",
-    "toda", "todo", "todos", "todas", "este", "esta", "estos", "estas",
-    "ese", "esa", "esos", "esas", "aquel", "aquella", "mi", "tu", "nuestro",
-    "nuestra", "vuestro", "vuestra", "cada", "otro", "otra",
-    "the", "of", "to", "in", "and", "or",
+    "entre", "desde", "hacia", "hasta", "ante", "contra", "segun", "según",
+    "durante", "mediante", "bajo", "tras", "al", "su", "sus", "como",
+    "mas", "más", "muy", "toda", "todo", "todos", "todas", "este", "esta",
+    "estos", "estas", "ese", "esa", "esos", "esas", "aquel", "aquella",
+    "mi", "tu", "nuestro", "nuestra", "vuestro", "vuestra", "cada",
+    "otro", "otra", "the", "of", "to", "in", "and", "or",
 ))
 
 _TERMINAL_PUNCT = "¿?¡!.:…"

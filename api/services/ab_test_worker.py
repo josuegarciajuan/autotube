@@ -55,6 +55,11 @@ class ABTestWorker:
         self.min_impressions = AB_TEST_MIN_IMPRESSIONS        # mínimo para decidir
         self.max_stale_days = AB_TEST_MAX_STALE_DAYS          # días máximos esperando datos
         self.min_impressions_post = AB_TEST_MIN_IMPRESSIONS_POST_CHANGE  # mínimo post-cambio
+        try:
+            from config.settings import THUMBNAIL_AB_ROTATION_ENABLED
+        except Exception:  # pragma: no cover - legacy installs
+            THUMBNAIL_AB_ROTATION_ENABLED = False
+        self.rotation_enabled = bool(THUMBNAIL_AB_ROTATION_ENABLED)
 
     # ═══════════════════════════════════════════════════════════════
     # Main cycle
@@ -68,6 +73,12 @@ class ABTestWorker:
            that are ready for second check.
         3. Process each, one channel at a time.
         """
+        if not self.rotation_enabled:
+            # Nov 2026: no touching published thumbnails. The pipeline picks the
+            # best QC candidate before upload; rotation stays ready but off.
+            logger.debug("[AB] thumbnail rotation disabled — skipping cycle")
+            return
+
         now = datetime.now(timezone.utc)
         
         # ── First checks: pending videos older than first_check_hours ──

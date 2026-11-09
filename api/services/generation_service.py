@@ -1923,9 +1923,15 @@ async def start_generation_job(job_id: int, channel_id: int, video_id: int,
                     channel_display_name=getattr(orch.config, "CANAL_DISPLAY_NAME", ""),
                     channel_description=getattr(orch.config, "CHANNEL_ABOUT_SECTION", ""),
                     channel_theme=getattr(orch.config, "CANAL_TAGLINE", ""),
+                    video_id=int(video_id or 0),
                 ) or ""
                 if thumbnail_path:
                     video_data["thumbnail_path"] = thumbnail_path
+                    _qc = getattr(orch.thumbnail_maker, "last_qc_result", None)
+                    if _qc is not None:
+                        _fields = _qc.as_db_fields()
+                        _fields["thumbnail_pipeline_version"] = "thumb-ctr-2026-11"
+                        db.update_video(video_id, **_fields)
                     logger.info("Thumbnail generated (post-render): %s", thumbnail_path)
             except Exception as thumb_exc:
                 logger.warning("Thumbnail generation failed (non-fatal): %s", thumb_exc)
