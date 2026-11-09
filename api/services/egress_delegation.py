@@ -18,6 +18,7 @@ from api.services.egress_client import (
     get_egress_client,
     is_egress_managed,
 )
+from api.services.egress_registry import require_profile
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,8 @@ def fail_closed_if_managed(slug: str, feature: str) -> None:
     if not slug:
         return
     if is_egress_managed(slug):
+        # Si el perfil está incompleto, el error debe ser explícito (fail-closed).
+        require_profile(slug)
         raise EgressAgentUnavailableError(
             f"El canal '{slug}' es gestionado por un agente egress y '{feature}' "
             f"aún no está delegado — egress local bloqueado (fail-closed). "

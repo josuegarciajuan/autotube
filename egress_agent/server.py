@@ -6,6 +6,7 @@ Todos los egress a YouTube/Google ocurren desde la red de la VPS.
 from __future__ import annotations
 
 import logging
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -118,6 +119,9 @@ class AgentApp:
         account: str = ""
         code: str
 
+    class CleanupModel(BaseModel):
+        staged_path: str = ""
+
     def _register_routes(self):
         app = self.app
 
@@ -149,6 +153,10 @@ class AgentApp:
                 egress_ok = bool(ip) and ip == expected
             except EgressGuardError:
                 egress_ok = False
+            try:
+                free_gb = round(shutil.disk_usage(str(self.cfg.staging_dir)).free / (1024 ** 3), 2)
+            except OSError:
+                free_gb = None
             return {
                 "ok": True,
                 "slug": self.cfg.slug,
@@ -157,6 +165,9 @@ class AgentApp:
                 "expected_ip": expected,
                 "egress_ip": ip,
                 "egress_ok": egress_ok,
+                "staging_gb": round(self._staging_gb(), 3),
+                "staging_max_gb": self.cfg.staging_max_gb,
+                "disk_free_gb": free_gb,
             }
 
         @app.get("/egress-check-browser")
@@ -251,6 +262,7 @@ class AgentApp:
             """
             self._check_token(x_agent_token)
             self._require_egress()
+            self._purge_staging()
             paths = self._save_upload(video, thumbnail, ref)
             return {"ok": True, **paths}
 
@@ -262,6 +274,7 @@ class AgentApp:
                          x_agent_token: Optional[str] = Header(None)):
             self._check_token(x_agent_token)
             self._require_egress()
+            self._purge_staging()
             import json as _json
             try:
                 meta_dict = _json.loads(meta)
@@ -293,27 +306,147 @@ class AgentApp:
                 except Exception:  # noqa: BLE001
                     pass
 
+        @app.post("/cleanup")
+        def cleanup(body: AgentApp.CleanupModel,
+                    x_agent_token: Optional[str] = Header(None)):
+            """Borra el staging remoto tras una subida correcta (idempotente).
+
+            No toca YouTube: no requiere verificación de egress. Solo acepta
+            rutas dentro del directorio de staging del canal.
+            """
+            self._check_token(x_agent_token)
+            return self._cleanup_staged(body.staged_path)
+
+    def _cleanup_staged(self, staged_path: str) -> dict:
+        if not staged_path:
+            return {"ok": True, "skipped": "no_staged_path"}
+        root = Path(self.cfg.staging_dir).resolve()
+        try:
+            target = Path(staged_path).resolve()
+        except OSError as exc:
+            return {"ok": False, "error": str(exc)[:500]}
+        if root != target and root not in target.parents:
+            raise HTTPException(400, "ruta fuera del staging")
+        removed: list[str] = []
+        try:
+            if target.is_file():
+                target.unlink(missing_ok=True)
+                removed.append(str(target))
+            parent = target.parent
+            for sib in parent.glob("thumb*"):
+                if sib.is_file():
+                    sib.unlink(missing_ok=True)
+                    removed.append(str(sib))
+            try:
+                parent.rmdir()
+            except OSError:
+                pass
+        except OSError as exc:
+            logger.warning("cleanup failed for %s: %s", staged_path, exc)
+            return {"ok": False, "error": str(exc)[:500]}
+        return {"ok": True, "removed": removed}
+
+    def _purge_staging(self) -> int:
+        """Purga staging huérfano por TTL. Devuelve nº de entradas borradas."""
+        root = Path(self.cfg.staging_dir)
+        if not root.exists():
+            return 0
+        cutoff = time.time() - max(1, int(self.cfg.staging_ttl_hours)) * 3600
+        removed = 0
+        try:
+            for entry in root.iterdir():
+                try:
+                    if entry.stat().st_mtime >= cutoff:
+                        continue
+                    if entry.is_dir():
+                        shutil.rmtree(entry, ignore_errors=True)
+                    else:
+                        entry.unlink(missing_ok=True)
+                    removed += 1
+                except OSError:
+                    continue
+        except OSError:
+            pass
+        return removed
+
+    def _staging_gb(self) -> float:
+        root = Path(self.cfg.staging_dir)
+        if not root.exists():
+            return 0.0
+        total = 0
+        try:
+            for p in root.rglob("*"):
+                try:
+                    if p.is_file():
+                        total += p.stat().st_size
+                except OSError:
+                    continue
+        except OSError:
+            pass
+        return total / (1024 ** 3)
+
     def _save_upload(self, video: UploadFile, thumbnail: Optional[UploadFile],
                      ref: str = "") -> dict:
-        """Guarda el vídeo (y thumb) en el staging del VPS y devuelve sus rutas."""
-        staging_root = Path(self.cfg.project_root) / "output" / "vps_staging"
+        """Guarda el vídeo (y thumb) en el staging del gateway y valida cuotas."""
+        staging_root = Path(self.cfg.staging_dir)
+        staging_root.mkdir(parents=True, exist_ok=True)
+
+        try:
+            free_gb = shutil.disk_usage(str(staging_root)).free / (1024 ** 3)
+        except OSError as exc:
+            raise HTTPException(507, f"no se pudo leer el disco del staging: {exc}")
+        if free_gb < float(self.cfg.min_free_gb):
+            raise HTTPException(
+                507,
+                f"disco insuficiente en el gateway: {free_gb:.2f} GB libres "
+                f"(mínimo {self.cfg.min_free_gb} GB)",
+            )
+
         ref = ref or uuid.uuid4().hex[:8]
         safe_ref = "".join(c for c in ref if c.isalnum() or c in "-_")[:64]
         d = staging_root / safe_ref
         d.mkdir(parents=True, exist_ok=True)
 
         video_path = d / "video.mp4"
-        with open(video_path, "wb") as out:
-            while chunk := video.file.read(1024 * 1024):
-                out.write(chunk)
+        try:
+            with open(video_path, "wb") as out:
+                while chunk := video.file.read(1024 * 1024):
+                    out.write(chunk)
+
+            size = video_path.stat().st_size
+            max_bytes = int(float(self.cfg.max_body_mb) * 1024 * 1024)
+            if max_bytes > 0 and size > max_bytes:
+                video_path.unlink(missing_ok=True)
+                raise HTTPException(
+                    413,
+                    f"vídeo demasiado grande: {size / (1024 ** 2):.1f} MB "
+                    f"(máx {self.cfg.max_body_mb} MB)",
+                )
+            staging_gb = self._staging_gb()
+            if staging_gb > float(self.cfg.staging_max_gb):
+                video_path.unlink(missing_ok=True)
+                raise HTTPException(
+                    413,
+                    f"cuota de staging excedida: {staging_gb:.2f} GB "
+                    f"(máx {self.cfg.staging_max_gb} GB)",
+                )
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            video_path.unlink(missing_ok=True)
+            raise HTTPException(500, f"no se pudo guardar el vídeo: {exc}")
 
         thumb_path = None
         if thumbnail:
             ext = Path(thumbnail.filename or "thumb.jpg").suffix or ".jpg"
             thumb_path = d / f"thumb{ext}"
-            with open(thumb_path, "wb") as out:
-                while chunk := thumbnail.file.read(1024 * 1024):
-                    out.write(chunk)
+            try:
+                with open(thumb_path, "wb") as out:
+                    while chunk := thumbnail.file.read(1024 * 1024):
+                        out.write(chunk)
+            except Exception as exc:  # noqa: BLE001
+                video_path.unlink(missing_ok=True)
+                raise HTTPException(500, f"no se pudo guardar el thumbnail: {exc}")
         return {"staged_path": str(video_path),
                 "thumbnail_path": str(thumb_path) if thumb_path else None}
 

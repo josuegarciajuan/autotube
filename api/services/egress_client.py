@@ -1,69 +1,43 @@
 """Cliente del server → agente egress (delegación de todo el egress a YouTube).
 
-CONTRATO FAIL-CLOSED (invariante "0 errores", ago 2026):
-- Un canal "gestionado" (presente en ``config/egress_agents.json``) DEBE delegar
-  TODO su egress al agente. Si el agente no responde, se lanza
-  ``EgressAgentUnavailableError`` — NUNCA se cae al camino local (directo por la
-  IP del server), para que la IP del server jamás toque YouTube de ese canal.
-- Un canal SIN agente configurado devuelve ``None`` y sigue con el comportamiento
-  actual (local, sin proxy): los canales existentes quedan intactos.
+CONTRATO FAIL-CLOSED (invariante "0 errores", nov 2026):
+- Un canal "gestionado" (flag durable en DB ``channels.egress_managed`` **o**
+  entrada en ``config/egress_agents.json``) DEBE delegar TODO su egress al
+  agente. Si el agente no responde o el perfil está incompleto se lanza
+  ``EgressAgentUnavailableError`` / ``EgressConfigurationError`` — NUNCA se cae
+  al camino local (directo por la IP del server).
+- Un canal SIN agente configurado devuelve ``None`` y sigue con el
+  comportamiento actual (local, sin proxy): los canales existentes intactos.
 
-El token secreto del agente vive en ``config/egress_agents.json`` (gitignored),
-no en ``config_json`` (que se sincroniza vía bridge).
+El token secreto del agente vive en ``config/egress_agents.json`` (gitignored).
+La marca de "gestionado" vive también en la DB para que una pérdida del JSON no
+convierta el canal en local en silencio.
 """
 from __future__ import annotations
 
-import json
 import logging
-from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 import requests
 
+from api.services.egress_registry import (  # noqa: F401  (re-export compat)
+    _AGENTS_FILE,
+    EgressAgentUnavailableError,
+    EgressConfigurationError,
+    _load_agents,
+    get_profile,
+    is_egress_managed,
+)
+
 logger = logging.getLogger(__name__)
-
-# Ruta del mapa secreto slug -> {url, token}. Gitignored.
-_AGENTS_FILE = Path(__file__).resolve().parent.parent.parent / "config" / "egress_agents.json"
-
-
-class EgressAgentUnavailableError(RuntimeError):
-    """El agente de un canal gestionado no está accesible (fail-closed).
-
-    Los callers NO deben reintentar cayendo al camino local directo; deben
-    mantener el vídeo/job en espera hasta que el agente vuelva a estar activo.
-    """
-
-
-def _load_agents() -> dict:
-    if not _AGENTS_FILE.exists():
-        return {}
-    try:
-        return json.loads(_AGENTS_FILE.read_text(encoding="utf-8")) or {}
-    except (json.JSONDecodeError, OSError) as exc:
-        logger.warning("No se pudo leer %s: %s", _AGENTS_FILE, exc)
-        return {}
-
-
-def get_agent_config(slug: str) -> Optional[dict]:
-    """Devuelve {url, token} para un slug gestionado, o None si no está."""
-    agents = _load_agents()
-    cfg = agents.get(slug)
-    if not cfg or not cfg.get("url"):
-        return None
-    return {"url": str(cfg["url"]).rstrip("/"), "token": str(cfg.get("token", ""))}
-
-
-def is_egress_managed(slug: str) -> bool:
-    """True si el canal debe delegar su egress al agente."""
-    return get_agent_config(slug) is not None
 
 
 def get_egress_client(slug: str) -> Optional["EgressAgent"]:
     """Devuelve el cliente del agente para un canal gestionado, o None si no."""
-    cfg = get_agent_config(slug)
-    if cfg is None:
+    profile = get_profile(slug)
+    if profile is None:
         return None
-    return EgressAgent(slug, cfg["url"], cfg["token"])
+    return EgressAgent(slug, profile.url, profile.token)
 
 
 class EgressAgent:
@@ -89,8 +63,8 @@ class EgressAgent:
             _db = ExtendedDatabase()
             if _db.get_system_state(f"egress_down_{self.slug}") == "1":
                 raise EgressAgentUnavailableError(
-                    f"IP residencial de {self.slug} caída/inactiva (egress_down) — "
-                    f"renovar en Geonix. Operación bloqueada (fail-closed)."
+                    f"El gateway egress de {self.slug} está marcado como caído "
+                    f"(egress_down). Operación bloqueada (fail-closed)."
                 )
         except EgressAgentUnavailableError:
             raise
@@ -133,6 +107,8 @@ class EgressAgent:
             raise EgressAgentUnavailableError(
                 f"agente de {self.slug} no accesible ({exc}) — fail-closed"
             ) from exc
+        if resp.status_code == 401:
+            raise EgressAgentUnavailableError(f"token de agente rechazado para {self.slug}")
         try:
             return resp.json()
         except ValueError:

@@ -30,7 +30,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
-from config.settings import GOOGLE_CLIENT_SECRET_PATH, TOKENS_DIR
+from config.settings import GOOGLE_CLIENT_SECRET_PATH, TOKENS_DIR, AGENT_MODE
 
 # ── Quota tracking (passive diagnostic — no behavioral change) ──
 from api.services.quota_tracker import track_quota
@@ -219,6 +219,9 @@ class YouTubeUploader:
 
     @property
     def config(self):
+        if AGENT_MODE:
+            # El gateway no lee la DB del servidor principal vía config_bridge.
+            return None
         if self._config is None and self.channel_slug:
             from config.config_bridge import get_channel_config
 
@@ -298,6 +301,8 @@ class YouTubeUploader:
         qué endpoint/proyecto la disparó. La entrada lleva success=0 (no suma al
         consumo diario) y el `reason` real de YouTube. Nunca lanza.
         """
+        if AGENT_MODE:
+            return
         try:
             reason = "unknown"
             if isinstance(exc, HttpError):
@@ -327,6 +332,8 @@ class YouTubeUploader:
         - `detail` (reason/message/domain/status) se persiste y viaja en la
           alerta para poder diagnosticar QUÉ llamada agotó la cuota.
         """
+        if AGENT_MODE:
+            return
         channel = self.channel_slug or self.account_name or "unknown"
         detail = detail or {}
         _diag = (
@@ -468,6 +475,8 @@ class YouTubeUploader:
         política...) bloquea la subida y necesita acción del operador — no debe
         quedar en silencio. Dedup por canal: una sola alerta activa.
         """
+        if AGENT_MODE:
+            return
         try:
             from api.services.lifecycle_monitor import emit_alert
             from database.db_extended import ExtendedDatabase
@@ -488,6 +497,8 @@ class YouTubeUploader:
 
     def _resolve_yt_token_alert(self):
         """Auto-resolve yt_token_invalid alerts once the token refreshes/works."""
+        if AGENT_MODE:
+            return
         try:
             from database.db_extended import ExtendedDatabase
             _adb = ExtendedDatabase()
@@ -511,6 +522,8 @@ class YouTubeUploader:
         Un token YT inválido/revocado para la cuenta Google bloquea las
         subidas de TODOS los canales que la comparten — debe verse.
         """
+        if AGENT_MODE:
+            return
         try:
             from api.services.lifecycle_monitor import emit_alert
             from database.db_extended import ExtendedDatabase
@@ -584,6 +597,8 @@ class YouTubeUploader:
         ``state`` ∈ transferring | staged | done. ``vps_staged_path`` se guarda
         cuando el archivo ya está en el VPS. Fail-open: nunca rompe la subida.
         """
+        if AGENT_MODE:
+            return
         try:
             from database.db_extended import ExtendedDatabase
             _db = ExtendedDatabase()

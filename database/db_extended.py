@@ -781,6 +781,11 @@ def migrate_v2(db_path: str = None):
         # ── Egress aislado (transferencia al VPS) ──
         ("egress_transfer_state", "TEXT"),       # transferring | staged | done
         ("vps_staged_path", "TEXT"),             # ruta del archivo en el VPS
+        # Idempotencia de subida delegada (nov 2026): evita duplicados si el
+        # server cae entre el upload del gateway y el UPDATE de la DB.
+        ("egress_upload_ref", "TEXT"),
+        ("egress_upload_state", "TEXT"),         # pending | uploading | done | failed
+        ("egress_remote_video_id", "TEXT"),
     ]
     existing = {row[1] for row in conn.execute("PRAGMA table_info(videos)").fetchall()}
     for col_name, col_def in new_columns:
@@ -806,6 +811,18 @@ def migrate_v2(db_path: str = None):
         ("avatar_url", "TEXT"),
         ("yt_channel_id", "TEXT"),
         ("yt_channel_url", "TEXT"),
+        # ── Egress aislado por canal (nov 2026) ──────────────────────────
+        # La marca durable vive aquí, no solo en config/egress_agents.json:
+        # si el JSON secreto se pierde, el canal SIGUE bloqueado (fail-closed).
+        ("egress_managed", "INTEGER NOT NULL DEFAULT 0"),
+        ("egress_mode", "TEXT"),
+        ("egress_expected_ip", "TEXT"),
+        ("egress_label", "TEXT"),
+        ("egress_status", "TEXT DEFAULT 'unmanaged'"),
+        ("egress_last_verified_at", "TIMESTAMP"),
+        ("egress_last_ip", "TEXT"),
+        ("egress_gateway_version", "TEXT"),
+        ("egress_notes", "TEXT"),
     ]
     existing_ch = {row[1] for row in conn.execute("PRAGMA table_info(channels)").fetchall()}
     for col_name, col_def in profile_columns:
@@ -4310,6 +4327,66 @@ class ExtendedDatabase(Database):
             conn.execute(f"UPDATE channels SET {', '.join(fields)} WHERE id = ?", values)
             conn.commit()
         return True
+
+    # ── Egress aislado (nov 2026) ─────────────────────────────────────
+    def set_channel_egress_status(self, slug: str, status: str,
+                                  last_ip: str = None,
+                                  gateway_version: str = None) -> bool:
+        """Persiste el estado del gateway egress de un canal.
+
+        ``status`` ∈ ``unmanaged | provisioning | up | down | error | suspended``.
+        """
+        fields = ["egress_status = ?", "updated_at = CURRENT_TIMESTAMP"]
+        values: list = [status]
+        if last_ip is not None:
+            fields.append("egress_last_ip = ?")
+            values.append(last_ip)
+        if gateway_version is not None:
+            fields.append("egress_gateway_version = ?")
+            values.append(gateway_version)
+        if status == "up":
+            fields.append("egress_last_verified_at = CURRENT_TIMESTAMP")
+        values.append(slug)
+        with self._connect() as conn:
+            cur = conn.execute(
+                f"UPDATE channels SET {', '.join(fields)} WHERE slug = ?", values
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+    def set_channel_egress_managed(self, channel_id: int, managed: bool,
+                                   expected_ip: str = None, mode: str = None,
+                                   label: str = None, status: str = None) -> bool:
+        """Marca/desmarca un canal como gestionado (flag durable en DB)."""
+        fields = ["egress_managed = ?", "updated_at = CURRENT_TIMESTAMP"]
+        values: list = [1 if managed else 0]
+        if expected_ip is not None:
+            fields.append("egress_expected_ip = ?")
+            values.append(expected_ip)
+        if mode is not None:
+            fields.append("egress_mode = ?")
+            values.append(mode)
+        if label is not None:
+            fields.append("egress_label = ?")
+            values.append(label)
+        if status is not None:
+            fields.append("egress_status = ?")
+            values.append(status)
+        values.append(channel_id)
+        with self._connect() as conn:
+            cur = conn.execute(
+                f"UPDATE channels SET {', '.join(fields)} WHERE id = ?", values
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+    def get_egress_managed_channels(self) -> list[dict]:
+        """Canales con la marca durable de egress gestionado."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM channels WHERE egress_managed = 1 ORDER BY id"
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def update_channel_profile_fields(
         self,
