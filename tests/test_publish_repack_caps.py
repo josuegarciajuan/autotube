@@ -115,3 +115,69 @@ def test_dense_backlog_is_spread_not_stacked_at_safety_bound(tmp_path, monkeypat
 
     assert max(per_day.values()) <= 2, per_day
     assert len(set(targets)) == 9, targets
+
+
+def test_variable_daily_cap_does_not_stack_at_safety_bound(tmp_path, monkeypatch):
+    """Rotation changes the cap per date; the horizon must follow the real caps.
+
+    Regression (nov 2026, canal2/canal3): the horizon used ``max(cap_probe)``
+    as the rate. When future days had a lower cap the queue overflowed past
+    ``safety_limit`` and every extra video was clamped to the SAME timestamp:
+    ``gap 0.0h`` and ``N publicaciones > cap`` aborted the whole repack.
+    """
+    db = _db(tmp_path)
+    with db._connect() as conn:
+        for i in range(9):
+            conn.execute(
+                """INSERT INTO videos
+                    (channel_id, canal, video_path, status, publish_mode, created_at)
+                    VALUES (1, 'one', ?, 'awaiting_upload', 'scheduled', ?)""",
+                (f"/tmp/v{i}.mp4", f"2026-09-01 00:00:{i:02d}"),
+            )
+        conn.commit()
+
+    today = dt.date.today()
+
+    def _day_key(day):
+        if day is None:
+            return None
+        return day.isoformat() if hasattr(day, "isoformat") else str(day)[:10]
+
+    def _fake_policy(cid, key, db=None, default=None, day=None, **kwargs):
+        if key == "longform_publish_cap":
+            d = _day_key(day)
+            if d is None:
+                return 2
+            # Bonus only on the first two days; then the recovery base cap (1).
+            return 2 if d in (today.isoformat(),
+                              (today + dt.timedelta(days=1)).isoformat()) else 1
+        if key == "same_channel_publish_gap_h":
+            return 6
+        if key == "max_warmup_hours":
+            return 48
+        return default
+
+    import api.services.channel_policy as channel_policy
+    monkeypatch.setattr(channel_policy, "policy_value", _fake_policy)
+    import pipeline.publish_scheduler as scheduler
+    monkeypatch.setattr(scheduler, "_channel_peak_hours",
+                        lambda *a, **k: [9, 15, 21])
+
+    plan = scheduler.repack_channel_publish_times(db, 1, "one", gap_hours=6)
+    assert len(plan) == 9
+
+    tz = pytz.timezone("Europe/Madrid")
+    per_day: Counter = Counter()
+    targets = []
+    for item in plan:
+        when = dt.datetime.fromisoformat(item["new_target"]).astimezone(tz)
+        per_day[when.date()] += 1
+        targets.append(item["new_target"])
+
+    assert len(set(targets)) == 9, targets
+    for day, count in per_day.items():
+        cap = 2 if day.isoformat() in (
+            today.isoformat(),
+            (today + dt.timedelta(days=1)).isoformat(),
+        ) else 1
+        assert count <= cap, (day, count, cap, per_day)

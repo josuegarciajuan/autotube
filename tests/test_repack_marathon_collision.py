@@ -64,7 +64,7 @@ class RepackDB:
                 id INTEGER PRIMARY KEY, channel_id INTEGER, status TEXT,
                 yt_video_id TEXT, target_public_at TEXT, scheduled_upload_at TEXT,
                 uploaded_at TEXT, created_at TEXT, publish_mode TEXT,
-                is_marathon INTEGER DEFAULT 0)"""
+                yt_visibility TEXT, is_marathon INTEGER DEFAULT 0)"""
         )
         self.conn.execute(
             "CREATE TABLE channels (id INTEGER PRIMARY KEY, slug TEXT, config_json TEXT)"
