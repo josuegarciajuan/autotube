@@ -91,7 +91,7 @@ canal4 Expediciones sin retorno, canal5 Anomalías Médicas). Datos de alcance
 
 | ID | Hallazgo | Evidencia | Cambio propuesto |
 |---|---|---|---|
-| P1-1 | **Claves inertes**: Insight AI propone cambios que el pipeline no lee | `CONTENT_PILLARS` no se consume en generación; `script_end_hook` tampoco | O se cablean al generador o se marcan como `requires_code` y no se ofrecen como “aplicar” |
+| P1-1 | **Claves inertes**: Insight AI proponía cambios que el pipeline no lee | `CONTENT_PILLARS` no se consume en generación; `script_end_hook` tampoco | **Parcial:** aplicar ahora devuelve 422 y exige `requires_code`; falta cablearlas al generador |
 | P1-2 | Pilares de contenido con dos esquemas distintos | canal2 usa `{pillar,pct,description}`; el resto `{name,ratio,desc}` | Unificar esquema y validarlo al aplicar |
 | P1-3 | Deduplicación ocultaba recomendaciones con valores distintos | Compara título + claves, no valores | **Implementado:** conflicto visible, no oculto |
 | P1-4 | Analítica etiquetada “30 días” sin filtro temporal | `get_channel_ctr_summary` agregaba todo el histórico | **Implementado:** ventana real, CTR ponderado, ceros como ausencia |
@@ -100,7 +100,7 @@ canal4 Expediciones sin retorno, canal5 Anomalías Médicas). Datos de alcance
 | P1-7 | Duración real fuera de objetivo | canal4 mediana 22,6 min vs objetivo 10–18 | **Parcial:** gate de outliers extremos; falta alerta de deriva |
 | P1-8 | Títulos en inglés en canal2 | “Dreamt the earthquake before it happened…” entre los más vistos recientes | Validación de idioma en título |
 | P1-9 | Fase `video` concentra fallos | 17 canal3, 8 canal4 en 28 días | Investigar causa antes de aumentar cadencia |
-| P1-10 | **canal2: largos sin distribución** | 47 subidos, 254 vistas; **1–17 impresiones por vídeo**, todos públicos | **Diagnóstico hecho:** no es privacidad ni thumbnail. Recomendación: reducir/pausar largos y revisar Studio; no seguir alimentando un canal sin distribución |
+| P1-10 | **canal2: largos sin distribución** | 47 subidos, 254 vistas; **1–17 impresiones por vídeo**, todos públicos | **Acción aplicada (2026-11-09):** cadencia de largos a **1/día** y generación a **1/día**; revisar el **2026-11-23**. Sin strikes ni eliminaciones; revisar Studio |
 
 ### P2 — Experimentos de crecimiento (requieren aprobación y plazo)
 
@@ -134,7 +134,7 @@ ventana de comparación, métrica principal, guardarraíl y criterio de reversi�
 | Prioridad | ID | Cambio | Estado |
 |---|---|---|---|
 | P0 | P0-1…P0-8 | Aplicación fiable, reparación y duración única | **Implementado en este cambio** |
-| P1 | P1-1 | Cablear o invalidar claves inertes | Pendiente |
+| P1 | P1-1 | Cablear o invalidar claves inertes | Parcial (rechazo 422) |
 | P1 | P1-2 | Unificar esquema de pilares | Pendiente |
 | P1 | P1-3 | Dedup por valores | **Implementado** |
 | P1 | P1-4 | Ventana y CTR ponderado en analítica | **Implementado** |
@@ -143,7 +143,7 @@ ventana de comparación, métrica principal, guardarraíl y criterio de reversi�
 | P1 | P1-7 | Monitor de duración real | Parcial (gate de outliers) |
 | P1 | P1-8 | Validación de idioma de título | Pendiente |
 | P1 | P1-9 | Causa raíz de fallos de render | Pendiente |
-| P1 | P1-10 | Distribución de largos canal2 | Diagnosticado; requiere decisión operativa |
+| P1 | P1-10 | Distribución de largos canal2 | Cadencia reducida a 1/día (revisar 2026-11-23) |
 | P2 | E1–E5 | Experimentos de crecimiento | Pendiente de aprobación y ejecución |
 
 ---
