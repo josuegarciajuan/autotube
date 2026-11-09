@@ -247,6 +247,19 @@ class AgentApp:
                 raise HTTPException(500, "no se pudo generar la URL de OAuth")
             return {"ok": True, "auth_url": url}
 
+        @app.get("/auth/status")
+        def auth_status(x_agent_token: Optional[str] = Header(None)):
+            """Estado local del token OAuth del canal (sin contactar Google)."""
+            self._check_token(x_agent_token)
+            p = Path(self.cfg.token_pickle_path)
+            exists = p.is_file()
+            return {
+                "ok": True,
+                "slug": self.cfg.slug,
+                "authenticated": exists,
+                "token_exists": exists,
+            }
+
         @app.post("/auth/exchange")
         def auth_exchange(body: AgentApp.OAuthCodeModel,
                           x_agent_token: Optional[str] = Header(None)):

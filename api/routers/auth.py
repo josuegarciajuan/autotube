@@ -140,6 +140,21 @@ def auth_status(channel_id: int):
 
     slug = ch["slug"]
 
+    # ── Canal gestionado: el token vive en el gateway, no en el servidor ──
+    from api.services.egress_client import get_egress_client
+    _client = get_egress_client(slug)
+    if _client is not None:
+        try:
+            st = _client.auth_status()
+        except Exception as exc:  # noqa: BLE001
+            return {"authenticated": False, "managed": True, "error": str(exc)}
+        return {
+            "authenticated": bool(st.get("authenticated")),
+            "managed": True,
+            "token_exists": bool(st.get("token_exists")),
+            "account": slug,
+        }
+
     from pipeline.youtube_uploader import YouTubeUploader
 
     uploader = YouTubeUploader(account_name=slug, channel_slug=slug)

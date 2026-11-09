@@ -184,7 +184,7 @@ def main() -> int:
     print(f"Password: cat {VNC_DIR / f'egress-{slug}-vnc.txt'}")
     print("Dentro del escritorio: /app/deploy/egress-node/navegador.sh")
     print("Verifica https://api.ipify.org == ", expected)
-    print("Luego crea Gmail/YouTube/GCP y ejecuta deploy_client_secret.py + OAuth.")
+    print("Luego crea Gmail/YouTube/GCP y ejecuta deploy_channel_oauth.py + OAuth.")
     return 0
 
 
