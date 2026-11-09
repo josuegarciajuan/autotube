@@ -704,3 +704,23 @@ OBS_ERROR_ALERT_IGNORE = [
     p.strip() for p in os.getenv("OBS_ERROR_ALERT_IGNORE", "").split(",") if p.strip()
 ]
 OBS_ERROR_ALERT_QUEUE_SIZE = int(os.getenv("OBS_ERROR_ALERT_QUEUE_SIZE", "500") or 500)
+
+# ── Integridad de narración (nov 2026) ─────────────────────────
+# Kill-switches para revertir comportamiento sin tocar código.
+# Todos por defecto en True (comportamiento corregido).
+SHORTS_LOOP_SHORT_VIDEO_CLIPS = os.getenv(
+    "SHORTS_LOOP_SHORT_VIDEO_CLIPS", "true").lower() == "true"
+SHORTS_SENTENCE_TRIM = os.getenv(
+    "SHORTS_SENTENCE_TRIM", "true").lower() == "true"
+LONGFORM_CONTIGUOUS_SCENES = os.getenv(
+    "LONGFORM_CONTIGUOUS_SCENES", "true").lower() == "true"
+TTS_TRIM_TRAILING_SILENCE = os.getenv(
+    "TTS_TRIM_TRAILING_SILENCE", "true").lower() == "true"
+TTS_FAIL_ON_BLOCK_ERROR = os.getenv(
+    "TTS_FAIL_ON_BLOCK_ERROR", "true").lower() == "true"
+# Margen máximo de audio "de cola" tolerado en long-form (silencio final real).
+LONGFORM_MAX_TRAILING_AUDIO_SEC = float(
+    os.getenv("LONGFORM_MAX_TRAILING_AUDIO_SEC", "2.0") or 2.0)
+# Margen de validación de duración del render de shorts (MP4 vs MP3).
+SHORTS_RENDER_DURATION_SLACK_SEC = float(
+    os.getenv("SHORTS_RENDER_DURATION_SLACK_SEC", "1.5") or 1.5)
