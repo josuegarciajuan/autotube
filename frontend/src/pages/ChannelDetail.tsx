@@ -217,6 +217,7 @@ export default function ChannelDetail() {
   const PAGE_SIZE = 50
   const [generating, setGenerating] = useState(false)
   const [editingProfile, setEditingProfile] = useState(false)
+  const [showProfileVariants, setShowProfileVariants] = useState(false)
   const [profileForm, setProfileForm] = useState({ name: '', description: '', banner_url: '', avatar_url: '', yt_channel_url: '', google_account: '', yt_studio_url: '' })
   const [profileVariants, setProfileVariants] = useState<any>(null)
   const [applyingVariant, setApplyingVariant] = useState<string | null>(null)
@@ -376,6 +377,10 @@ export default function ChannelDetail() {
   useEffect(() => {
     if (editingProfile) loadProfileVariants()
   }, [editingProfile, channelId])
+
+  useEffect(() => {
+    if (showProfileVariants) loadProfileVariants()
+  }, [showProfileVariants, channelId])
 
   // Restore generating state from context on mount / when activeJobs change
   useEffect(() => {
@@ -1128,6 +1133,11 @@ export default function ChannelDetail() {
               title="Editar nombre, descripción y enlaces del canal"
               className="flex items-center gap-1 px-2.5 sm:px-3 py-1.5 bg-dark-700 border border-surface-border text-gray-300 rounded-full text-xs hover:bg-dark-600 transition-colors">
               <Edit3 size={12} /> <span className="hidden sm:inline">Editar perfil</span><span className="sm:hidden">Editar</span>
+            </button>
+            <button onClick={() => { setShowProfileVariants(true); loadProfileVariants() }}
+              title="Ver y elegir variantes de banner/avatar generadas con Pollo AI"
+              className="flex items-center gap-1 px-2.5 sm:px-3 py-1.5 bg-fuchsia-500/10 border border-fuchsia-500/30 text-fuchsia-300 rounded-full text-xs hover:bg-fuchsia-500/20 transition-colors">
+              <Sparkles size={12} /> <span className="hidden sm:inline">Variantes IA</span><span className="sm:hidden">IA</span>
             </button>
             <button onClick={() => setShowConfigModal(true)}
               title="Configurar canal (IA, fuentes, SEO, visual...)"
@@ -2246,6 +2256,59 @@ export default function ChannelDetail() {
                 <button onClick={() => setEditingProfile(false)} className="px-4 py-2 bg-dark-600 text-gray-300 rounded-lg text-sm hover:bg-dark-500">Cancelar</button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {showProfileVariants && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm" onClick={() => setShowProfileVariants(false)}>
+          <div className="glass rounded-xl p-5 sm:p-6 w-full max-w-4xl mx-4 max-h-[90vh] overflow-y-auto animate-slide-up" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-display text-lg font-semibold text-white flex items-center gap-2">
+                <Sparkles size={18} className="text-fuchsia-300" /> Variantes de banner / avatar
+              </h3>
+              <button onClick={() => setShowProfileVariants(false)} className="p-1.5 rounded-lg hover:bg-white/10 text-gray-400">
+                <X size={18} />
+              </button>
+            </div>
+            <p className="text-xs text-gray-400 mb-4">
+              Generadas con Pollo AI. Elige una y pulsa “Usar esta”; la imagen anterior se guarda como backup.
+            </p>
+
+            {profileVariants?.current?.length ? (
+              <div className="mb-5">
+                <p className="text-[11px] uppercase tracking-wider text-gray-500 mb-2">Actual</p>
+                <div className="grid grid-cols-2 gap-3">
+                  {profileVariants.current.map((v: any) => (
+                    <div key={v.url} className="bg-dark-800/70 rounded-lg p-2.5 border border-surface-border">
+                      <img src={channelAssetUrl(v.url)} alt={v.label} className="w-full h-32 object-cover rounded mb-2" />
+                      <div className="text-xs text-gray-400 capitalize">Actual · {v.kind}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            <p className="text-[11px] uppercase tracking-wider text-gray-500 mb-2">Variantes IA</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {(profileVariants?.variants || []).map((v: any) => (
+                <div key={v.url} className="bg-dark-800/70 rounded-lg p-2.5 border border-surface-border">
+                  <img src={channelAssetUrl(v.url)} alt={v.label} className="w-full h-40 object-cover rounded mb-2" />
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs text-gray-300 truncate">{v.label || v.file}</span>
+                    <button onClick={() => handleApplyVariant(v.kind, v.file)} disabled={applyingVariant === v.file}
+                      className="shrink-0 px-3 py-1.5 rounded-lg bg-neon-cyan/10 border border-neon-cyan/30 text-neon-cyan text-xs font-bold hover:bg-neon-cyan/20 disabled:opacity-50">
+                      {applyingVariant === v.file ? 'Aplicando...' : 'Usar esta'}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            {!profileVariants?.variants?.length && (
+              <p className="text-sm text-gray-500 py-8 text-center">
+                No hay variantes todavía. Genera con Pollo y recarga.
+              </p>
+            )}
           </div>
         </div>
       )}
