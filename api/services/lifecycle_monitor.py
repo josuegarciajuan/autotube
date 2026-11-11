@@ -59,6 +59,7 @@ TASK_TIMEOUTS = {
     "media_retention": 25200,         # loop duerme 21600s (6h) + sweep ≤600s
     "generation_hold_refresh": 25200, # loop duerme 21600s (6h) + refresco
     "rotation_daily": 900,            # materializa la fase del día (loop 300s + replan)
+    "render_recovery": 2400,          # reencola renders retenidos por timeline (loop 1800s)
 }
 
 _TASK_HEARTBEATS_MONOTONIC: dict[str, float] = {}

@@ -640,6 +640,13 @@ async def lifespan(app: FastAPI):
     # relajar la política de títulos de canal2). 0 cuota.
     packaging_recovery_task = _supervised_loop("packaging_recovery", _packaging_recovery_loop)
 
+    # ── Recuperación de renders retenidos por el gate de timeline (nov 2026) ──
+    # Un fix desplegado con un render en vuelo no llega a ese worker (sobrevive
+    # al restart). Cuando falla, el vídeo queda en 'error' para siempre. Este
+    # loop lo reencola con el código nuevo, solo si el checkpoint tiene TODOS
+    # los medios (los purgados no se pueden reconstruir fielmente).
+    render_recovery_task = _supervised_loop("render_recovery", _render_recovery_loop)
+
     # ── Recordatorios operativos (v50): solo alertan, nunca ejecutan ──
     # Al vencer un scheduled_reminder se emite una alerta de sistema
     # (scheduled_reminder_due) para revisión humana. Sin acciones en silencio.
@@ -727,6 +734,7 @@ async def lifespan(app: FastAPI):
         publish_coverage_task,
         yt_state_task,
         packaging_recovery_task,
+        render_recovery_task,
         replan_bg_task,
         rotation_task,
         editorial_reviews_task,
@@ -1360,6 +1368,46 @@ async def _packaging_recovery_loop():
             logger.warning("Packaging recovery tick failed: %s", exc)
 
         await asyncio.sleep(PACKAGING_RECOVERY_INTERVAL_MIN * 60)
+
+
+async def _render_recovery_loop():
+    """Background loop: requeue long-form renders held by timeline/narration gates.
+
+    A code fix deployed while a worker is in flight does not reach that worker
+    (workers survive API restarts by design). When it finally fails, the video
+    stays in ``error``. This loop gives those videos a bounded reassembly with
+    the current code. It only touches videos whose media checkpoint is intact;
+    purged-media rows are left for a manual decision. Idempotent, 0 quota.
+    """
+    import asyncio, logging
+    logger = logging.getLogger("autotube.render_recovery")
+
+    from api.services.render_recovery import (
+        INTERVAL_MIN,
+        recover_render_held_videos,
+    )
+
+    await asyncio.sleep(180)  # Let API + queue consumer stabilize first
+
+    while True:
+        try:
+            from api.services.lifecycle_monitor import touch_task_heartbeat as _tth
+            _tth("render_recovery")
+            from database.db_extended import ExtendedDatabase
+            summary = await asyncio.wait_for(
+                asyncio.to_thread(recover_render_held_videos, ExtendedDatabase()),
+                timeout=300,
+            )
+            if summary.get("queued"):
+                logger.info(
+                    "Render recovery: %d queued, %d skipped, %d errors",
+                    summary["queued"], summary.get("skipped", 0),
+                    summary.get("errors", 0),
+                )
+        except Exception as exc:
+            logger.warning("Render recovery tick failed: %s", exc)
+
+        await asyncio.sleep(INTERVAL_MIN * 60)
 
 
 async def _upload_health_checker_loop():

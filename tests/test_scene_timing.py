@@ -95,6 +95,38 @@ def test_body_sync_gate_allows_tolerance_and_rejects_larger_mismatch():
         editor._assert_body_timeline_sync(42.5, 40.0)
 
 
+def test_body_sync_gate_diagnoses_planned_timeline_deficit():
+    editor = VideoEditor({"SCENE_SYNC_TOLERANCE_SEC": 0.15,
+                          "LONGFORM_MAX_TRAILING_AUDIO_SEC": 2.0})
+
+    # The nov-2026 bug: the rendered body was shorter than the *plan*, while the
+    # audio still matched the plan. The message must point at frame rounding /
+    # segment loss, not at a planning gap.
+    with pytest.raises(RuntimeError, match="Rendered body is shorter than the planned timeline"):
+        editor._assert_body_timeline_sync(10.0, 12.5, planned_duration=12.5)
+
+    # TTS dropped a block (audio shorter than the plan).
+    with pytest.raises(RuntimeError, match="Narration is shorter than the planned timeline"):
+        editor._assert_body_timeline_sync(12.5, 9.0, planned_duration=12.5)
+
+    # Within the trailing-silence tolerance → accepted.
+    editor._assert_body_timeline_sync(12.4, 12.5, planned_duration=12.5)
+
+
+def test_concat_filter_110_scenes_does_not_accumulate_frame_rounding():
+    """Regression: 110 scenes must lose at most one frame in total, not one
+    frame per scene (the nov-2026 2.2 s body deficit)."""
+    import re
+    durations = [7.0 + (i % 17) * 0.123 for i in range(110)]
+    filter_complex, _ = VideoEditor._build_duration_preserving_concat_filter(
+        110, film_grain_opacity=0, vignette_intensity=0,
+        planned_durations=durations, fps=24,
+    )
+    ends = [float(m) for m in re.findall(r"trim=start=0:end=([0-9.]+)", filter_complex)]
+    assert len(ends) == 110
+    assert sum(ends) == pytest.approx(sum(durations), abs=1.0 / 24.0)
+
+
 def test_actual_image_fallback_is_resplit_and_gets_distinct_media_requests():
     """A 10s video plan that returns an image becomes two unique 5s image scenes."""
     fetcher = object.__new__(MediaFetcher)

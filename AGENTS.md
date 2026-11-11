@@ -976,3 +976,14 @@ reglas duras (spec: `specs/narracion-integridad.md`):
 9. Kill-switches: `SHORTS_LOOP_SHORT_VIDEO_CLIPS`, `SHORTS_SENTENCE_TRIM`,
    `LONGFORM_CONTIGUOUS_SCENES`, `TTS_TRIM_TRAILING_SILENCE`,
    `TTS_FAIL_ON_BLOCK_ERROR` (todos `true` por defecto).
+10. **Concat del body con padding por escena (nov 2026).** Cada segmento se
+    renderiza con un número entero de frames y puede quedar hasta un frame
+    corto; con 100+ escenas el déficit se acumulaba (2-5 s) y el body salía
+    más corto que la narración. `_build_duration_preserving_concat_filter`
+    recibe `planned_durations` y hace `tpad`+`trim` a fronteras acumuladas
+    cuantizadas a frame. Si falla, el error correcto es "Rendered body is
+    shorter than the planned timeline", no un problema de pauses.
+    Recuperación automática: `api/services/render_recovery.py` (loop
+    `render_recovery` en `api/main.py`) reencola una reassembly solo si el
+    checkpoint tiene TODOS los medios; los vídeos con medios purgados se
+    descartan con `scripts/discard_unrecoverable_videos.py`.

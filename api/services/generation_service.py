@@ -3215,6 +3215,22 @@ async def _do_reassembly(job_id: int, video_id: int):
         }
 
         async with _RENDER_SEMAPHORE:
+            # A reassembly can wait on the render semaphore while other renders
+            # run. If it was cancelled/failed in the meantime, abort before
+            # spawning a render subprocess (otherwise a cancelled job would
+            # still rebuild the video and overwrite its state).
+            try:
+                _job_now = db.get_job(job_id)
+                if not _job_now or _job_now.get("status") != "running":
+                    logger.info(
+                        "Reassembly job %d no longer running (status=%s) — "
+                        "aborting before render",
+                        job_id, (_job_now or {}).get("status"),
+                    )
+                    return
+            except Exception as _st_exc:  # noqa: BLE001 — never block a valid render
+                logger.debug("Reassembly status check skipped for job %d: %s",
+                             job_id, _st_exc)
             ok, video_data = await _run_video_in_subprocess(
                 canal=canal, video_id=video_id, job_id=job_id,
                 script=_script, audio_data=_audio,
