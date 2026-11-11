@@ -183,6 +183,22 @@ def recover_packaging_held_videos(
             logger.warning("packaging recovery: config error for %s: %s", slug, exc)
             continue
 
+        # Integridad de narración ANTES de reencolar: un render truncado no
+        # vuelve a ser inventario subible. Sin este guard, packaging_recovery lo
+        # devolvía a awaiting_upload (solo validaba título/miniatura) y el gate
+        # de subida lo retenía otra vez → bucle y cobertura falsa.
+        if _render_truncated(row):
+            skipped += 1
+            details.append({
+                "video_id": vid, "slug": slug,
+                "action": "narration_truncated",
+            })
+            logger.warning(
+                "packaging recovery: #%s held — render shorter than narration "
+                "(needs re-render/reassembly)", vid,
+            )
+            continue
+
         video = {
             "titulo_final": row.get("titulo_final"),
             "thumbnail_path": row.get("thumbnail_path"),
@@ -255,22 +271,6 @@ def recover_packaging_held_videos(
                     "reasons": list(result.reasons),
                 })
                 continue
-
-        # Integridad de narración ANTES de reencolar: un render truncado no
-        # vuelve a ser inventario subible. Sin este guard, packaging_recovery lo
-        # devolvía a awaiting_upload (solo validaba título/miniatura) y el gate
-        # de subida lo retenía otra vez → bucle y cobertura falsa.
-        if _render_truncated(row):
-            skipped += 1
-            details.append({
-                "video_id": vid, "slug": slug,
-                "action": "narration_truncated",
-            })
-            logger.warning(
-                "packaging recovery: #%s held — render shorter than narration "
-                "(needs re-render/reassembly)", vid,
-            )
-            continue
 
         if dry_run:
             recovered += 1

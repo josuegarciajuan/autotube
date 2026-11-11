@@ -337,3 +337,21 @@ def test_does_not_requeue_truncated_narration(tmp_path, monkeypatch):
     assert result["recovered"] == 0
     assert db.updated == []
     assert result["details"][0]["action"] == "narration_truncated"
+
+
+def test_truncated_guard_runs_before_title_validation(tmp_path, monkeypatch):
+    """A truncated render must be held even when the title is also invalid.
+
+    Otherwise the LLM retitle path could requeue it before the narration guard.
+    """
+    bad_title = _video(tmp_path, 1, valid=False)
+    bad_title["audio_path"] = str(tmp_path / "v1.mp3")
+    _patch(monkeypatch, [bad_title])
+    monkeypatch.setattr(recovery, "_render_truncated", lambda row: True)
+
+    db = FakeDB([bad_title])
+    result = recovery.recover_packaging_held_videos(db=db)
+
+    assert result["recovered"] == 0
+    assert db.updated == []
+    assert result["details"][0]["action"] == "narration_truncated"
