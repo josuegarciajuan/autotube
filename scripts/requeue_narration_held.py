@@ -43,33 +43,69 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
-def _eligible(conn: sqlite3.Connection, days: int = 14) -> list[dict]:
+def _eligible(
+    conn: sqlite3.Connection,
+    days: int = 14,
+    min_asset_ratio: float = 1.0,
+    error_substrings: list[str] | None = None,
+    video_ids: list[int] | None = None,
+) -> tuple[list[dict], list[tuple[int, int, int]]]:
+    """Return (eligible_rows, skipped_for_purged_media).
+
+    A video whose checkpoint references assets that no longer exist on disk
+    cannot be reassembled faithfully (the editor replaces them with fallback
+    media). Those are reported separately and never queued.
+    """
     placeholders = ",".join("?" for _ in RETRYABLE_PHASES)
+    where = [
+        "status IN ('error','validation_failed')",
+        f"progress_phase IN ({placeholders})",
+        "COALESCE(created_at, '') >= datetime('now', ?)",
+        """id NOT IN (
+               SELECT video_id FROM generation_jobs
+                WHERE video_id IS NOT NULL
+                  AND status IN ('running','queued')
+           )""",
+    ]
+    params: list = [*RETRYABLE_PHASES, f"-{int(days)} days"]
+    if error_substrings:
+        where.append("(" + " OR ".join(
+            "COALESCE(error_message, '') LIKE ?" for _ in error_substrings
+        ) + ")")
+        params.extend(f"%{s}%" for s in error_substrings)
+    if video_ids:
+        where.append("id IN (" + ",".join("?" for _ in video_ids) + ")")
+        params.extend(int(v) for v in video_ids)
+
     rows = conn.execute(
-        f"""SELECT id, canal, channel_id, status, progress_phase, checkpoint_data
+        f"""SELECT id, canal, channel_id, status, progress_phase,
+                   error_message, checkpoint_data
               FROM videos
-             WHERE status IN ('error','validation_failed')
-               AND progress_phase IN ({placeholders})
-               AND COALESCE(created_at, '') >= datetime('now', ?)
-               AND id NOT IN (
-                   SELECT video_id FROM generation_jobs
-                    WHERE video_id IS NOT NULL
-                      AND status IN ('running','queued')
-               )
+             WHERE {' AND '.join(where)}
              ORDER BY id""",
-        (*RETRYABLE_PHASES, f"-{int(days)} days"),
+        tuple(params),
     ).fetchall()
-    out = []
+    out: list[dict] = []
+    skipped_media: list[tuple[int, int, int]] = []
     for row in rows:
         raw = row["checkpoint_data"] or "{}"
         try:
             cp = json.loads(raw) if isinstance(raw, str) else (raw or {})
         except (json.JSONDecodeError, TypeError):
             cp = {}
-        if not cp.get("tts") or not cp.get("media"):
+        media = cp.get("media") or {}
+        assets = media.get("assets") or []
+        if not cp.get("tts") or not media or not assets:
+            continue
+        present = sum(
+            1 for a in assets
+            if a.get("path") and Path(str(a["path"])).exists()
+        )
+        if present / len(assets) < float(min_asset_ratio):
+            skipped_media.append((int(row["id"]), present, len(assets)))
             continue
         out.append(dict(row))
-    return out
+    return out, skipped_media
 
 
 def _channel_busy(conn: sqlite3.Connection, channel_id: int) -> bool:
@@ -99,11 +135,27 @@ def _post_reassemble(video_id: int) -> tuple[bool, str]:
         return False, str(exc)
 
 
-def run_once(dry_run: bool = False, days: int = 14) -> dict:
+def run_once(
+    dry_run: bool = False,
+    days: int = 14,
+    min_asset_ratio: float = 1.0,
+    error_substrings: list[str] | None = None,
+    video_ids: list[int] | None = None,
+) -> dict:
     conn = _connect()
-    queued = skipped = failed = 0
+    queued = skipped = failed = skipped_media = 0
     try:
-        for video in _eligible(conn, days=days):
+        eligible, purged_media = _eligible(
+            conn, days=days, min_asset_ratio=min_asset_ratio,
+            error_substrings=error_substrings, video_ids=video_ids,
+        )
+        for vid, present, total in purged_media:
+            skipped_media += 1
+            print(
+                f"  #{vid}: medios purgados ({present}/{total} assets) — "
+                "no reensamblable, se omite"
+            )
+        for video in eligible:
             vid = int(video["id"])
             channel_id = int(video["channel_id"] or 0)
             if _channel_busy(conn, channel_id):
@@ -124,7 +176,8 @@ def run_once(dry_run: bool = False, days: int = 14) -> dict:
                 print(f"  #{vid} ({video['canal']}): no encolado — {detail}")
     finally:
         conn.close()
-    return {"queued": queued, "skipped": skipped, "failed": failed}
+    return {"queued": queued, "skipped": skipped, "failed": failed,
+            "skipped_media": skipped_media}
 
 
 def main() -> int:
@@ -138,20 +191,39 @@ def main() -> int:
                     help="only videos created in the last N days (default 14)")
     ap.add_argument("--max-hours", type=float, default=24.0,
                     help="stop the watch loop after N hours (default 24)")
+    ap.add_argument("--min-asset-ratio", type=float, default=1.0,
+                    help="skip videos with fewer present assets than this "
+                         "fraction (default 1.0 = require all media on disk)")
+    ap.add_argument("--error-substring", action="append", default=[],
+                    help="only videos whose error_message contains this text "
+                         "(repeatable)")
+    ap.add_argument("--video-ids", default="",
+                    help="comma-separated video ids to consider (default: all)")
     args = ap.parse_args()
 
-    total = {"queued": 0, "skipped": 0, "failed": 0}
+    video_ids = [
+        int(v) for v in str(args.video_ids).replace(" ", "").split(",") if v
+    ]
+    total = {"queued": 0, "skipped": 0, "failed": 0, "skipped_media": 0}
     started = time.monotonic()
     while True:
         print(f"[{time.strftime('%H:%M:%S')}] pasada de reencolado")
-        result = run_once(dry_run=args.dry_run, days=args.days)
+        result = run_once(
+            dry_run=args.dry_run, days=args.days,
+            min_asset_ratio=args.min_asset_ratio,
+            error_substrings=args.error_substring or None,
+            video_ids=video_ids or None,
+        )
         for key in total:
-            total[key] += result[key]
+            total[key] += result.get(key, 0)
         print(f"  => encolados={result['queued']} "
-              f"canal_ocupado={result['skipped']} errores={result['failed']}")
+              f"canal_ocupado={result['skipped']} "
+              f"medios_purgados={result['skipped_media']} "
+              f"errores={result['failed']}")
         if not args.watch:
             break
-        if result["queued"] == 0 and result["failed"] == 0 and result["skipped"] == 0:
+        if (result["queued"] == 0 and result["failed"] == 0
+                and result["skipped"] == 0 and result["skipped_media"] == 0):
             print("  => nada pendiente — fin")
             break
         if (time.monotonic() - started) >= args.max_hours * 3600:
@@ -159,7 +231,9 @@ def main() -> int:
             break
         time.sleep(max(30, args.interval))
     print(f"Total: encolados={total['queued']} "
-          f"canal_ocupado={total['skipped']} errores={total['failed']}")
+          f"canal_ocupado={total['skipped']} "
+          f"medios_purgados={total['skipped_media']} "
+          f"errores={total['failed']}")
     return 0
 
 
