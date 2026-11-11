@@ -804,6 +804,21 @@ class VideoEditor:
         # ── Concat planned segments without temporal overlap ──────
         if progress_cb is not None:
             progress_cb(68, "video", "Concatenando segmentos con transiciones exactas...")
+        # Diagnostic: the timeline plan vs the real encoded segments. Per-scene
+        # frame rounding used to accumulate ~half a frame per scene (2+ s over
+        # 100 scenes) and the body came out shorter than the narration. The
+        # concat pads each input to its planned duration; this log makes a
+        # regression obvious before the final gate fires.
+        planned_body_dur = sum(
+            float(br.get("duration", 0) or 0) for br in block_ranges
+        )
+        rendered_body_dur = self._probe_video_duration(segment_paths)
+        if rendered_body_dur > 0:
+            self.logger.info(
+                "Body timeline pre-concat: planned=%.3fs segments=%.3fs delta=%+.3fs",
+                planned_body_dur, rendered_body_dur,
+                rendered_body_dur - planned_body_dur,
+            )
         self.logger.info("Step 3/6: Concatenating %d scene segments exactly…", len(segment_paths))
         body_path = seg_dir / "body.mp4"
         body_segment_path = self._concat_body_with_crossfades(
@@ -815,6 +830,7 @@ class VideoEditor:
         if audio_path:
             self._assert_body_timeline_sync(
                 self._dur(body_video), self._get_voice_duration(Path(audio_path)),
+                planned_duration=planned_body_dur,
             )
 
         # ── v5: progress after body concat ──
@@ -1246,7 +1262,9 @@ class VideoEditor:
             outro_dur,
             intro_dur + body_vid_dur + cta_dur + outro_dur,
         )
-        self._assert_body_timeline_sync(body_vid_dur, body_aud_dur)
+        self._assert_body_timeline_sync(
+            body_vid_dur, body_aud_dur, planned_duration=planned_body_dur,
+        )
 
         render_ok = output_path.exists() and output_path.stat().st_size > 0
         try:
@@ -1827,7 +1845,10 @@ class VideoEditor:
         tolerance = float(self.canal.get("SCENE_SYNC_TOLERANCE_SEC", 0.15))
         return duration > 0 and abs(duration - planned_duration) < tolerance
 
-    def _assert_body_timeline_sync(self, video_duration: float, audio_duration: float) -> None:
+    def _assert_body_timeline_sync(
+        self, video_duration: float, audio_duration: float,
+        planned_duration: float | None = None,
+    ) -> None:
         """Fail on a genuinely broken body sync.
 
         Narration integrity is one-sided: a body slightly LONGER than the audio
@@ -1838,11 +1859,41 @@ class VideoEditor:
         Both directions tolerate up to ``LONGFORM_MAX_TRAILING_AUDIO_SEC``
         (2 s default). The per-scene concat padding keeps the real mismatch
         well under one frame, so anything above this bound is a real bug.
+
+        ``planned_duration`` (sum of ``block_ranges`` durations) enables a
+        precise diagnosis: a rendered body shorter than the planned timeline is
+        frame-rounding/segment loss, not a planning gap. Without it we keep the
+        legacy audio-vs-video check.
         """
         tolerance = float(self.canal.get("SCENE_SYNC_TOLERANCE_SEC", 0.15))
         max_trailing = float(
             self.canal.get("LONGFORM_MAX_TRAILING_AUDIO_SEC", 2.0) or 2.0
         )
+        if planned_duration is not None:
+            planned = float(planned_duration)
+            if video_duration < planned - max_trailing:
+                raise RuntimeError(
+                    "Rendered body is shorter than the planned timeline: "
+                    f"video={video_duration:.3f}s planned={planned:.3f}s "
+                    f"deficit={planned - video_duration:.3f}s "
+                    f"(max {max_trailing:.1f}s). Per-scene segment frame "
+                    "rounding or missing/corrupt scene segments; check the "
+                    "duration-preserving concat padding."
+                )
+            if audio_duration < planned - max_trailing:
+                raise RuntimeError(
+                    "Narration is shorter than the planned timeline: "
+                    f"audio={audio_duration:.3f}s planned={planned:.3f}s "
+                    f"deficit={planned - audio_duration:.3f}s "
+                    f"(max {max_trailing:.1f}s). TTS likely dropped a block."
+                )
+            if audio_duration > planned + max_trailing:
+                raise RuntimeError(
+                    "Scene timeline does not cover the narration: "
+                    f"audio={audio_duration:.3f}s planned={planned:.3f}s "
+                    f"gap={audio_duration - planned:.3f}s "
+                    f"(max {max_trailing:.1f}s)."
+                )
         if audio_duration < video_duration - max_trailing:
             raise RuntimeError(
                 "Body narration is shorter than the video body: "
@@ -1855,7 +1906,7 @@ class VideoEditor:
                 "Body narration is longer than the video body by "
                 f"{audio_duration - video_duration:.3f}s "
                 f"(max trailing silence {max_trailing:.1f}s). "
-                "The scene timeline is missing inter-block pauses; refusing to "
+                "The rendered body is shorter than the plan; refusing to "
                 "trim the closing narration at mux."
             )
         if audio_duration > video_duration + tolerance:
