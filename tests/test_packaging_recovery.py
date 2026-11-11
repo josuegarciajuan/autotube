@@ -317,3 +317,23 @@ def test_llm_retitle_after_deterministic_sanitize_reduces_reasons(tmp_path, monk
     result = recovery.recover_packaging_held_videos(db=db)
     assert result["details"][0]["action"] == "llm_retitled"
     assert calls["n"] == 1
+
+
+def test_does_not_requeue_truncated_narration(tmp_path, monkeypatch):
+    """Un render más corto que su narración no vuelve a la cola de subida.
+
+    Regresión nov 2026: packaging_recovery solo validaba título/miniatura, así
+    que devolvía a awaiting_upload vídeos que el gate de integridad retenía de
+    nuevo, dejándolos contando como cobertura y ocupando franjas de publicación.
+    """
+    good = _video(tmp_path, 1, valid=True)
+    good["audio_path"] = str(tmp_path / "v1.mp3")
+    _patch(monkeypatch, [good])
+    monkeypatch.setattr(recovery, "_render_truncated", lambda row: True)
+
+    db = FakeDB([good])
+    result = recovery.recover_packaging_held_videos(db=db)
+
+    assert result["recovered"] == 0
+    assert db.updated == []
+    assert result["details"][0]["action"] == "narration_truncated"

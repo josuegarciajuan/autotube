@@ -49,7 +49,7 @@ def _channel_pending(db, channel_id: int) -> list[dict]:
         with db._connect() as conn:
             rows = conn.execute(
                 """SELECT v.id, v.status, v.target_public_at, v.yt_video_id,
-                          v.scheduled_upload_at
+                          v.scheduled_upload_at, v.video_path, v.audio_path
                    FROM videos v
                    WHERE v.channel_id = ?
                      AND v.publish_mode = 'scheduled'
@@ -59,7 +59,26 @@ def _channel_pending(db, channel_id: int) -> list[dict]:
                    ORDER BY COALESCE(v.uploaded_at, v.scheduled_upload_at, v.created_at)
                 """, (channel_id,),
             ).fetchall()
-        return [dict(r) for r in rows]
+        pending: list[dict] = []
+        for r in rows:
+            row = dict(r)
+            # Un render más corto que su narración no es inventario publicable:
+            # el gate de subida lo retendrá. Excluirlo para que la cobertura no
+            # dé por cubierto un día que en realidad no tiene vídeo válido.
+            if row.get("status") in ("awaiting_upload", "ready"):
+                try:
+                    from pipeline.audio_utils import narration_truncated
+                    if narration_truncated(row.get("video_path"), row.get("audio_path")):
+                        logger.debug(
+                            "[coverage] video #%s narration truncated — excluded",
+                            row.get("id"),
+                        )
+                        continue
+                except Exception as exc:  # noqa: BLE001 — measurement is best-effort
+                    logger.debug("[coverage] narration check skipped for #%s: %s",
+                                 row.get("id"), exc)
+            pending.append(row)
+        return pending
     except Exception as exc:
         logger.debug("[coverage] pending scan skipped: %s", exc)
         return []
@@ -584,7 +603,8 @@ def ensure_daily_publish_coverage(db=None, horizon_days: int = 2,
                 try:
                     from api.services.publish_repack import apply_publish_repack
                     _rep = apply_publish_repack(db, ch_id, slug, dry_run=False,
-                                                quota_gate=True)
+                                                quota_gate=True,
+                                                prioritize_awaiting=True)
                     _moved = int((_rep or {}).get("rescheduled", 0) or 0)
                     if _moved:
                         result["repacked"] = result.get("repacked", 0) + _moved

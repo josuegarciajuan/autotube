@@ -1480,6 +1480,50 @@ def _channel_peak_hours(db, channel_id: int, cfg: dict, peak_hour: int) -> list[
     return hours[:3]
 
 
+def _exclude_truncated_awaiting(db, rows, slug: str):
+    """Drop awaiting/ready rows whose render is shorter than its narration.
+
+    Those videos cannot be uploaded: the narration-integrity gate in
+    ``upload_scheduler`` would hold them. Keeping them in the repack would
+    occupy publish slots with inventory that never reaches YouTube, leaving
+    real deficits uncovered (incident nov 2026). Fail-open when the schema or
+    probe is unavailable.
+    """
+    awaiting = [r for r in rows if r["status"] in ("awaiting_upload", "ready")]
+    if not awaiting:
+        return rows
+    try:
+        from pipeline.audio_utils import narration_truncated
+
+        ids = tuple(int(r["id"]) for r in awaiting)
+        placeholders = ",".join("?" * len(ids))
+        with db._connect() as conn:
+            meta = conn.execute(
+                f"SELECT id, video_path, audio_path FROM videos "
+                f"WHERE id IN ({placeholders})",
+                ids,
+            ).fetchall()
+        by_id = {int(m["id"]): m for m in meta}
+        dropped = {
+            int(r["id"]) for r in awaiting
+            if (by_id.get(int(r["id"])) is not None
+                and narration_truncated(
+                    by_id[int(r["id"])]["video_path"],
+                    by_id[int(r["id"])]["audio_path"],
+                ))
+        }
+        if dropped:
+            logger.info(
+                "[%s] repack: %d vídeo(s) excluidos por narración truncada",
+                slug, len(dropped),
+            )
+        return [r for r in rows if int(r["id"]) not in dropped]
+    except Exception as exc:  # noqa: BLE001 — never block repack on a probe
+        logger.debug("[%s] repack: filtro de narración truncada omitido: %s",
+                     slug, exc)
+        return rows
+
+
 def repack_channel_publish_times(
     db,
     channel_id: int,
@@ -1561,6 +1605,8 @@ def repack_channel_publish_times(
     if not rows:
         logger.info("[%s] repack: no hay publicaciones pendientes", slug)
         return []
+
+    rows = _exclude_truncated_awaiting(db, rows, slug)
 
     # ── Horizonte de seguridad ESCALABLE (antiban, ago 2026) ──────────
     # El cap fijo de 5 días (MAX_PUBLISH_AHEAD_SAFETY_HOURS) recortaba y APILABA
