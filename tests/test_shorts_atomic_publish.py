@@ -613,7 +613,7 @@ def test_wait_until_publish_target_blocks_until_target():
 
 def test_wait_until_publish_target_refuses_an_absurdly_early_dispatch():
     now = datetime(2026, 10, 18, 8, 0, tzinfo=timezone.utc)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(ss._PublishTargetTooEarly):
         ss._wait_until_publish_target(
             "2026-10-18 23:00:00", max_wait_hours=1, _now=lambda: now,
         )
