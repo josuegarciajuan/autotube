@@ -13,6 +13,15 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger("autotube.quality_monitors")
 
+# One-time policy epoch. The word-target fix deployed on 2026-11-09 11:41 UTC
+# (commit 1170e8f9) narrowed the generation budget to the duration objective.
+# Videos generated BEFORE that fix are not representative of the current
+# policy: keeping them in the 14-day window would keep the drift alert alive
+# for up to two weeks after the fix. `DURATION_DRIFT_SINCE` overrides it.
+_DURATION_POLICY_SINCE = os.getenv(
+    "DURATION_DRIFT_SINCE", "2026-11-09 11:41:00"
+)
+
 
 def _enabled(name: str, default: bool = True) -> bool:
     raw = os.getenv(name)
@@ -29,13 +38,20 @@ def _active_channels(db) -> list[dict]:
 
 
 def check_duration_drift(db, days: int = 14, min_sample: int = 5,
-                         max_outside_ratio: float = 0.20) -> list[dict]:
-    """Alert when recent long-forms fall outside the channel's duration policy."""
+                         max_outside_ratio: float = 0.20,
+                         since: str | None = None) -> list[dict]:
+    """Alert when recent long-forms fall outside the channel's duration policy.
+
+    Only videos generated under the current word-target policy are sampled
+    (``since``, defaults to the 2026-11-09 fix). This avoids penalising the
+    channel for pre-fix output while still detecting real drift afterwards.
+    """
     if not _enabled("DURATION_DRIFT_ALERT_ENABLED"):
         return []
     from config.config_bridge import get_channel_config
     from config.duration_policy import resolve_duration_range
 
+    since = since or _DURATION_POLICY_SINCE
     results: list[dict] = []
     for ch in _active_channels(db):
         channel_id = ch["id"]
@@ -46,12 +62,16 @@ def check_duration_drift(db, days: int = 14, min_sample: int = 5,
                     """SELECT id, duracion_seg FROM videos
                        WHERE channel_id = ? AND yt_video_id IS NOT NULL
                          AND duracion_seg IS NOT NULL AND duracion_seg > 0
-                         AND uploaded_at >= datetime('now', ?)""",
-                    (channel_id, f"-{int(days)} days"),
+                         AND uploaded_at >= datetime('now', ?)
+                         AND COALESCE(created_at, uploaded_at) >= ?
+                       ORDER BY id""",
+                    (channel_id, f"-{int(days)} days", since),
                 ).fetchall()
             durations = [int(r["duracion_seg"]) for r in rows]
             if len(durations) < min_sample:
                 db.resolve_alerts(alert_type="duration_drift", channel_id=channel_id)
+                results.append({"channel": slug, "status": "ok",
+                                "outside": 0, "sample": len(durations)})
                 continue
             policy = resolve_duration_range(get_channel_config(slug))
             lo, hi = policy.min_sec, policy.max_sec
@@ -76,6 +96,7 @@ def check_duration_drift(db, days: int = 14, min_sample: int = 5,
                         "target_min_sec": lo,
                         "target_max_sec": hi,
                         "policy_source": policy.source,
+                        "since": since,
                         "checked_at": datetime.now(timezone.utc).isoformat(),
                     },
                 )

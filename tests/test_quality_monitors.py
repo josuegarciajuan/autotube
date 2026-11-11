@@ -12,7 +12,7 @@ class FakeDB:
         self.conn.executescript("""
             CREATE TABLE channels (id INTEGER PRIMARY KEY, name TEXT, slug TEXT, active INTEGER);
             CREATE TABLE videos (id INTEGER PRIMARY KEY, channel_id INTEGER, yt_video_id TEXT,
-                                 duracion_seg INTEGER, uploaded_at TEXT);
+                                 duracion_seg INTEGER, uploaded_at TEXT, created_at TEXT);
             CREATE TABLE pipeline_log (id INTEGER PRIMARY KEY, canal TEXT, phase TEXT,
                                        status TEXT, message TEXT, created_at TEXT);
             CREATE TABLE pipeline_alerts (id INTEGER PRIMARY KEY, entity_type TEXT, entity_id INTEGER,
@@ -90,3 +90,37 @@ def test_video_phase_regression_alert(monkeypatch):
     db.conn.commit()
     out = qm.check_video_phase_regression(db)
     assert out[0]["status"] == "ok"
+
+
+def test_duration_drift_ignores_videos_generated_before_policy_fix(monkeypatch):
+    """Pre-fix samples must not keep the alert alive after the word-target fix."""
+    db = FakeDB()
+    for i in range(6):
+        db.conn.execute(
+            "INSERT INTO videos (channel_id, yt_video_id, duracion_seg, uploaded_at, created_at) "
+            "VALUES (3, ?, ?, datetime('now'), '2026-11-01 00:00:00')",
+            (f"old{i}", 25 * 60),
+        )
+    db.conn.commit()
+    monkeypatch.setattr(
+        "config.config_bridge.get_channel_config",
+        lambda slug, force_reload=False: SimpleNamespace(
+            VIDEO_AVERAGE_DURATION_MIN=17, VIDEO_DURATION_DISCREPANCY_MIN=2
+        ),
+    )
+    out = qm.check_duration_drift(db, since="2026-11-09 11:41:00")
+    assert out[0]["status"] == "ok"
+    assert out[0]["sample"] == 0
+
+    # A post-fix sample outside the policy is still detected once the sample
+    # floor is reached.
+    for i in range(6):
+        db.conn.execute(
+            "INSERT INTO videos (channel_id, yt_video_id, duracion_seg, uploaded_at, created_at) "
+            "VALUES (3, ?, ?, datetime('now'), '2026-11-10 00:00:00')",
+            (f"new{i}", 25 * 60),
+        )
+    db.conn.commit()
+    out = qm.check_duration_drift(db, since="2026-11-09 11:41:00")
+    assert out[0]["status"] == "alert"
+    assert out[0]["sample"] == 6
