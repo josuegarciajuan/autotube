@@ -1814,22 +1814,25 @@ class VideoEditor:
     def _assert_body_timeline_sync(self, video_duration: float, audio_duration: float) -> None:
         """Fail on a genuinely broken body sync.
 
-        * ``audio < video`` — narration ends before the visual body → words are
-          missing (TTS dropped a block) → real bug, fail hard.
-        * ``audio > video`` — only a small trailing silence is benign (trimmed
-          at mux).  The old code treated ANY difference as trailing silence and
-          silently cut 8-26 s of the closing narration (nov 2026).  More than
-          ``LONGFORM_MAX_TRAILING_AUDIO_SEC`` is a timeline bug → fail hard.
+        Narration integrity is one-sided: a body slightly LONGER than the audio
+        is harmless (``-shortest`` trims the extra video frames) and must never
+        fail a render. A body much longer means TTS dropped a block; a body
+        shorter than the audio means the mux would cut the closing narration.
+
+        Both directions tolerate up to ``LONGFORM_MAX_TRAILING_AUDIO_SEC``
+        (2 s default). The per-scene concat padding keeps the real mismatch
+        well under one frame, so anything above this bound is a real bug.
         """
         tolerance = float(self.canal.get("SCENE_SYNC_TOLERANCE_SEC", 0.15))
         max_trailing = float(
             self.canal.get("LONGFORM_MAX_TRAILING_AUDIO_SEC", 2.0) or 2.0
         )
-        if audio_duration < video_duration - tolerance:
+        if audio_duration < video_duration - max_trailing:
             raise RuntimeError(
                 "Body narration is shorter than the video body: "
                 f"video={video_duration:.3f}s audio={audio_duration:.3f}s "
-                f"gap={video_duration - audio_duration:.3f}s (tolerance={tolerance:.3f}s)"
+                f"gap={video_duration - audio_duration:.3f}s "
+                f"(max {max_trailing:.1f}s). TTS likely dropped a block."
             )
         if audio_duration > video_duration + max_trailing:
             raise RuntimeError(
@@ -4018,8 +4021,18 @@ class VideoEditor:
 
         film_grain_opacity = self.canal.get("FILM_GRAIN_OPACITY", 0)
         vignette_intensity = self.canal.get("VIGNETTE_INTENSITY", 0)
+        # Feed the planned per-scene durations so each input is padded/trimmed
+        # to its exact length; otherwise per-segment frame rounding accumulates
+        # and the body ends several seconds shorter than the narration.
+        _planned_durations = None
+        if block_ranges and len(block_ranges) == n:
+            _planned_durations = [
+                float(br.get("duration", 0) or 0) for br in block_ranges
+            ]
         filter_complex, current_label = self._build_duration_preserving_concat_filter(
-            n, film_grain_opacity=film_grain_opacity, vignette_intensity=vignette_intensity,
+            n, film_grain_opacity=film_grain_opacity,
+            vignette_intensity=vignette_intensity,
+            planned_durations=_planned_durations, fps=float(self.fps),
         )
 
         ff_args += [
@@ -4064,11 +4077,49 @@ class VideoEditor:
     @staticmethod
     def _build_duration_preserving_concat_filter(
         segment_count: int, *, film_grain_opacity: float, vignette_intensity: float,
+        planned_durations: list[float] | None = None,
+        fps: float = 24.0,
     ) -> tuple[str, str]:
-        """Return an ffmpeg graph that keeps every input duration unchanged."""
+        """Return an ffmpeg graph that keeps every input duration unchanged.
+
+        ``planned_durations`` fixes the cumulative defect introduced by the
+        per-segment encoder: MoviePy/ffmpeg write a whole number of frames, so
+        every rendered scene is up to one frame shorter than planned. With
+        100+ scenes that deficit adds up to several seconds and the body ends
+        shorter than the narration (nov 2026 incident). Each input is padded
+        with ``tpad`` and trimmed to a frame-quantised cumulative boundary, so
+        the concatenated body matches the planned timeline (error bounded by
+        one frame for the whole body instead of one frame per scene).
+        """
         if segment_count < 1:
             raise ValueError("segment_count must be positive")
-        if segment_count == 1:
+
+        if planned_durations is not None:
+            if len(planned_durations) != segment_count:
+                raise ValueError(
+                    "planned_durations must match segment_count "
+                    f"({len(planned_durations)} != {segment_count})"
+                )
+            frame = 1.0 / max(1.0, float(fps or 24.0))
+            parts: list[str] = []
+            labels: list[str] = []
+            cum = 0.0
+            prev_end = 0.0
+            for index, raw_dur in enumerate(planned_durations):
+                cum += max(0.0, float(raw_dur or 0))
+                # Frame-quantised cumulative boundary: the sum telescopes to
+                # round(total*fps)/fps, so rounding never accumulates.
+                end = round(cum / frame) * frame
+                seg_dur = max(frame, end - prev_end)
+                prev_end = end
+                parts.append(
+                    f"[{index}:v]tpad=stop_mode=clone:stop_duration={seg_dur:.6f},"
+                    f"trim=start=0:end={seg_dur:.6f},setpts=PTS-STARTPTS[k{index}]"
+                )
+                labels.append(f"[k{index}]")
+            inputs = "".join(labels)
+            parts.append(f"{inputs}concat=n={segment_count}:v=1:a=0[concat]")
+        elif segment_count == 1:
             parts = ["[0:v]null[concat]"]
         else:
             inputs = "".join(f"[{index}:v]" for index in range(segment_count))
