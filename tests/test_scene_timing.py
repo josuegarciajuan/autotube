@@ -49,16 +49,50 @@ def test_concat_filter_has_exact_duration_without_overlap_or_padding():
     assert output_label == "[concat]"
 
 
+def test_concat_filter_pads_each_segment_to_its_planned_duration():
+    durations = [6.667, 12.542, 8.875]
+    filter_complex, output_label = VideoEditor._build_duration_preserving_concat_filter(
+        3, film_grain_opacity=0, vignette_intensity=0,
+        planned_durations=durations, fps=24,
+    )
+
+    assert "concat=n=3:v=1:a=0" in filter_complex
+    assert "xfade" not in filter_complex
+    # One clip-path chain per input, each pad-then-trimmed to an exact length.
+    assert filter_complex.count("tpad=stop_mode=clone") == 3
+    assert filter_complex.count("setpts=PTS-STARTPTS") == 3
+    assert "[k0]" in filter_complex and "[k2]" in filter_complex
+    # Frame-quantised cumulative boundaries: the sum telescopes to the planned
+    # total within a single frame, instead of one dropped frame per scene.
+    import re
+    ends = [float(m) for m in re.findall(r"trim=start=0:end=([0-9.]+)", filter_complex)]
+    assert len(ends) == 3
+    assert sum(ends) == pytest.approx(sum(durations), abs=1.0 / 24.0)
+    assert output_label == "[concat]"
+
+
+def test_concat_filter_rejects_duration_count_mismatch():
+    with pytest.raises(ValueError, match="planned_durations"):
+        VideoEditor._build_duration_preserving_concat_filter(
+            2, film_grain_opacity=0, vignette_intensity=0,
+            planned_durations=[1.0], fps=24,
+        )
+
+
 def test_body_sync_gate_allows_tolerance_and_rejects_larger_mismatch():
-    editor = VideoEditor({"SCENE_SYNC_TOLERANCE_SEC": 0.15})
+    editor = VideoEditor({"SCENE_SYNC_TOLERANCE_SEC": 0.15,
+                          "LONGFORM_MAX_TRAILING_AUDIO_SEC": 2.0})
 
     # Trailing TTS silence (audio slightly longer than video) is benign.
     editor._assert_body_timeline_sync(10.0, 10.14)
     editor._assert_body_timeline_sync(10.0, 10.5)
 
-    # Missing narration (audio ends before the body) is a real bug → fail.
+    # Extra video frames are harmless: -shortest trims video, never narration.
+    editor._assert_body_timeline_sync(10.3, 10.0)
+
+    # Missing narration beyond the trailing window is a real bug → fail.
     with pytest.raises(RuntimeError, match="Body narration is shorter"):
-        editor._assert_body_timeline_sync(10.3, 10.0)
+        editor._assert_body_timeline_sync(42.5, 40.0)
 
 
 def test_actual_image_fallback_is_resplit_and_gets_distinct_media_requests():

@@ -900,8 +900,22 @@ class DistributedOrchestrator(PipelineOrchestrator):
                 except OSError:
                     shutil.copy2(sp, dst)
                 names.append(name)
+            _batch_ranges = block_ranges[start:start + batch_size]
+            _planned = None
+            if _batch_ranges and len(_batch_ranges) == len(names):
+                def _dur(br) -> float:
+                    if isinstance(br, dict):
+                        return float(br.get("duration", 0) or 0)
+                    try:  # (start, end) legacy tuples in tests/older callers
+                        return float(br[1]) - float(br[0])
+                    except (TypeError, ValueError, IndexError):
+                        return 0.0
+
+                _planned = [_dur(br) for br in _batch_ranges]
             filt, label = ve._build_duration_preserving_concat_filter(
                 len(names), film_grain_opacity=film, vignette_intensity=vig,
+                planned_durations=_planned,
+                fps=float(getattr(ve, "fps", 24) or 24),
             )
             spec = {
                 "inputs": names, "filter_complex": filt, "map_label": label,
