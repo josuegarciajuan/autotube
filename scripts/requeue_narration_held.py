@@ -51,6 +51,11 @@ def _eligible(conn: sqlite3.Connection, days: int = 14) -> list[dict]:
              WHERE status IN ('error','validation_failed')
                AND progress_phase IN ({placeholders})
                AND COALESCE(created_at, '') >= datetime('now', ?)
+               AND id NOT IN (
+                   SELECT video_id FROM generation_jobs
+                    WHERE video_id IS NOT NULL
+                      AND status IN ('running','queued')
+               )
              ORDER BY id""",
         (*RETRYABLE_PHASES, f"-{int(days)} days"),
     ).fetchall()
@@ -131,9 +136,12 @@ def main() -> int:
                     help="seconds between passes in --watch mode")
     ap.add_argument("--days", type=int, default=14,
                     help="only videos created in the last N days (default 14)")
+    ap.add_argument("--max-hours", type=float, default=24.0,
+                    help="stop the watch loop after N hours (default 24)")
     args = ap.parse_args()
 
     total = {"queued": 0, "skipped": 0, "failed": 0}
+    started = time.monotonic()
     while True:
         print(f"[{time.strftime('%H:%M:%S')}] pasada de reencolado")
         result = run_once(dry_run=args.dry_run, days=args.days)
@@ -145,6 +153,9 @@ def main() -> int:
             break
         if result["queued"] == 0 and result["failed"] == 0 and result["skipped"] == 0:
             print("  => nada pendiente — fin")
+            break
+        if (time.monotonic() - started) >= args.max_hours * 3600:
+            print(f"  => límite de {args.max_hours}h alcanzado — fin")
             break
         time.sleep(max(30, args.interval))
     print(f"Total: encolados={total['queued']} "
