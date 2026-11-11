@@ -107,3 +107,29 @@ def trim_trailing_silence(
 def load_trimmed_mp3(path, **kwargs) -> AudioSegment:
     """Load an MP3 and trim its trailing silence (best effort)."""
     return trim_trailing_silence(AudioSegment.from_mp3(str(path)), **kwargs)
+
+
+# ── Render vs narration integrity ────────────────────────────────
+
+def narration_truncated(
+    video_path,
+    audio_path,
+    *,
+    max_trailing_sec: float = 2.0,
+) -> bool:
+    """True when the rendered video is shorter than the TTS narration.
+
+    A video that is more than ``max_trailing_sec`` shorter than its narration
+    would lose the closing words at mux time.  This is the same hard rule as
+    ``api.services.upload_scheduler`` (nov 2026 narration incident), exposed as
+    a shared helper so the coverage/repack/recovery paths never treat such a
+    video as publishable inventory.
+
+    Fail-open on missing files or probe errors: callers already have explicit
+    file-existence gates and must not block on measurement noise.
+    """
+    render = media_duration(video_path)
+    narration = media_duration(audio_path)
+    if render is None or narration is None:
+        return False
+    return render + float(max_trailing_sec) < narration

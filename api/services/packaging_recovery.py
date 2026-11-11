@@ -98,6 +98,21 @@ def _llm_retitle_once(db, row: dict, cfg, dry_run: bool = False) -> bool:
     return False
 
 
+def _render_truncated(row: dict) -> bool:
+    """True when this video's render is shorter than its TTS narration.
+
+    Such a video must not be requeued as uploadable inventory: the upload
+    narration-integrity gate would immediately hold it again (and the
+    validation_failed → requeue cycle would keep poisoning the publish queue).
+    Fail-open on probe errors.
+    """
+    try:
+        from pipeline.audio_utils import narration_truncated
+        return narration_truncated(row.get("video_path"), row.get("audio_path"))
+    except Exception:  # noqa: BLE001 — never block recovery on a probe
+        return False
+
+
 def recover_packaging_held_videos(
     db=None,
     dry_run: bool = False,
@@ -240,6 +255,22 @@ def recover_packaging_held_videos(
                     "reasons": list(result.reasons),
                 })
                 continue
+
+        # Integridad de narración ANTES de reencolar: un render truncado no
+        # vuelve a ser inventario subible. Sin este guard, packaging_recovery lo
+        # devolvía a awaiting_upload (solo validaba título/miniatura) y el gate
+        # de subida lo retenía otra vez → bucle y cobertura falsa.
+        if _render_truncated(row):
+            skipped += 1
+            details.append({
+                "video_id": vid, "slug": slug,
+                "action": "narration_truncated",
+            })
+            logger.warning(
+                "packaging recovery: #%s held — render shorter than narration "
+                "(needs re-render/reassembly)", vid,
+            )
+            continue
 
         if dry_run:
             recovered += 1
