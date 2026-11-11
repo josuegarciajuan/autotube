@@ -271,7 +271,7 @@ def reassemble_video(video_id: int, background_tasks: BackgroundTasks):
     _retryable = ("error", "ready", "assembled", "reassembling")
     if (
         v.get("status") == "validation_failed"
-        and (v.get("progress_phase") or "") in ("post_validate", "render")
+        and (v.get("progress_phase") or "") in ("post_validate", "render", "upload")
     ):
         _retryable = _retryable + ("validation_failed",)
     if v.get("status") not in _retryable:
