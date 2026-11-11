@@ -529,26 +529,42 @@ class VideoEditor:
             if i in completed_scenes:
                 _existing = seg_dir / f"scene_{i:04d}.mp4"
                 if _existing.exists() and _existing.stat().st_size > 0:
-                    segment_paths.append(str(_existing.resolve()))
-                    # Progress for skipped scenes
-                    if video_id is not None and video_id > 0:
-                        _total = len(block_ranges)
-                        _update_interval = max(1, _total // 10)
-                        _total_done = len(completed_scenes)  # already the final count for this scene
-                        if (i == 0 or i == _total - 1
-                                or (i + 1) % _update_interval == 0):
-                            _pct = 60 + int(_total_done / _total * 15)
-                            try:
-                                from database.db_extended import ExtendedDatabase
-                                ExtendedDatabase().update_video(
-                                    video_id,
-                                    progress=_pct,
-                                    progress_phase="video",
-                                )
-                            except Exception:
-                                pass
-                    self._current_clip_idx += 1
-                    continue
+                    # Reject stale black segments from a previous render so a
+                    # reassembly does not resurrect the render-gate failure.
+                    _reuse_black = self._segment_black_fraction(str(_existing))
+                    _max_black_ratio = float(
+                        self.canal.get("SCENE_MAX_BLACK_FRACTION", 0.40) or 0.40
+                    )
+                    if _reuse_black > _max_black_ratio:
+                        self.logger.warning(
+                            "  Checkpoint scene %d is %.0f%% black — re-rendering",
+                            i, _reuse_black * 100,
+                        )
+                        try:
+                            _existing.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                    else:
+                        segment_paths.append(str(_existing.resolve()))
+                        # Progress for skipped scenes
+                        if video_id is not None and video_id > 0:
+                            _total = len(block_ranges)
+                            _update_interval = max(1, _total // 10)
+                            _total_done = len(completed_scenes)  # already the final count for this scene
+                            if (i == 0 or i == _total - 1
+                                    or (i + 1) % _update_interval == 0):
+                                _pct = 60 + int(_total_done / _total * 15)
+                                try:
+                                    from database.db_extended import ExtendedDatabase
+                                    ExtendedDatabase().update_video(
+                                        video_id,
+                                        progress=_pct,
+                                        progress_phase="video",
+                                    )
+                                except Exception:
+                                    pass
+                        self._current_clip_idx += 1
+                        continue
             # Match asset to scene (1:1 with scene_ranges)
             asset = None
             if scene_ranges:
@@ -3856,6 +3872,31 @@ class VideoEditor:
             )
 
             self.logger.debug("  Seg %d rendered: %s", clip_idx, seg_path.name)
+
+            # ── Black-frame guard (video assets only) ────────────────
+            # Stock clips sometimes contain long black runs (e.g. a clip that
+            # flashes black for 2-3 s). Rendering them produces a video that
+            # the post-validate render_gate blocks (#3000, nov 2026: 5.6 s of
+            # black across two body scenes from one such clip). Reject the
+            # segment now so the caller swaps it for a fallback image instead
+            # of wasting the whole render.
+            if str(asset.get("type", "")).lower() == "video":
+                _black_ratio = self._segment_black_fraction(str(seg_path))
+                _max_black_ratio = float(
+                    self.canal.get("SCENE_MAX_BLACK_FRACTION", 0.40) or 0.40
+                )
+                if _black_ratio > _max_black_ratio:
+                    self.logger.warning(
+                        "  Seg %d: %.0f%% black frames (> %.0f%%) in %s — "
+                        "rejecting video asset and using fallback",
+                        clip_idx, _black_ratio * 100, _max_black_ratio * 100,
+                        Path(asset.get("path", "")).name,
+                    )
+                    try:
+                        seg_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    return None
             return str(seg_path)
 
         except Exception as exc:
@@ -3914,6 +3955,36 @@ class VideoEditor:
         except Exception as exc:
             self.logger.warning("Placeholder segment render failed: %s", exc)
             return ""
+
+    def _segment_black_fraction(self, segment_path: str, timeout: int = 90) -> float:
+        """Fraction of a rendered segment that is (near-)black, 0.0 on error.
+
+        Uses ``blackdetect`` (same ``pix_th`` as the post-validate render gate)
+        so the per-scene guard and the final gate agree on what "black" means.
+        """
+        try:
+            result = subprocess.run(
+                [
+                    "ffmpeg", "-hide_banner", "-nostats", "-i", segment_path,
+                    "-vf", "blackdetect=d=0.4:pix_th=0.03",
+                    "-an", "-f", "null", "-",
+                ],
+                capture_output=True, text=True, timeout=timeout,
+            )
+            durations = [
+                float(v) for v in re.findall(
+                    r"black_duration:([0-9]+(?:\.[0-9]+)?)",
+                    result.stderr or "",
+                )
+            ]
+            total = sum(durations)
+            seg_dur = self._probe_video_duration([segment_path])
+            if seg_dur <= 0:
+                return 0.0
+            return max(0.0, min(1.0, total / seg_dur))
+        except Exception as exc:  # noqa: BLE001 — never fail a render on the guard
+            self.logger.debug("Black-frame probe failed for %s: %s", segment_path, exc)
+            return 0.0
 
     def _probe_video_duration(self, segment_paths: list[str]) -> float:
         """Get total duration of rendered segments using ffprobe."""
