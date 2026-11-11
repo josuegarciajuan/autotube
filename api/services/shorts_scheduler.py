@@ -300,6 +300,10 @@ def _safe_publish_at(target_upload_at, channel_slug: str, channel_id: int = None
         return str(target_upload_at)
 
 
+class _PublishTargetTooEarly(RuntimeError):
+    """Rendered far ahead of its franja: defer the slot, never fail the short."""
+
+
 def _wait_until_publish_target(target, *, slot_id: int | None = None,
                                max_wait_hours: float = 8.0,
                                poll_seconds: float = 20.0,
@@ -311,8 +315,10 @@ def _wait_until_publish_target(target, *, slot_id: int | None = None,
     estimated lead, the upload must WAIT until the target instead of publishing
     early (root cause of the "everything at the first franja" incident).
 
-    Raises when the target is absurdly far away: a worker should never be
-    dispatched hours early, and publishing early is worse than failing.
+    Raises ``_PublishTargetTooEarly`` when the target is absurdly far away: a
+    worker should never be dispatched hours early, and publishing early is worse
+    than failing. The caller must REPROGRAM the slot (a planning condition) —
+    not mark the short as failed nor emit a critical system alert.
     Returns the seconds actually waited (0 when the target already passed).
     """
     target_dt = parse_utc(target)
@@ -325,7 +331,7 @@ def _wait_until_publish_target(target, *, slot_id: int | None = None,
     remaining = (target_dt - now).total_seconds()
     max_wait_s = max(0.0, float(max_wait_hours) * 3600.0)
     if max_wait_s and remaining > max_wait_s:
-        raise RuntimeError(
+        raise _PublishTargetTooEarly(
             f"short slot {slot_id or '-'} dispatched too early for its publish "
             f"target {target_dt.isoformat()} (wait {remaining/3600:.1f}h > "
             f"{max_wait_hours:.1f}h)"
@@ -4556,6 +4562,24 @@ async def _dispatch_short_async(slot_id: int, job_id: int, channel_id: int,
             # (sin él, `_row["error_message"]` lanzaba TypeError y el motivo real
             # del fallo se perdía → alerta con "desconocido", bug sep 2026).
             conn.row_factory = sqlite3.Row
+            # ── Defer explícito del worker ─────────────────────────────
+            # Si el worker ya reprogramó el slot (p. ej. renderizado muy por
+            # delante de su franja), NO aplicar la lógica genérica de
+            # retry/cancel: pisaría el `scheduled_at` correcto y lo reintentaría
+            # 10 min después. El job queda 'deferred' a propósito.
+            try:
+                _job_row = conn.execute(
+                    "SELECT status FROM generation_jobs WHERE id = ?", (job_id,),
+                ).fetchone()
+                if _job_row and str(_job_row[0] or "").lower() == "deferred":
+                    conn.close()
+                    logger.info(
+                        "Shorts slot #%d already deferred by worker — respetando reprogramación",
+                        slot_id,
+                    )
+                    return
+            except Exception:
+                pass
             retries = 0
             try:
                 row = conn.execute(
@@ -4864,6 +4888,54 @@ def _native_fail(slot_id: int | None, job_id: int | None, reason: str) -> None:
         logger.warning("[native] short slot #%s job #%s fail: %s", slot_id, job_id, reason)
     except Exception as e:
         logger.warning("Native short fail record failed (slot=%s job=%s): %s",
+                       slot_id, job_id, e)
+
+
+def _native_defer_to_target(slot_id: int | None, job_id: int | None,
+                            target, reason: str) -> None:
+    """Reprogram a native short rendered too early for its franja.
+
+    The worker finished far ahead of the publish target (wrong ``scheduled_at``
+    or a stale replan). This is a planning condition, not a failure: put the
+    slot back to ``pending`` shortly before its target and mark the job
+    ``deferred``. Never mark it failed nor emit a critical system alert.
+    """
+    if not slot_id and not job_id:
+        return
+    try:
+        from datetime import timedelta
+        target_dt = parse_utc(target)
+        if target_dt is not None:
+            new_sched = target_dt - timedelta(hours=1)
+        else:
+            new_sched = datetime.now(UTC) + timedelta(hours=1)
+        sched_txt = new_sched.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        import sqlite3
+        from config.settings import DATABASE_PATH
+        conn = sqlite3.connect(str(DATABASE_PATH), timeout=15)
+        try:
+            if slot_id:
+                conn.execute(
+                    "UPDATE shorts_planned_slots SET status='pending', "
+                    "job_id=NULL, error_message=?, scheduled_at=?, "
+                    "updated_at=CURRENT_TIMESTAMP WHERE id = ?",
+                    (("reprogramado: " + reason)[:300], sched_txt, slot_id),
+                )
+            if job_id:
+                conn.execute(
+                    "UPDATE generation_jobs SET status='deferred', error_msg=? "
+                    "WHERE id = ?",
+                    (("franja no alcanzable — reprogramado: " + reason)[:300], job_id),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        logger.warning(
+            "[native] short slot #%s job #%s reprogramado a %s (franja lejana): %s",
+            slot_id, job_id, sched_txt, reason,
+        )
+    except Exception as e:
+        logger.warning("Native short defer record failed (slot=%s job=%s): %s",
                        slot_id, job_id, e)
 
 
@@ -5977,6 +6049,15 @@ def _dispatch_native_short(channel_id: int, channel_slug: str,
     if _publish_target:
         try:
             _wait_until_publish_target(_publish_target, slot_id=slot_id)
+        except _PublishTargetTooEarly as _wait_exc:
+            # Planning condition (dispatched far too early), not a system
+            # failure: reprogram the slot instead of failing the short with a
+            # critical alert.
+            _native_defer_to_target(
+                slot_id, job_id, _publish_target,
+                f"franja no alcanzable: {str(_wait_exc)[:200]}",
+            )
+            return None
         except RuntimeError as _wait_exc:
             logger.error("[%s] No se publica el short fuera de su franja: %s",
                          channel_slug, _wait_exc)

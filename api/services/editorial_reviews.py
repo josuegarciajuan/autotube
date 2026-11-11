@@ -35,7 +35,20 @@ def ensure_review_schema(db) -> None:
 
 
 def review_config(slug: str) -> dict:
-    raw = getattr(get_channel_config(slug), "EDITORIAL_RECOVERY_REVIEW", {}) or {}
+    """Resolve review rules for *slug*.
+
+    Fail-open: a channel whose Python/DB config cannot be loaded must not abort
+    the whole editorial-reviews loop (nov 2026: an inactive ``canal7`` without a
+    loadable config produced a critical ``error_autotube_editorial_reviews`` on
+    every tick). Returning the defaults also disables reviews for that channel
+    because ``enabled`` defaults to False.
+    """
+    try:
+        cfg = get_channel_config(slug)
+    except Exception as exc:  # noqa: BLE001 — one bad channel must not stop the loop
+        logger.warning("review_config(%s): config unavailable (%s) — using defaults", slug, exc)
+        return dict(DEFAULT_RULES)
+    raw = getattr(cfg, "EDITORIAL_RECOVERY_REVIEW", {}) or {}
     return {**DEFAULT_RULES, **raw}
 
 
@@ -101,7 +114,9 @@ def schedule_daily_audits(db, now=None) -> int:
     day = now.date().isoformat()
     created = 0
     with db._connect() as conn:
-        for channel in conn.execute("SELECT id, slug FROM channels").fetchall():
+        for channel in conn.execute(
+            "SELECT id, slug FROM channels WHERE active = 1"
+        ).fetchall():
             if not review_config(channel["slug"]).get("enabled"):
                 continue
             cur = conn.execute(
